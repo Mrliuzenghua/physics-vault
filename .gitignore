@@ -1,0 +1,46 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+coverage/
+.pnpm-store/
+
+# Local env
+.env
+.env.local
+.env.*.local
+
+# Data runtime outputs
+data/app-db/*.sqlite3
+data/app-db/*.db
+data/assets/questions/*
+data/assets/extracted/*
+data/cache/knowledge/*
+data/cache/ai-tasks/*
+data/exports/*
+data/logs/*
+data/import-batches/*
+
+# Keep directory placeholders
+!data/app-db/.gitkeep
+!data/assets/questions/.gitkeep
+!data/assets/extracted/.gitkeep
+!data/cache/knowledge/.gitkeep
+!data/cache/ai-tasks/.gitkeep
+!data/exports/.gitkeep
+!data/logs/.gitkeep
+!data/import-batches/.gitkeep
