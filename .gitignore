@@ -3,6 +3,10 @@
 Thumbs.db
 .idea/
 .vscode/
+.codex-run/
+.playwright-cli/
+.workbuddy/
+output/
 
 # Python
 __pycache__/
@@ -25,6 +29,7 @@ coverage/
 .env.*.local
 
 # Data runtime outputs
+apps/data/
 data/app-db/*.sqlite3
 data/app-db/*.db
 data/assets/questions/*
@@ -34,6 +39,11 @@ data/cache/ai-tasks/*
 data/exports/*
 data/logs/*
 data/import-batches/*
+data/backups/
+data/*.txt
+*_encoding_check.txt
+encoding_test.txt
+old_encoding_test.txt
 
 # Keep directory placeholders
 !data/app-db/.gitkeep

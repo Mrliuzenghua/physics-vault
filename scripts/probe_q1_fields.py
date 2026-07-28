@@ -1,0 +1,10 @@
+import json, urllib.request
+res = urllib.request.urlopen('http://127.0.0.1:8000/questions/Q00000001')
+data = json.loads(res.read())
+print('--- keys:', list(data.keys()))
+print('--- title:', repr(data.get('title', 'N/A'))[:200])
+print('--- canonical_title:', repr(data.get('canonical_title', 'N/A'))[:200])
+print('--- stem_text preview:', repr(data.get('stem_text', 'N/A'))[:200])
+print('--- options_json:', repr(data.get('options_json', 'N/A'))[:100])
+print('--- answer_text:', repr(data.get('answer_text', 'N/A'))[:100])
+print('--- analysis_text:', repr(data.get('analysis_text', 'N/A'))[:100])
