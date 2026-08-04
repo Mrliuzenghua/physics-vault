@@ -11,6 +11,17 @@ from ..schemas.restore_package import RestorePackageResponse
 from ..services.restore_package import RestorePackageService
 
 
+def _resolve_restore_paths(
+    db_path: str | None,
+    assets_path: str | None,
+) -> tuple[Path, Path, Path]:
+    return (
+        Path(db_path) if db_path else default_db_path(),
+        Path(assets_path) if assets_path else default_assets_dir(),
+        default_backups_dir(),
+    )
+
+
 def build_restore_package_router(
     db_path: str | None = None,
     assets_path: str | None = None,
@@ -29,20 +40,7 @@ def build_restore_package_router(
     )
     async def restore_package(file: UploadFile) -> RestorePackageResponse:
         # ── Resolve paths ──
-        project_root = Path(__file__).resolve().parents[4]
-        vault_root = project_root.parents[1]
-
-        resolved_db = (
-            Path(db_path)
-            if db_path
-            else vault_root / "02-数据库" / "01-db" / "physics_vault.sqlite3"
-        )
-        resolved_assets = (
-            Path(assets_path)
-            if assets_path
-            else vault_root / "02-数据库" / "02-素材"
-        )
-        resolved_backup = vault_root / "02-数据库" / "03-backups"
+        resolved_db, resolved_assets, resolved_backup = _resolve_restore_paths(db_path, assets_path)
 
         # ── Basic validation ──
         if not file.filename or not file.filename.lower().endswith(".zip"):

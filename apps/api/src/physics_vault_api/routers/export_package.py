@@ -12,6 +12,13 @@ from ..paths import default_assets_dir, default_db_path
 from ..services.export_package import ExportPackageService
 
 
+def _resolve_export_paths(db_path: str, assets_path: str) -> tuple[Path, Path]:
+    return (
+        Path(db_path) if db_path else default_db_path(),
+        Path(assets_path) if assets_path else default_assets_dir(),
+    )
+
+
 def build_export_package_router() -> APIRouter:
     router = APIRouter(prefix="/api/system", tags=["system-export"])
 
@@ -34,10 +41,7 @@ def build_export_package_router() -> APIRouter:
         ),
     ) -> FileResponse:
         # ── Resolve paths ──
-        project_root = Path(__file__).resolve().parents[4]
-        vault_root = project_root.parents[1]  # same as legacy_app VAULT_ROOT
-        resolved_db = Path(db_path) if db_path else vault_root / "02-数据库" / "01-db" / "physics_vault.sqlite3"
-        resolved_assets = Path(assets_path) if assets_path else vault_root / "02-数据库" / "02-素材"
+        resolved_db, resolved_assets = _resolve_export_paths(db_path, assets_path)
 
         # ── Build export ──
         try:

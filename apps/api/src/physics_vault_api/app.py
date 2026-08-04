@@ -4,11 +4,13 @@ import hashlib
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 
 from .application import ApplicationContainer
 from .db_schema import initialize_database
+from .legacy_compat import build_legacy_compat_router
 from .paths import project_root
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
@@ -56,6 +58,12 @@ def create_app() -> FastAPI:
         version="0.1.0",
         description="Clean backend workspace for the private high school physics question bank system.",
     )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -82,6 +90,7 @@ def create_app() -> FastAPI:
     container = ApplicationContainer.build()
     for router in container.routers():
         app.include_router(router)
+    app.include_router(build_legacy_compat_router())
 
     return app
 

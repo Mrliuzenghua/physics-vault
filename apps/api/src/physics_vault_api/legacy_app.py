@@ -737,7 +737,7 @@ class FilterFacets(BaseModel):
 
 app = FastAPI(
     title="Physics Vault API",
-    description="FastAPI wrapper around 02-数据库/01-db/physics_vault.sqlite3",
+    description="Compatibility endpoints backed by the configured canonical database.",
     version="0.2.0",
 )
 

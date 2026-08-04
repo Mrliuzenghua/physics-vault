@@ -2,39 +2,33 @@ from __future__ import annotations
 
 import warnings
 
-from fastapi import APIRouter, FastAPI
-
-from physics_vault_api.main import (
-    _covered_route_keys,
-    _iter_concrete_routes,
-    _route_key,
-    create_app,
+from physics_vault_api.app import create_app
+from physics_vault_api.legacy_compat import (
+    LEGACY_COMPAT_ROUTE_KEYS,
+    build_legacy_compat_router,
+    collect_route_method_keys,
 )
+from physics_vault_api.main import create_app as create_main_app
 
 
-def test_covered_route_keys_expands_included_router_wrappers() -> None:
-    router = APIRouter()
-
-    @router.get("/wrapped")
-    def wrapped() -> dict[str, bool]:
-        return {"ok": True}
-
-    app = FastAPI()
-    app.include_router(router)
-
-    assert ("/wrapped", frozenset({"GET"})) in _covered_route_keys(app.routes)
+def test_main_uses_the_single_application_factory() -> None:
+    assert create_main_app is create_app
 
 
-def test_unified_app_keeps_modular_overlap_routes_unique() -> None:
+def test_legacy_compatibility_manifest_matches_router() -> None:
+    router = build_legacy_compat_router()
+
+    assert collect_route_method_keys(router.routes) == set(LEGACY_COMPAT_ROUTE_KEYS)
+
+
+def test_unified_app_has_no_duplicate_path_method_pairs() -> None:
     app = create_app()
-    keys = [_route_key(route) for route in _iter_concrete_routes(app.routes)]
+    keys: list[tuple[str, str]] = []
+    for route in app.routes:
+        keys.extend(collect_route_method_keys([route]))
 
-    for route_key in (
-        ("/search/questions", frozenset({"GET"})),
-        ("/filters/facets", frozenset({"GET"})),
-        ("/review-queue", frozenset({"GET"})),
-    ):
-        assert keys.count(route_key) == 1
+    duplicates = {key for key in keys if keys.count(key) > 1}
+    assert duplicates == set()
 
 
 def test_unified_openapi_has_no_duplicate_operation_warning() -> None:
