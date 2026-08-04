@@ -82,6 +82,25 @@ export const QUESTION_QUALITY_RULE_LABELS: Record<QuestionQualityCode, string> =
 
 const FIGURE_REFERENCE_PATTERN = /!\[fig:([^\]]+)\]/g;
 
+export function collectQuestionFigureReferences(question: Pick<QualityQuestion, 'title' | 'options' | 'answer' | 'analysis'>): Set<string> {
+  const fields = [
+    question.title,
+    ...question.options.map((option) => option.content),
+    question.answer,
+    question.analysis ?? '',
+  ];
+  return new Set(fields.flatMap((value) => Array.from(value.matchAll(FIGURE_REFERENCE_PATTERN), (match) => match[1])));
+}
+
+export function hasQuestionFigureMismatch(question: QualityQuestion): boolean {
+  const referenced = collectQuestionFigureReferences(question);
+  const figureIds = question.figures.map((figure) => figure.fig_uuid).filter(Boolean);
+  const actual = new Set(figureIds);
+  return new Set(figureIds).size !== figureIds.length
+    || question.figures.some((figure) => !referenced.has(figure.fig_uuid))
+    || [...referenced].some((uuid) => !actual.has(uuid));
+}
+
 function normalizedComparableText(value: string): string {
   return value
     .replace(FIGURE_REFERENCE_PATTERN, '')
@@ -158,9 +177,7 @@ export function analyzeQuestionQuality(question: QualityQuestion, context: Quest
     addIssue({ code: 'missing_source', severity: 'suggestion', field: 'source', message: '缺少来源' });
   }
 
-  const referenced = new Set(Array.from(title.matchAll(FIGURE_REFERENCE_PATTERN), (match) => match[1]));
-  const actual = new Set(question.figures.map((figure) => figure.fig_uuid));
-  if (question.figures.some((figure) => !referenced.has(figure.fig_uuid)) || [...referenced].some((uuid) => !actual.has(uuid))) {
+  if (hasQuestionFigureMismatch(question)) {
     addIssue({ code: 'image_issue', severity: 'danger', field: 'figures', message: '图片引用与配图不一致' });
   }
 

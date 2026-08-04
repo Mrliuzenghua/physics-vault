@@ -162,6 +162,16 @@ def test_import_metadata_normalization_extracts_answer_fields() -> None:
     assert normalized["source_raw"] == "2026广东高考物理"
     assert len(normalized["validation_warnings"]) == 3
 
+    experiment = normalize_import_question_metadata(
+        {
+            "question_type": "single_choice",
+            "title": "（1）测量电阻。\n（2）在测绘小灯泡伏安特性曲线实验中：\n①连接电路；②记录数据；③描点作图。",
+            "options": [{"opt": "A", "content": "16.7Ω"}],
+            "answer": "1750",
+        }
+    )
+    assert experiment["question_type"] == "experiment"
+
 
 def test_duplicate_review_tasks_can_be_found_and_terminal_tasks_deleted() -> None:
     repository = InMemoryImportTaskRepository()

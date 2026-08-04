@@ -116,7 +116,7 @@ from ..schemas.import_pipeline import (
     ParseStructuredQuestionsRequest,
 )
 from .pdf_page_ocr import parse_pdf_by_page
-from .question_splitter import ExamQuestionSplitter
+from .question_splitter import ExamQuestionSplitter, is_clearly_experiment_question
 from .math_text import normalize_question_math, normalize_short_inline_display_math
 
 if TYPE_CHECKING:
@@ -550,7 +550,14 @@ def normalize_import_question_metadata(question: dict[str, Any]) -> dict[str, An
 
     question_type = str(normalized.get("question_type") or "calculation").strip()
     compact_answer = re.sub(r"[^A-H]", "", answer.upper())
-    if question_type == "single_choice" and _MULTI_CHOICE_ANSWER_RE.fullmatch(compact_answer):
+    experiment_text = "\n".join([
+        str(normalized.get("title") or ""),
+        *(str(option.get("content") or "") for option in normalized.get("options") or [] if isinstance(option, dict)),
+    ])
+    if question_type in {"single_choice", "multi_choice"} and is_clearly_experiment_question(experiment_text):
+        normalized["question_type"] = "experiment"
+        warnings.append("题干具有明确的多步骤实验结构，题型已修正为实验题。")
+    elif question_type == "single_choice" and _MULTI_CHOICE_ANSWER_RE.fullmatch(compact_answer):
         normalized["question_type"] = "multi_choice"
         warnings.append("答案包含多个选项，题型已从单选修正为多选。")
 

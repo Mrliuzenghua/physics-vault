@@ -75,3 +75,15 @@ test('safe cleanup normalizes whitespace and option labels', () => {
   assert.equal(patch.title, '题干\n\n第二段');
   assert.deepEqual(patch.options.map((item) => item.opt), ['A', 'B']);
 });
+
+test('accepts figure references outside the stem', () => {
+  const figures = [{ fig_uuid: 'fig-analysis', local_path: 'batch/media/a.png' }];
+  for (const patch of [
+    { options: [{ opt: 'A', content: '见图 ![fig:fig-analysis]' }, { opt: 'B', content: '无' }] },
+    { answer: '参考 ![fig:fig-analysis]' },
+    { analysis: '解析图 ![fig:fig-analysis]' },
+  ]) {
+    const issues = analyzeQuestionQuality(question({ figures, ...patch }));
+    assert.equal(issues.some((item) => item.code === 'image_issue'), false);
+  }
+});

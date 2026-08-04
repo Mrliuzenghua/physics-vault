@@ -17,6 +17,7 @@ interface Props {
   showHeader?: boolean;
   showImageManager?: boolean;
   insertFigureRequest?: FigureInsertRequest | null;
+  onFigureInsertHandled?: (requestId: number) => void;
   onRequestImage?: () => void;
 }
 
@@ -113,6 +114,7 @@ export default function QuestionLiveEditor({
   showHeader = true,
   showImageManager = true,
   insertFigureRequest = null,
+  onFigureInsertHandled,
   onRequestImage,
 }: Props) {
   const [draftText, setDraftText] = useState(() => questionToDraft(question));
@@ -211,6 +213,7 @@ export default function QuestionLiveEditor({
             minHeight={compact ? 190 : 520}
             compact={compact}
             insertFigureRequest={insertFigureRequest}
+            onFigureInsertHandled={onFigureInsertHandled}
             onRequestImage={onRequestImage}
           />
           {showImageManager && (compact ? (

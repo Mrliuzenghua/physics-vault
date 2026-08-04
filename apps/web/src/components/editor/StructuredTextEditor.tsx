@@ -47,6 +47,7 @@ interface StructuredTextEditorProps {
   compact?: boolean;
   showToolbar?: boolean;
   insertFigureRequest?: FigureInsertRequest | null;
+  onFigureInsertHandled?: (requestId: number) => void;
   onRequestImage?: () => void;
 }
 
@@ -251,6 +252,7 @@ export default function StructuredTextEditor({
   compact = false,
   showToolbar = true,
   insertFigureRequest = null,
+  onFigureInsertHandled,
   onRequestImage,
 }: StructuredTextEditorProps) {
   const [, refreshToolbar] = useState(0);
@@ -325,7 +327,8 @@ export default function StructuredTextEditor({
       Number(figure.display_scale ?? 60),
       figure.display_align || 'center',
     )).run();
-  }, [editor, insertFigureRequest]);
+    onFigureInsertHandled?.(insertFigureRequest.requestId);
+  }, [editor, insertFigureRequest, onFigureInsertHandled]);
 
   if (!editor) return null;
 

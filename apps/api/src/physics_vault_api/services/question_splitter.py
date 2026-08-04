@@ -70,7 +70,22 @@ _EXPERIMENT_HINTS = ("实验", "探究", "测量", "用图甲装置", "打点计
 _FILL_HINTS = ("填在", "填空", "填入", "应填", "结果为____", "为______")
 
 
+def is_clearly_experiment_question(stem: str) -> bool:
+    """Recognize experiment structure without relying on one broad keyword."""
+    text = re.sub(r"!\[fig:[^\]]+\]", " ", str(stem or ""))
+    strong_phrase = re.search(
+        r"在.{0,24}(?:实验|探究)中|实验(?:步骤|装置|器材|数据|原理)|"
+        r"测绘.{0,20}特性曲线|连接.{0,16}电路|完成.{0,16}实验",
+        text,
+    )
+    steps = re.findall(r"[①②③④⑤⑥⑦⑧⑨⑩]|(?:^|\n)\s*[（(]\d+[)）]", text)
+    return bool(strong_phrase and (len(steps) >= 2 or re.search(r"实验(?:中|步骤|装置|器材|数据|原理)", text)))
+
+
 def _infer_type(stem: str, options: list[dict], answer: str) -> str:
+    experiment_text = "\n".join([stem, *(str(option.get("content") or "") for option in options)])
+    if is_clearly_experiment_question(experiment_text):
+        return "experiment"
     if options:
         letters = re.findall(r"[A-H]", answer.strip())
         # Multiple distinct letters in the answer → multi choice

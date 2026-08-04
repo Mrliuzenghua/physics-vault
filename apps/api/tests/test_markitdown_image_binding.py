@@ -33,3 +33,22 @@ def test_markitdown_fallback_binds_docx_images_to_questions(tmp_path: Path) -> N
         media_assets=assets,
     )
     assert any(question["figures"] for question in parsed["questions"])
+
+
+def test_experiment_with_local_choice_items_keeps_experiment_type() -> None:
+    markdown = """18. （1）用多用电表测量未知电阻。
+A. 16.7Ω
+B. 12.4Ω
+C. 6.2Ω
+
+（2）在“测绘小灯泡的伏安特性曲线”实验中：
+①连接实验电路；
+②测出多组电流和电压；
+③在图中描绘伏安特性曲线。
+
+答案：1750
+"""
+
+    parsed = ExamQuestionSplitter().split(markdown, batch_id="batch-experiment", source="fixture", media_assets=[])
+
+    assert parsed["questions"][0]["question_type"] == "experiment"

@@ -9,6 +9,7 @@ import LatexRenderer from '../components/render/LatexRenderer';
 import {
   analyzeQuestionQuality,
   buildSafeQuestionPatch,
+  collectQuestionFigureReferences,
   findDuplicateQuestionIds,
   QUESTION_QUALITY_RULE_LABELS,
   scoreQuestionQuality,
@@ -229,20 +230,24 @@ function fileUrl(path?: string | null): string | null {
   return `/files/${trimmed.replace(/^\.?\//, '')}`;
 }
 
-function computeFigureIssues(title: string, figures: Figure[]): FigureReferenceIssue[] {
+function computeFigureIssues(question: Pick<ReviewQuestionDraft, 'title' | 'options' | 'answer' | 'analysis' | 'figures'>): FigureReferenceIssue[] {
   const issues: FigureReferenceIssue[] = [];
-  const referenced = new Set<string>();
-  const refPattern = /!\[fig:([^\]]+)\]/g;
-  let match: RegExpExecArray | null;
-  while ((match = refPattern.exec(title)) !== null) referenced.add(match[1]);
-  const actual = new Set(figures.map((figure) => figure.fig_uuid));
-  for (const figure of figures) {
-    if (!referenced.has(figure.fig_uuid)) issues.push({ type: 'unreferenced_figure', message: `图片 ${figure.fig_uuid} 未被题干引用`, figUuid: figure.fig_uuid });
+  const referenced = collectQuestionFigureReferences(question);
+  const actual = new Set(question.figures.map((figure) => figure.fig_uuid));
+  for (const figure of question.figures) {
+    if (!referenced.has(figure.fig_uuid)) issues.push({ type: 'unreferenced_figure', message: `图片 ${figure.fig_uuid} 未被题目内容引用`, figUuid: figure.fig_uuid });
   }
   for (const uuid of referenced) {
     if (!actual.has(uuid)) issues.push({ type: 'missing_figure', message: `题干引用了不存在的图片 ${uuid}`, figUuid: uuid });
   }
   return issues;
+}
+
+function isClearlyExperimentQuestion(content: string): boolean {
+  const text = content.replace(/!\[fig:[^\]]+\]/g, ' ');
+  const hasStrongPhrase = /(在.{0,24}(?:实验|探究)中|实验(?:步骤|装置|器材|数据|原理)|测绘.{0,20}特性曲线|连接.{0,16}电路|完成.{0,16}实验)/.test(text);
+  const stepCount = (text.match(/[①②③④⑤⑥⑦⑧⑨⑩]|(?:^|\n)\s*[（(]\d+[)）]/g) ?? []).length;
+  return hasStrongPhrase && (stepCount >= 2 || /实验(?:中|步骤|装置|器材|数据|原理)/.test(text));
 }
 
 function normalizeOptions(options: unknown): Option[] {
@@ -258,17 +263,25 @@ function normalizeOptions(options: unknown): Option[] {
 function normalizeDraft(raw: Record<string, unknown>, index: number): ReviewQuestionDraft {
   const title = normalizeShortInlineDisplayMath(String(raw.title ?? raw.stem ?? ''));
   const figures = Array.isArray(raw.figures) ? (raw.figures as Figure[]) : [];
+  const options = normalizeOptions(raw.options);
+  const answer = normalizeShortInlineDisplayMath(String(raw.answer ?? ''));
+  const analysis = normalizeShortInlineDisplayMath(String(raw.analysis ?? ''));
+  const suppliedQuestionType = String(raw.question_type || 'calculation');
+  const experimentText = [title, ...options.map((option) => option.content)].join('\n');
+  const questionType = ['single_choice', 'multi_choice'].includes(suppliedQuestionType) && isClearlyExperimentQuestion(experimentText)
+    ? 'experiment'
+    : suppliedQuestionType;
   const rawStatus = String(raw.status ?? raw.review_status ?? 'pending');
   const status: ReviewQuestionDraft['status'] = ['pending', 'modified', 'confirmed', 'discarded'].includes(rawStatus)
     ? rawStatus as ReviewQuestionDraft['status']
     : 'pending';
   return {
     question_id: String(raw.question_id ?? `draft-${index + 1}`),
-    question_type: String(raw.question_type || 'calculation'),
+    question_type: questionType,
     title,
-    options: normalizeOptions(raw.options),
-    answer: normalizeShortInlineDisplayMath(String(raw.answer ?? '')),
-    analysis: normalizeShortInlineDisplayMath(String(raw.analysis ?? '')),
+    options,
+    answer,
+    analysis,
     sub_questions: Array.isArray(raw.sub_questions) ? (raw.sub_questions as SubQuestion[]) : [],
     figures,
     difficulty: raw.difficulty !== null && raw.difficulty !== undefined ? Number(raw.difficulty) : null,
@@ -281,7 +294,7 @@ function normalizeDraft(raw: Record<string, unknown>, index: number): ReviewQues
     source_bbox: normalizeSourceBBox(raw.source_bbox),
     raw_text: raw.raw_text ? normalizeShortInlineDisplayMath(String(raw.raw_text)) : null,
     status,
-    figureIssues: computeFigureIssues(title, figures),
+    figureIssues: computeFigureIssues({ title, options, answer, analysis, figures }),
   };
 }
 
@@ -702,7 +715,7 @@ export default function ReviewWorkbenchPage() {
       updated.answer = normalizeShortInlineDisplayMath(updated.answer);
       updated.analysis = normalizeShortInlineDisplayMath(updated.analysis);
       updated.options = normalizeOptions(updated.options);
-      updated.figureIssues = computeFigureIssues(updated.title, updated.figures);
+      updated.figureIssues = computeFigureIssues(updated);
       if (updated.status === 'pending') updated.status = 'modified';
       next[index] = updated;
       return next;
@@ -1171,6 +1184,7 @@ export default function ReviewWorkbenchPage() {
                 draft={currentDraft}
                 updateDraftAt={(patch) => updateDraftAt(currentIndex, patch)}
                 insertFigureRequest={figureInsertRequest}
+                onFigureInsertHandled={(requestId) => setFigureInsertRequest((current) => current?.requestId === requestId ? null : current)}
                 openImagePicker={() => setImagePickerOpen(true)}
               />
             )}
@@ -1549,10 +1563,11 @@ function TextAreaField({ label, value, onChange }: { label: string; value: strin
   );
 }
 
-function EditorPanel({ draft, updateDraftAt, insertFigureRequest, openImagePicker }: {
+function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsertHandled, openImagePicker }: {
   draft: ReviewQuestionDraft;
   updateDraftAt: (patch: Partial<ReviewQuestionDraft>) => void;
   insertFigureRequest: FigureInsertRequest | null;
+  onFigureInsertHandled: (requestId: number) => void;
   openImagePicker: () => void;
 }) {
   return (
@@ -1576,6 +1591,7 @@ function EditorPanel({ draft, updateDraftAt, insertFigureRequest, openImagePicke
         showHeader={false}
         showImageManager={false}
         insertFigureRequest={insertFigureRequest}
+        onFigureInsertHandled={onFigureInsertHandled}
         onRequestImage={openImagePicker}
       />
       <details className="mt-3 border-t border-[var(--color-border)] pt-3">
