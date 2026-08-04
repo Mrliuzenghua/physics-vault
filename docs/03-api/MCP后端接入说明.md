@@ -96,3 +96,23 @@
 - 增加请求限流、超时重试次数配置化
 - 给 `generate-metadata` 增加 JSON 修复与字段级容错
 - 将 mock provider 换成真实 OCR / VL / LLM 服务
+
+## 8. 题库 MCP 写入边界
+
+题库 MCP 将数据分为两类，避免“所有修改都要审批”和“智能体可以改正文”两个极端：
+
+- **可直接更新的检索元数据**：标签、知识点绑定、难度、题型、规范化来源、年份、地区和考试类型。使用 `batch_update_question_metadata`，无需预演或审核。
+- **可直接维护的目录数据**：使用 `create_knowledge_points` 创建知识点；重复调用会返回已有记录，不会重复创建。
+- **仅供建议的知识点匹配**：使用 `suggest_knowledge_points_for_task`。它只返回已有知识树中的候选，不会虚构知识点编号。
+- **必须人工确认的正式内容**：题干、选项、答案、解析、图片和正式发布状态仍通过导入校对中心处理，智能体不能绕过校对直接覆盖。
+- **原始来源永久保留**：来源规范化只更新检索字段，导入时的原始来源文本保留在 `question_text_index.source_text`。
+
+批量导入支持 `file_filter` 和 `skip_if_duplicate`。重复任务可先通过 `find_duplicate_review_tasks` 查看，再调用 `delete_review_tasks`；真正删除时必须显式传入 `confirmed=true`。
+
+初始化知识点与标签目录：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\maintenance\seed_metadata_catalog.py
+```
+
+脚本可重复执行，只补缺失目录，不修改已有题目内容或自动给题目打标签。

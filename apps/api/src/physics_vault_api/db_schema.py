@@ -208,6 +208,15 @@ CREATE TABLE IF NOT EXISTS knowledge_points (
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS tag_catalog (
+    tag_name          TEXT PRIMARY KEY,
+    category          TEXT NOT NULL,
+    description       TEXT,
+    status            TEXT NOT NULL DEFAULT 'active',
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS question_knowledge_points (
     link_id           TEXT PRIMARY KEY,
     question_id       TEXT NOT NULL,

@@ -492,6 +492,79 @@ def _duplicate_title(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "")).casefold()
 
 
+_ANSWER_DIFFICULTY_RE = re.compile(r"【\s*难度\s*】\s*([01](?:\.\d+)?)", re.IGNORECASE)
+_ANSWER_KNOWLEDGE_RE = re.compile(r"【\s*知识点\s*】\s*([^【\r\n]+)", re.IGNORECASE)
+_MULTI_CHOICE_ANSWER_RE = re.compile(r"^[A-H]{2,}$")
+_PROVINCES = (
+    "北京", "天津", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
+    "上海", "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南",
+    "湖北", "湖南", "广东", "广西", "海南", "重庆", "四川", "贵州",
+    "云南", "西藏", "陕西", "甘肃", "青海", "宁夏", "新疆", "全国",
+)
+
+
+def _normalize_source_name(value: Any) -> str:
+    source = " ".join(str(value or "").split()).strip()
+    if not source or "·" in source:
+        return source
+    year_match = re.search(r"(20\d{2})", source)
+    province = next((item for item in _PROVINCES if item in source), "")
+    if not year_match or not province or "高考" not in source:
+        return source
+    suffix = ""
+    option_match = re.search(r"([（(]?\s*\d{1,2}\s*月选考\s*[)）]?)", source)
+    if option_match:
+        suffix = f"（{re.sub(r'[^0-9月选考]', '', option_match.group(1))}）"
+    return f"{year_match.group(1)}年高考·{province}卷·物理{suffix}"
+
+
+def _difficulty_level(score: float) -> int:
+    if score >= 0.85:
+        return 2
+    if score >= 0.65:
+        return 3
+    if score >= 0.40:
+        return 4
+    return 5
+
+
+def normalize_import_question_metadata(question: dict[str, Any]) -> dict[str, Any]:
+    """Normalize metadata without changing the substantive question content."""
+    normalized = dict(question)
+    warnings = [str(item) for item in normalized.get("validation_warnings") or [] if str(item).strip()]
+    answer = str(normalized.get("answer") or "").strip()
+    difficulty_match = _ANSWER_DIFFICULTY_RE.search(answer)
+    knowledge_match = _ANSWER_KNOWLEDGE_RE.search(answer)
+    if difficulty_match:
+        normalized["difficulty"] = _difficulty_level(float(difficulty_match.group(1)))
+        answer = _ANSWER_DIFFICULTY_RE.sub("", answer)
+        warnings.append("已从答案中提取难度元数据。")
+    if knowledge_match:
+        knowledge = knowledge_match.group(1).strip(" ，,;；。")
+        if knowledge and not str(normalized.get("knowledge_point") or "").strip():
+            normalized["knowledge_point"] = knowledge
+        answer = _ANSWER_KNOWLEDGE_RE.sub("", answer)
+        warnings.append("已从答案中提取知识点元数据。")
+    answer = re.sub(r"\s{2,}", " ", answer).strip(" \t\r\n,，;；")
+    normalized["answer"] = answer
+
+    question_type = str(normalized.get("question_type") or "calculation").strip()
+    compact_answer = re.sub(r"[^A-H]", "", answer.upper())
+    if question_type == "single_choice" and _MULTI_CHOICE_ANSWER_RE.fullmatch(compact_answer):
+        normalized["question_type"] = "multi_choice"
+        warnings.append("答案包含多个选项，题型已从单选修正为多选。")
+
+    original_source = str(normalized.get("source_raw") or normalized.get("source") or "").strip()
+    source = _normalize_source_name(normalized.get("source"))
+    if original_source:
+        normalized["source_raw"] = original_source
+    if source:
+        normalized["source"] = source
+    if warnings:
+        normalized["validation_warnings"] = list(dict.fromkeys(warnings))
+    return normalized
+
+
 def _source_extension(metadata: dict) -> str:
     return Path(str(metadata.get("stored_filename") or metadata.get("original_filename") or "")).suffix.lower().lstrip(".")
 
@@ -503,7 +576,7 @@ def _normalize_ai_questions(raw_questions: Any, batch_id: str, source: str) -> l
         if not isinstance(item, dict):
             continue
         normalized.append(
-            {
+            normalize_import_question_metadata({
                 "question_id": str(item.get("question_id") or f"{batch_id}-q{index:04d}"),
                 "question_type": str(item.get("question_type") or "calculation"),
                 "title": normalize_short_inline_display_math(str(item.get("title") or item.get("stem") or "")),
@@ -524,7 +597,7 @@ def _normalize_ai_questions(raw_questions: Any, batch_id: str, source: str) -> l
                 "source_page": item.get("source_page"),
                 "source_region_id": item.get("source_region_id"),
                 "raw_text": item.get("raw_text"),
-            }
+            })
         )
     return normalized
 
@@ -900,6 +973,35 @@ class ImportPipelineService:
             "created_at": datetime.fromisoformat(created_at),
             "content_version": 1,
         }
+
+    def find_import_batches_by_sha256(self, source_sha256: str) -> list[dict[str, Any]]:
+        """Return prior import batches created from the same file content."""
+        digest = str(source_sha256 or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return []
+        matches: list[dict[str, Any]] = []
+        root = default_import_batches_dir()
+        if not root.exists():
+            return matches
+        for metadata_path in root.glob("batch_*/status.json"):
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if str(metadata.get("source_sha256") or "").lower() != digest:
+                continue
+            matches.append(
+                {
+                    "batch_id": str(metadata.get("batch_id") or metadata_path.parent.name),
+                    "original_filename": str(metadata.get("original_filename") or ""),
+                    "status": str(metadata.get("status") or ""),
+                    "created_at": metadata.get("created_at"),
+                    "updated_at": metadata.get("updated_at"),
+                    "question_count": int(metadata.get("question_count") or 0),
+                }
+            )
+        matches.sort(key=lambda item: (str(item.get("created_at") or ""), item["batch_id"]), reverse=True)
+        return matches
 
     def run_batch_pandoc(
         self,
@@ -1402,6 +1504,12 @@ class ImportPipelineService:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("AI question refinement unavailable, keeping local parse: %s", exc)
 
+            questions = [
+                normalize_import_question_metadata(question)
+                for question in questions
+                if isinstance(question, dict)
+            ]
+
             response = {
                 "task_id": task.task_id,
                 "batch_id": batch_id,
@@ -1655,6 +1763,7 @@ class ImportPipelineService:
         it up without any changes.
         """
         metadata = self._read_batch_metadata(batch_id)
+        questions = [normalize_import_question_metadata(dict(question)) for question in questions]
         current_version = self._content_version(metadata)
         if expected_input_version is not None and expected_input_version != current_version:
             raise HTTPException(
@@ -1763,6 +1872,7 @@ class ImportPipelineService:
             questions: list[dict] = []
         else:
             questions, warnings = _extract_generated_questions(source_text, batch_id, source)
+            questions = [normalize_import_question_metadata(question) for question in questions]
         if not questions and not knowledge_drafts:
             raise HTTPException(status_code=400, detail=warnings[0] if warnings else "没有识别到可送审的试题")
 
@@ -2391,7 +2501,7 @@ class ImportPipelineService:
             result = await self._document_parser.parse_document(mcp_input)
 
             questions = [
-                {
+                normalize_import_question_metadata({
                     "question_id": q.question_id,
                     "question_type": q.question_type,
                     "title": q.title,
@@ -2409,7 +2519,7 @@ class ImportPipelineService:
                     "source_page": q.source_page,
                     "source_region_id": q.source_region_id,
                     "raw_text": q.raw_text,
-                }
+                })
                 for q in result.questions
             ]
 
@@ -2476,6 +2586,108 @@ class ImportPipelineService:
         if not callable(delete):
             raise HTTPException(status_code=503, detail="Review task deletion is not available")
         return bool(delete(task_id))
+
+    def find_duplicate_review_tasks(
+        self,
+        *,
+        task_type: str | None = None,
+        source: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        tasks = self.list_review_tasks(limit=min(max(int(limit or 200), 1), 500))
+        wanted_type = str(task_type or "").strip()
+        wanted_source = " ".join(str(source or "").split()).casefold()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for task in tasks:
+            if wanted_type and task.task_type != wanted_type:
+                continue
+            result = task.result or {}
+            summary = task.input_summary or {}
+            task_source = str(result.get("source") or summary.get("source") or "").strip()
+            if wanted_source and wanted_source not in task_source.casefold():
+                continue
+            batch_id = str(result.get("batch_id") or summary.get("batch_id") or "").strip()
+            source_sha256 = str(summary.get("input_sha256") or "").strip().lower()
+            original_filename = ""
+            if batch_id:
+                try:
+                    metadata = self._read_batch_metadata(batch_id)
+                    source_sha256 = str(metadata.get("source_sha256") or source_sha256).strip().lower()
+                    original_filename = str(metadata.get("original_filename") or "").strip()
+                except HTTPException:
+                    pass
+            fallback = _duplicate_title(original_filename or task_source)
+            key = f"sha256:{source_sha256}" if re.fullmatch(r"[0-9a-f]{64}", source_sha256) else f"source:{fallback}"
+            if not fallback and not source_sha256:
+                continue
+            grouped.setdefault(key, []).append(
+                {
+                    "task_id": task.task_id,
+                    "task_type": task.task_type,
+                    "status": task.status,
+                    "batch_id": batch_id,
+                    "source": task_source,
+                    "original_filename": original_filename,
+                    "source_sha256": source_sha256 or None,
+                    "question_count": int(result.get("question_count") or 0),
+                    "created_at": task.created_at.isoformat(),
+                    "updated_at": task.updated_at.isoformat(),
+                }
+            )
+        groups: list[dict[str, Any]] = []
+        for key, items in grouped.items():
+            if len(items) < 2:
+                continue
+            items.sort(key=lambda item: (item["updated_at"], item["task_id"]), reverse=True)
+            groups.append(
+                {
+                    "duplicate_key": key,
+                    "keep": items[0],
+                    "delete_candidates": items[1:],
+                    "count": len(items),
+                }
+            )
+        groups.sort(key=lambda item: (-item["count"], item["duplicate_key"]))
+        return {
+            "ok": True,
+            "groups": groups,
+            "duplicate_group_count": len(groups),
+            "delete_candidate_count": sum(len(item["delete_candidates"]) for item in groups),
+        }
+
+    def delete_review_tasks(self, task_ids: list[str]) -> dict[str, Any]:
+        normalized = list(dict.fromkeys(str(item).strip() for item in task_ids if str(item).strip()))
+        deleted: list[str] = []
+        skipped: list[dict[str, str]] = []
+        failed: list[dict[str, str]] = []
+        review_task_ids = {task.task_id for task in self.list_review_tasks(limit=500)}
+        for task_id in normalized:
+            try:
+                if task_id not in review_task_ids:
+                    failed.append({"task_id": task_id, "error": "该任务不是可删除的审核任务。"})
+                    continue
+                task = self.get_task(task_id)
+                if task.status in {"pending", "running", "retrying", "cancel_requested"}:
+                    skipped.append({"task_id": task_id, "reason": f"任务仍处于 {task.status} 状态。"})
+                    continue
+                if self.delete_review_task(task_id):
+                    deleted.append(task_id)
+                else:
+                    failed.append({"task_id": task_id, "error": "任务未删除。"})
+            except HTTPException as exc:
+                failed.append({"task_id": task_id, "error": str(exc.detail)})
+        return {
+            "ok": not failed,
+            "deleted": deleted,
+            "skipped": skipped,
+            "failed": failed,
+            "summary": {
+                "received": len(normalized),
+                "deleted": len(deleted),
+                "skipped": len(skipped),
+                "failed": len(failed),
+            },
+        }
 
     def _sync_review_workspace_context_tasks(self) -> None:
         list_tasks = getattr(self._task_repo, "list", None)

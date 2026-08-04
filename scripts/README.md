@@ -11,4 +11,11 @@
 3. `physics_vault_mcp_server.py`
    对外提供物理题库 MCP 工具的 stdio 服务入口
 
+常用维护命令：
+
+```powershell
+# 非破坏性补齐标准知识树和标签目录，可重复执行
+.\.venv\Scripts\python.exe scripts\maintenance\seed_metadata_catalog.py
+```
+
 根目录不保存绑定固定题号、个人路径或本地端口的一次性排障脚本。可重复的自动检查应写入 `apps/api/tests/`。

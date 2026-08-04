@@ -221,6 +221,7 @@ class QuestionWriteService:
             knowledge_point=str(raw.get("knowledge_point") or "").strip(),
             tags=[str(t) for t in tags if t],
             source=str(raw.get("source") or "").strip(),
+            source_raw=str(raw.get("source_raw") or raw.get("source") or "").strip(),
             import_batch_id=raw.get("import_batch_id"),
             source_page=source_page,
             source_region_id=str(raw.get("source_region_id") or "").strip() or None,
@@ -303,7 +304,8 @@ class QuestionWriteService:
             "primary_question_no": None,
             "source_id": None,
             "source_region_id": record.source_region_id,
-            "source_text": record.source or None,
+            "source": record.source or None,
+            "source_text": record.source_raw or record.source or None,
             "source_page": record.source_page,
             "vault_markdown_path": f"import/{record.question_id}.md",
         }

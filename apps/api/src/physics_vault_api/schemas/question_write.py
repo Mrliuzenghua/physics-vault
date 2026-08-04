@@ -31,6 +31,7 @@ class QuestionRecord(BaseModel):
     knowledge_point: str = Field(default="")
     tags: list[str] = Field(default_factory=list)
     source: str = Field(default="")
+    source_raw: str = Field(default="")
     import_batch_id: str | None = None
     source_page: int | None = None
     source_region_id: str | None = None

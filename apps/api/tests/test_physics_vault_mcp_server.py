@@ -56,6 +56,8 @@ EXPECTED_MCP_TOOLS = {
     "list_knowledge_tree",
     "search_knowledge_points",
     "get_question_knowledge_points",
+    "create_knowledge_points",
+    "batch_update_question_metadata",
     "database_boundary_report",
     "database_health_report",
     "list_review_queue",
@@ -63,6 +65,9 @@ EXPECTED_MCP_TOOLS = {
     "list_review_tasks",
     "get_review_task",
     "get_review_task_full",
+    "find_duplicate_review_tasks",
+    "delete_review_tasks",
+    "suggest_knowledge_points_for_task",
     "clean_review_task_latex",
     "update_review_task_draft",
     "list_question_tags",
@@ -114,6 +119,34 @@ def test_mcp_argument_errors_use_stable_shape(monkeypatch) -> None:
     missing = module.get_composition_workbench("missing-draft")
     assert missing["error_info"]["code"] == "DRAFT_NOT_FOUND"
     assert missing["draft_id"] == "missing-draft"
+
+
+def test_word_folder_filter_and_duplicate_preview(tmp_path, monkeypatch) -> None:
+    module = _load_mcp_server()
+    (tmp_path / "2026浙江卷.docx").write_bytes(b"same word content")
+    (tmp_path / "2026广东卷.docx").write_bytes(b"other word content")
+
+    class ImportService:
+        def find_import_batches_by_sha256(self, digest):
+            return [{"batch_id": "batch-old", "status": "completed"}]
+
+    monkeypatch.setattr(module, "_import_service", lambda: ImportService())
+
+    preview = module.import_word_folder_to_review(
+        str(tmp_path),
+        file_filter="*浙江*",
+        skip_if_duplicate=True,
+    )
+    reimport = module.import_word_folder_to_review(
+        str(tmp_path),
+        file_filter="*浙江*",
+        skip_if_duplicate=False,
+    )
+
+    assert preview["file_count"] == 0
+    assert preview["duplicates"][0]["action"] == "skipped"
+    assert reimport["file_count"] == 1
+    assert reimport["duplicates"][0]["action"] == "reimport"
 
 
 def _seed_standard_db(path: Path) -> None:

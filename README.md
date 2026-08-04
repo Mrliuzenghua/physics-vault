@@ -39,3 +39,15 @@ npm.cmd test
 npm.cmd run lint
 npm.cmd run build
 ```
+
+## 元数据目录
+
+MCP 允许智能体直接维护标签、知识点、难度、题型和规范化来源，但不能修改正式题目的题干、答案、解析、图片或发布状态。
+
+首次部署或需要补齐目录时，可重复运行下面的非破坏性命令。它只新增缺失知识点和标签目录，不会清空题库或给题目强制分配标签：
+
+当前种子目录按《普通高中物理课程标准（2017年版2020年修订）》和人教版普通高中物理教材组织。
+
+```powershell
+.\.venv\Scripts\python.exe scripts\maintenance\seed_metadata_catalog.py
+```

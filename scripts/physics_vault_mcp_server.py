@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -39,6 +41,7 @@ from physics_vault_api.services.document_pipeline import (  # noqa: E402
 from physics_vault_api.services.lesson_exports import LessonExportService  # noqa: E402
 from physics_vault_api.services.ai_assistant import _candidate_query_tokens  # noqa: E402
 from physics_vault_api.services.change_audit import ChangeAuditService  # noqa: E402
+from physics_vault_api.services.metadata_management import MetadataManagementService  # noqa: E402
 from physics_vault_api.services.question_search import QuestionSearchService  # noqa: E402
 from physics_vault_api.services.paper_drafts import PaperDraftService  # noqa: E402
 from physics_vault_api.services.similar_questions import SimilarQuestionsService  # noqa: E402
@@ -50,7 +53,7 @@ server = MCPServer(
     version="0.2.0",
     instructions=(
         "Use these tools to inspect the local high-school physics question bank. "
-        "Canonical database tools are read-only by default. Review-center tools write only "
+        "Canonical question content is read-only; searchable metadata may be maintained directly. Review-center tools write only "
         "to the Review DB. submit_ai_generated_review writes review drafts only. "
         "If the user says review center, submitted-for-review, sent for review, draft task, "
         "or asks to clean LaTeX/formulas in reviewed/submitted items, do NOT start with "
@@ -68,10 +71,11 @@ server = MCPServer(
         "canonical question references, standard knowledge-point cards, teaching text/title blocks, or "
         "change their order. They never alter a canonical question or knowledge point. This is a free-form "
         "workspace: execute directly when the teacher explicitly requests an edit; use dry_run=true only when a preview is requested. "
-        "batch_replace_question_tags, return_question_to_review, and "
-        "batch_replace_question_knowledge_points are controlled canonical write paths: always run "
-        "dry_run=true first, explain the diff and impact, and only use dry_run=false after explicit "
-        "human confirmation. Applied changes are written to the canonical database with an audit batch. "
+        "Use create_knowledge_points and batch_update_question_metadata directly to normalize tags, "
+        "knowledge bindings, difficulty, question type, and normalized source without asking for approval. "
+        "These metadata tools cannot change stems, options, answers, analysis, images, or publication status. "
+        "return_question_to_review remains a controlled canonical content workflow and requires preview plus confirmation. "
+        "Legacy batch_replace_question_tags and batch_replace_question_knowledge_points remain available for compatibility. "
         "Use list_change_batches/get_change_batch/rollback_change_batch to inspect or roll back audited changes. "
         "Task status tools are read-only. retry_job and cancel_job require confirmed=true after explicit human confirmation. "
         "Task write tools call the application task service and record source, session, operator, and an audit id."
@@ -109,6 +113,10 @@ def _change_audit_service() -> ChangeAuditService:
         db_path=_formal_db_path(),
         review_db_path=_review_db_path(),
     )
+
+
+def _metadata_management_service() -> MetadataManagementService:
+    return MetadataManagementService(_formal_db_path())
 
 
 def _formal_db_path() -> Path:
@@ -986,6 +994,27 @@ def get_question_knowledge_points(question_id: str) -> dict[str, Any]:
 
 
 @server.tool()
+def create_knowledge_points(points: list[dict[str, Any]]) -> dict[str, Any]:
+    """直接新增正式知识树节点。知识目录是智能体可自治维护的元数据，不需要审核。"""
+    try:
+        return _metadata_management_service().create_knowledge_points(points)
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
+
+
+@server.tool()
+def batch_update_question_metadata(
+    updates: list[dict[str, Any]],
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """直接统一标签、知识点、难度、题型和规范化来源；不能修改题目正文或发布状态。"""
+    try:
+        return _metadata_management_service().batch_update_question_metadata(updates, reason=reason)
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
+
+
+@server.tool()
 def database_boundary_report() -> dict[str, Any]:
     """说明 MCP 当前正式库/审核库边界、各库职责、遗留污染和推荐工具路由。只读。"""
     formal_path = _formal_db_path()
@@ -1076,7 +1105,7 @@ def database_boundary_report() -> dict[str, Any]:
         "database_boundary": {
             "canonical_database": {
                 "path": str(formal_path),
-                "role": "标准/正式题库。默认只读；只有标签替换、知识目录绑定替换、打回校对、审计回滚可受控写入。",
+                "role": "标准/正式题库。题目正文只读；标签、知识点、难度、题型和规范化来源可由智能体直接维护。",
                 "counts": formal_counts,
             },
             "review_database": {
@@ -1092,7 +1121,8 @@ def database_boundary_report() -> dict[str, Any]:
         "routing": {
             "review_center_first": ["list_review_tasks", "get_review_task", "get_review_task_full", "clean_review_task_latex", "update_review_task_draft"],
             "canonical_read_only": ["search_questions", "get_questions_by_ids", "list_knowledge_tree", "search_knowledge_points", "get_question_knowledge_points", "find_similar_questions"],
-            "canonical_controlled_write": ["batch_replace_question_tags", "batch_replace_question_knowledge_points", "return_question_to_review", "rollback_change_batch"],
+            "canonical_metadata_write": ["create_knowledge_points", "batch_update_question_metadata"],
+            "canonical_controlled_content_workflow": ["return_question_to_review", "rollback_change_batch"],
             "rule": "用户说送审、校对中心、草稿、审核任务、那 15 道题时，先走审核库工具；用户明确说正式题库/已入库/组卷找题时，才走正式库检索。",
         },
         "issues": issues,
@@ -1349,6 +1379,8 @@ def import_word_folder_to_review(
     use_ai_cleanup: bool = True,
     max_files: int = 20,
     max_file_size_mb: int = 30,
+    file_filter: str | None = None,
+    skip_if_duplicate: bool = True,
 ) -> dict[str, Any]:
     """批量导入指定文件夹中的 Word 文件到审核库。
 
@@ -1368,16 +1400,33 @@ def import_word_folder_to_review(
     if not folder.is_dir():
         return {"ok": False, "error": f"路径不是文件夹：{folder}"}
 
+    pattern = str(file_filter or "").strip()
+    if any(separator in pattern for separator in ("/", "\\")) or len(pattern) > 120:
+        return _tool_error(
+            "INVALID_ARGUMENT",
+            "file_filter 只能是文件名通配符，不能包含目录分隔符，长度不能超过 120。",
+            field="file_filter",
+        )
+
     file_limit = min(max(int(max_files or 20), 1), 50)
     size_limit_bytes = min(max(int(max_file_size_mb or 30), 1), 100) * 1024 * 1024
     iterator = folder.rglob("*") if recursive else folder.glob("*")
     candidates = sorted(
-        (item for item in iterator if item.is_file() and item.suffix.lower() in {".doc", ".docx"}),
+        (
+            item
+            for item in iterator
+            if item.is_file()
+            and item.suffix.lower() in {".doc", ".docx"}
+            and (not pattern or fnmatch.fnmatchcase(item.name.casefold(), pattern.casefold()))
+        ),
         key=lambda item: (str(item.relative_to(folder)).casefold(), str(item)),
     )
 
     eligible: list[Path] = []
     skipped: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
+    file_digests: dict[Path, str] = {}
+    service = _import_service()
     for item in candidates:
         size = item.stat().st_size
         relative = str(item.relative_to(folder))
@@ -1387,10 +1436,28 @@ def import_word_folder_to_review(
         if len(eligible) >= file_limit:
             skipped.append({"file": relative, "reason": f"超过单次 {file_limit} 个文件限制", "size_bytes": size})
             continue
+        digest = hashlib.sha256(item.read_bytes()).hexdigest()
+        file_digests[item] = digest
+        matches = service.find_import_batches_by_sha256(digest)
+        if matches:
+            duplicate = {
+                "file": relative,
+                "size_bytes": size,
+                "source_sha256": digest,
+                "existing_batches": matches,
+                "action": "skipped" if skip_if_duplicate else "reimport",
+            }
+            duplicates.append(duplicate)
+            if skip_if_duplicate:
+                continue
         eligible.append(item)
 
     plan = [
-        {"file": str(item.relative_to(folder)), "size_bytes": item.stat().st_size}
+        {
+            "file": str(item.relative_to(folder)),
+            "size_bytes": item.stat().st_size,
+            "source_sha256": file_digests.get(item),
+        }
         for item in eligible
     ]
     base = {
@@ -1399,9 +1466,12 @@ def import_word_folder_to_review(
         "canonical_database_written": False,
         "folder_path": str(folder),
         "recursive": bool(recursive),
+        "file_filter": pattern or None,
+        "skip_if_duplicate": bool(skip_if_duplicate),
         "dry_run": bool(dry_run),
         "file_count": len(eligible),
         "files": plan,
+        "duplicates": duplicates,
         "skipped": skipped,
         "next_step": "确认文件清单后，以相同参数调用 dry_run=false 执行导入。",
     }
@@ -1410,7 +1480,6 @@ def import_word_folder_to_review(
     if not eligible:
         return {**base, "ok": False, "error": "未找到可导入的 .doc 或 .docx 文件。"}
 
-    service = _import_service()
     imported: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     for item in eligible:
@@ -1451,6 +1520,7 @@ def import_word_folder_to_review(
         "dry_run": False,
         "imported": imported,
         "failed": failed,
+        "duplicate_count": len(duplicates),
         "imported_count": len(imported),
         "failed_count": len(failed),
         "next_step": "使用 list_review_tasks 查看已创建的审核任务；需要专项公式规范化时再调用 clean_review_task_latex。",
@@ -1670,6 +1740,70 @@ def get_review_task_full(
 
 
 @server.tool()
+def find_duplicate_review_tasks(
+    task_type: str | None = None,
+    source: str | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """按文件哈希或来源检测审核工作区中的重复任务。只读。"""
+    try:
+        return _import_service().find_duplicate_review_tasks(
+            task_type=task_type,
+            source=source,
+            limit=limit,
+        )
+    except (ValueError, sqlite3.Error) as exc:
+        return _tool_error("REVIEW_TASK_QUERY_ERROR", str(exc), retryable=True)
+
+
+@server.tool()
+def delete_review_tasks(task_ids: list[str], confirmed: bool = False) -> dict[str, Any]:
+    """批量删除已结束的审核任务；confirmed=false 时只返回预览。"""
+    normalized = list(dict.fromkeys(str(item).strip() for item in task_ids if str(item).strip()))
+    if not normalized:
+        return _tool_error("INVALID_ARGUMENT", "task_ids 至少需要一个任务号。", field="task_ids")
+    if len(normalized) > 50:
+        return _tool_error("LIMIT_EXCEEDED", "一次最多删除 50 个审核任务。", field="task_ids")
+    previews = []
+    for task_id in normalized:
+        result = get_review_task(task_id, content_limit=1)
+        if result.get("ok"):
+            previews.append(result["task"])
+        else:
+            previews.append({"task_id": task_id, "status": result.get("status") or "missing", "error": result.get("error")})
+    if not confirmed:
+        return {
+            "ok": True,
+            "confirmed": False,
+            "items": previews,
+            "requires_confirmation": True,
+            "message": "当前仅预览；确认任务清单后，以 confirmed=true 再次调用。",
+        }
+    result = _import_service().delete_review_tasks(normalized)
+    result.update({"confirmed": True, "preview": previews})
+    return result
+
+
+@server.tool()
+def suggest_knowledge_points_for_task(
+    task_id: str,
+    question_ids: list[str] | None = None,
+    max_suggestions: int = 3,
+) -> dict[str, Any]:
+    """为审核任务中的题目推荐正式知识树节点；只推荐，不自动修改草稿。"""
+    full = get_review_task_full(task_id, question_ids=question_ids, include_knowledge=False)
+    if not full.get("ok"):
+        return full
+    questions = full.get("questions") if isinstance(full.get("questions"), list) else []
+    result = _metadata_management_service().suggest_knowledge_points(
+        [item for item in questions if isinstance(item, dict)],
+        max_suggestions=max_suggestions,
+    )
+    result["task_id"] = str(task_id).strip()
+    return result
+
+
+@server.tool()
 def clean_review_task_latex(
     task_id: str,
     question_ids: list[str] | None = None,
@@ -1768,6 +1902,22 @@ def update_review_task_draft(
         unknown = sorted(set(patch) - allowed_fields)
         if unknown:
             return {"ok": False, "error": f"{qid} 包含不允许修改的字段：{', '.join(unknown)}。"}
+        if "question_type" in patch and patch["question_type"] not in {
+            "single_choice", "multi_choice", "fill", "experiment", "calculation",
+        }:
+            return _tool_error(
+                "INVALID_ARGUMENT",
+                f"{qid} 的 question_type 不受支持：{patch['question_type']}。",
+                field="updates.question_type",
+            )
+        if "difficulty" in patch and patch["difficulty"] is not None:
+            try:
+                difficulty = int(patch["difficulty"])
+            except (TypeError, ValueError):
+                return _tool_error("INVALID_ARGUMENT", f"{qid} 的 difficulty 必须是 1 到 5。", field="updates.difficulty")
+            if difficulty < 1 or difficulty > 5:
+                return _tool_error("INVALID_ARGUMENT", f"{qid} 的 difficulty 必须是 1 到 5。", field="updates.difficulty")
+            patch["difficulty"] = difficulty
         normalized.append({"question_id": qid, "patch": patch})
 
     updated_questions = [dict(item) if isinstance(item, dict) else item for item in full.get("questions", [])]
@@ -1830,8 +1980,32 @@ def list_question_tags(
                 "source": row["source_text"] or row["source"],
             }
         )
+    catalog: list[dict[str, Any]] = []
+    with _connect_formal_read_db() as conn:
+        if _table_exists(conn, "tag_catalog"):
+            catalog_rows = conn.execute(
+                """
+                SELECT tag_name, category, description
+                FROM tag_catalog
+                WHERE status = 'active'
+                  AND (? = '' OR tag_name LIKE '%' || ? || '%' OR category LIKE '%' || ? || '%')
+                ORDER BY category, tag_name
+                LIMIT 500
+                """,
+                (str(query or "").strip(), str(query or "").strip(), str(query or "").strip()),
+            ).fetchall()
+            catalog = [
+                {
+                    "tag": row["tag_name"],
+                    "category": row["category"],
+                    "description": row["description"],
+                    "count": tag_counts.get(row["tag_name"], 0),
+                }
+                for row in catalog_rows
+            ]
     return {
         "items": items,
+        "catalog": catalog,
         "tag_counts": [
             {"tag": tag, "count": count}
             for tag, count in sorted(tag_counts.items(), key=lambda item: (-item[1], item[0]))
