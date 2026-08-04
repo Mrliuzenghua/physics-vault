@@ -4,10 +4,15 @@ import json
 import sqlite3
 import uuid
 from contextlib import closing
+from datetime import datetime, timezone
 from typing import Any
 
 from ..database import connect_db
 from ..paths import default_db_path
+
+
+class PaperDraftConflictError(ValueError):
+    """The stored draft changed after the caller last read it."""
 
 
 def _json_loads(value: str | None, fallback: Any) -> Any:
@@ -95,6 +100,7 @@ class PaperDraftRepository:
         self,
         *,
         draft_id: str | None,
+        base_updated_at: str | None,
         title: str,
         subtitle: str | None,
         source: str,
@@ -107,7 +113,22 @@ class PaperDraftRepository:
         total_score: float,
     ) -> dict[str, Any]:
         resolved_id = draft_id or _make_id("draft")
+        revision_time = f"{datetime.now(timezone.utc).isoformat(timespec='microseconds')}-{uuid.uuid4().hex[:6]}"
         with closing(self._get_connection()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT updated_at FROM paper_drafts WHERE draft_id = ?",
+                (resolved_id,),
+            ).fetchone()
+            if (
+                current is not None
+                and base_updated_at is not None
+                and str(current["updated_at"] or "") != str(base_updated_at)
+            ):
+                conn.rollback()
+                raise PaperDraftConflictError(
+                    "组卷草稿已被其他操作更新，请刷新后重试。"
+                )
             conn.execute(
                 """
                 INSERT INTO paper_drafts (
@@ -115,7 +136,7 @@ class PaperDraftRepository:
                     item_count, total_score, metadata_json, quality_report_json,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(draft_id) DO UPDATE SET
                     title = excluded.title,
                     subtitle = excluded.subtitle,
@@ -126,7 +147,7 @@ class PaperDraftRepository:
                     total_score = excluded.total_score,
                     metadata_json = excluded.metadata_json,
                     quality_report_json = excluded.quality_report_json,
-                    updated_at = datetime('now')
+                    updated_at = excluded.updated_at
                 """,
                 (
                     resolved_id,
@@ -139,6 +160,8 @@ class PaperDraftRepository:
                     total_score,
                     _json_dumps(metadata),
                     _json_dumps(quality_report),
+                    revision_time,
+                    revision_time,
                 ),
             )
             conn.execute("DELETE FROM paper_draft_items WHERE draft_id = ?", (resolved_id,))
@@ -150,7 +173,9 @@ class PaperDraftRepository:
                         title, section_title, score, payload_json,
                         created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                     """,
                     (
                         item["id"],
@@ -204,4 +229,3 @@ def _item_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "score": row["score"],
         "payload": _json_loads(row["payload_json"], {}),
     }
-

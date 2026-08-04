@@ -21,6 +21,10 @@ class PaperDraftItem(BaseModel):
 
 class PaperDraftUpsertRequest(BaseModel):
     id: str | None = None
+    base_updated_at: str | None = Field(
+        default=None,
+        description="Last server version seen by the caller; stale saves are rejected.",
+    )
     title: str = Field(default="未命名试卷", min_length=1, max_length=200)
     subtitle: str | None = Field(default=None, max_length=500)
     source: str = Field(default="compose", max_length=40)
@@ -51,4 +55,3 @@ class PaperDraftResponse(PaperDraftSummary):
 
 class PaperDraftListResponse(BaseModel):
     items: list[PaperDraftSummary] = Field(default_factory=list)
-

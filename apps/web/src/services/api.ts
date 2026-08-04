@@ -173,6 +173,7 @@ export async function savePaperDraft(
   pkg: LessonPackage,
   qualityReport: Record<string, unknown> = {},
   documentRevision = 0,
+  baseUpdatedAt: string | null = null,
 ): Promise<PaperDraft> {
   const questionMap = new Map(pkg.questions.map((question) => [question.question_id, question]));
   const textMap = new Map(pkg.textBlocks.map((block) => [block.id, block]));
@@ -227,6 +228,7 @@ export async function savePaperDraft(
     method: 'POST',
     body: JSON.stringify({
       id: pkg.id,
+      base_updated_at: baseUpdatedAt,
       title: pkg.title,
       subtitle: pkg.subtitle,
       source: pkg.source,

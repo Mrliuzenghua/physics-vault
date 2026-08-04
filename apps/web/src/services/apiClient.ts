@@ -2,6 +2,16 @@ import { extractErrorMessage } from '../utils/error.ts';
 
 export const API_BASE = '';
 
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 export async function requestResponse(url: string, options?: RequestInit): Promise<Response> {
   const headers = new Headers(options?.headers);
   if (typeof options?.body === 'string' && !headers.has('Content-Type')) {
@@ -18,7 +28,7 @@ export async function requestResponse(url: string, options?: RequestInit): Promi
       .json()
       .catch(() => ({ detail: res.statusText || `HTTP ${res.status}` }));
     const msg = extractErrorMessage(payload, `HTTP ${res.status}`);
-    throw new Error(msg);
+    throw new ApiError(msg, res.status);
   }
 
   return res;

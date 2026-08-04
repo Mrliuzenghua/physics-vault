@@ -24,6 +24,7 @@ import { Spinner } from '../components/ui/Spinner';
 import { useBasket } from '../hooks/useBasket';
 import { useComposeWorkbenchStore } from '../stores/useComposeWorkbenchStore';
 import { fetchLatestPaperDraft, fetchQuestion, fetchQuestionsByIds, savePaperDraft, searchQuestions } from '../services/api';
+import { ApiError } from '../services/apiClient';
 import {
   buildComposeDiagnostics,
   formatQuestionType,
@@ -196,11 +197,13 @@ export default function ComposePage() {
   const incomingTemplateConfig = routeState?.templateConfig || incomingPkg?.config;
   const { items: basketItems, remove: removeFromBasket, clear: clearBasket } = useBasket();
   const sessionIdRef = useRef(`lesson-current-${Date.now()}`);
+  const serverDraftUpdatedAtRef = useRef<string | null>(null);
   const documentCanvasRef = useRef<HTMLDivElement | null>(null);
 
   const composeItems = useComposeWorkbenchStore((state) => state.items);
   const selectedIndex = useComposeWorkbenchStore((state) => state.selectedIndex);
   const documentRevision = useComposeWorkbenchStore((state) => state.revision);
+  const savedRevision = useComposeWorkbenchStore((state) => state.savedRevision);
   const canUndoItems = useComposeWorkbenchStore((state) => state.past.length > 0);
   const canRedoItems = useComposeWorkbenchStore((state) => state.future.length > 0);
   const loadComposeItems = useComposeWorkbenchStore((state) => state.loadItems);
@@ -306,6 +309,21 @@ export default function ComposePage() {
     updateSettings('slideTemplate', (current) => ({ ...current, slideTemplate: typeof action === 'function' ? action(current.slideTemplate) : action }));
   }, [updateSettings]);
 
+  const hydrateServerDraft = useCallback(async (draft: PaperDraft) => {
+    const questionIds = draft.items
+      .filter((item) => item.type === 'question' && item.question_id)
+      .map((item) => item.question_id as string);
+    const questions = await fetchQuestionsByIds(questionIds);
+    const loaded = buildComposeItemsFromPaperDraft(draft, questions);
+    sessionIdRef.current = draft.id;
+    serverDraftUpdatedAtRef.current = draft.updated_at;
+    setLessonTitle(draft.title);
+    setLessonSubtitle(draft.subtitle || '知识点、文本说明与试题自由拼接');
+    loadComposeItems(loaded);
+    setLoading(false);
+    setDraftSaveState('saved');
+  }, [loadComposeItems, setLessonSubtitle, setLessonTitle]);
+
   const undoSettings = useCallback(() => {
     const previous = settingsPastRef.current.at(-1);
     if (!previous) return;
@@ -382,20 +400,8 @@ export default function ComposePage() {
             queryFn: fetchLatestPaperDraft,
           });
           if (draft && draft.items.length > 0) {
-            const questionIds = draft.items
-              .filter((item) => item.type === 'question' && item.question_id)
-              .map((item) => item.question_id as string);
-            const questions = await queryClient.fetchQuery({
-              queryKey: ['questions', 'batch', [...questionIds].sort()],
-              queryFn: () => fetchQuestionsByIds(questionIds),
-            });
-            const loaded = buildComposeItemsFromPaperDraft(draft, questions);
             if (!cancelled) {
-              sessionIdRef.current = draft.id;
-              setLessonTitle(draft.title);
-              setLessonSubtitle(draft.subtitle || '知识点、文本说明与试题自由拼接');
-              loadComposeItems(loaded);
-              setLoading(false);
+              await hydrateServerDraft(draft);
             }
             return;
           }
@@ -457,7 +463,27 @@ export default function ComposePage() {
     return () => {
       cancelled = true;
     };
-  }, [basketItems, incomingPkg, loadComposeItems, queryClient, setLessonSubtitle, setLessonTitle]);
+  }, [basketItems, hydrateServerDraft, incomingPkg, loadComposeItems, queryClient, setLessonTitle]);
+
+  useEffect(() => {
+    if (loading || !serverDraftUpdatedAtRef.current) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden' || documentRevision !== savedRevision) return;
+      void fetchLatestPaperDraft()
+        .then(async (draft) => {
+          if (
+            draft
+            && draft.id === sessionIdRef.current
+            && draft.updated_at !== serverDraftUpdatedAtRef.current
+          ) {
+            await hydrateServerDraft(draft);
+            queryClient.setQueryData(['paper-draft', 'latest'], draft);
+          }
+        })
+        .catch(() => undefined);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [documentRevision, hydrateServerDraft, loading, queryClient, savedRevision]);
 
   const legacyLessonPackage = useMemo(
     () =>
@@ -548,19 +574,38 @@ export default function ComposePage() {
     setDraftSaveState('saving');
     const revisionToSave = documentRevision;
     const timer = window.setTimeout(() => {
-      void savePaperDraft(previewLessonPackage, diagnostics as unknown as Record<string, unknown>, revisionToSave)
+      void savePaperDraft(
+        previewLessonPackage,
+        diagnostics as unknown as Record<string, unknown>,
+        revisionToSave,
+        serverDraftUpdatedAtRef.current,
+      )
         .then((draft) => {
+          serverDraftUpdatedAtRef.current = draft.updated_at;
           queryClient.setQueryData(['paper-draft', 'latest'], draft);
           markSaved(revisionToSave);
           setDraftSaveState('saved');
         })
-        .catch(() => {
+        .catch((error: unknown) => {
+          if (error instanceof ApiError && error.status === 409) {
+            void fetchLatestPaperDraft()
+              .then(async (draft) => {
+                if (draft && draft.id === sessionIdRef.current) {
+                  await hydrateServerDraft(draft);
+                  queryClient.setQueryData(['paper-draft', 'latest'], draft);
+                  return;
+                }
+                setDraftSaveState('error');
+              })
+              .catch(() => setDraftSaveState('error'));
+            return;
+          }
           setDraftSaveState('error');
         });
     }, 700);
 
     return () => window.clearTimeout(timer);
-  }, [diagnostics, documentRevision, markSaved, previewLessonPackage, queryClient]);
+  }, [diagnostics, documentRevision, hydrateServerDraft, markSaved, previewLessonPackage, queryClient]);
 
   const selectedItem = selectedIndex >= 0 ? composeItems[selectedIndex] : null;
   const selectCanvasItem = useCallback((itemId: string, additive = false) => {
@@ -1306,7 +1351,7 @@ export default function ComposePage() {
         />
 
         <ToolButton onClick={handleOrganizeByKnowledge} title="按题目知识点插入完整讲授卡，可用 Ctrl+Z 撤销">
-          插入完整知识卡
+          插入知识讲解
         </ToolButton>
 
         <ToolButton onClick={() => setBlueprintRulesOpen(true)} title="设置题数、知识点上限与题型约束">
@@ -1317,7 +1362,7 @@ export default function ComposePage() {
           自动补题
         </ToolButton>
 
-        <ToolButton onClick={handleBuildTeachingBlueprint} title="按知识点分组、按难度排序，并自动补全章节标题与知识卡">
+        <ToolButton onClick={handleBuildTeachingBlueprint} title="按知识点分组、按难度排序，并自动补全章节标题与知识讲解">
           智能组卷蓝图
         </ToolButton>
 
@@ -1444,7 +1489,7 @@ export default function ComposePage() {
               className="h-full"
               increaseViewportBy={{ top: 300, bottom: 520 }}
               itemContent={(index, item) => {
-              const typeLabel = item.type === 'question' ? formatQuestionType(item.question?.question_type || '') : item.type === 'text' ? '文本' : item.type === 'knowledge' ? '知识卡' : '分页';
+              const typeLabel = item.type === 'question' ? formatQuestionType(item.question?.question_type || '') : item.type === 'text' ? '文本' : item.type === 'knowledge' ? '知识讲解' : '分页';
               const title = item.type === 'question' ? item.question?.title || item.questionId : item.title;
               return <div className="pb-1"><button
                 key={item.id}
@@ -1661,7 +1706,7 @@ export default function ComposePage() {
                 <PanelCard title="当前对象">
                   <div className="space-y-3">
                     <div className="rounded-md bg-[#f2f6fa] px-3 py-2">
-                      <div className="text-[10px] font-semibold text-[#38516c]">{selectedItem.type === 'question' ? '题目' : selectedItem.type === 'knowledge' ? '知识卡' : selectedItem.type === 'text' ? '文本' : '分页符'}</div>
+                      <div className="text-[10px] font-semibold text-[#38516c]">{selectedItem.type === 'question' ? '题目' : selectedItem.type === 'knowledge' ? '知识讲解' : selectedItem.type === 'text' ? '文本' : '分页符'}</div>
                       <div className="mt-1 line-clamp-3 text-[10px] leading-5 text-[#71849a]">{selectedItem.type === 'question' ? selectedItem.question?.title || selectedItem.questionId : selectedItem.title}</div>
                     </div>
                     <button type="button" onClick={() => editCanvasItem(selectedItem.id)} className="h-9 w-full rounded-md bg-[#2567b8] text-xs font-semibold text-white hover:bg-[#1e579c]">原位编辑</button>
@@ -2303,7 +2348,7 @@ function ObjectItemEditor({
     ].filter(Boolean).join('\n\n');
 
     return (
-      <PanelCard title="知识目录节点">
+      <PanelCard title="知识讲解">
         <div className="space-y-3">
           <CompactEditorField label="标题">
             <input

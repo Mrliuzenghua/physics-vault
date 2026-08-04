@@ -33,7 +33,7 @@ interface Props {
 
 const ITEM_META: Record<string, { label: string; badge: string; tone: string }> = {
   question: { label: '题目', badge: 'Q', tone: 'var(--color-accent)' },
-  knowledge: { label: '知识目录', badge: 'K', tone: 'var(--color-purple)' },
+  knowledge: { label: '知识讲解', badge: 'K', tone: 'var(--color-purple)' },
   text: { label: '文本', badge: 'T', tone: 'var(--color-teal)' },
   separator: { label: '分页', badge: 'P', tone: 'var(--color-orange)' },
 };

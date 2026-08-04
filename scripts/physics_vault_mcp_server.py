@@ -44,7 +44,7 @@ from physics_vault_api.services.change_audit import ChangeAuditService  # noqa: 
 from physics_vault_api.services.metadata_management import MetadataManagementService  # noqa: E402
 from physics_vault_api.services.math_text import normalize_math_delimiters  # noqa: E402
 from physics_vault_api.services.question_search import QuestionSearchService  # noqa: E402
-from physics_vault_api.services.paper_drafts import PaperDraftService  # noqa: E402
+from physics_vault_api.services.paper_drafts import PaperDraftConflictError, PaperDraftService  # noqa: E402
 from physics_vault_api.services.similar_questions import SimilarQuestionsService  # noqa: E402
 from physics_vault_api.services.task_center import TaskActionContext, TaskCenterService  # noqa: E402
 
@@ -72,6 +72,9 @@ server = MCPServer(
         "canonical question references, standard knowledge-point cards, teaching text/title blocks, or "
         "change their order. They never alter a canonical question or knowledge point. This is a free-form "
         "workspace: execute directly when the teacher explicitly requests an edit; use dry_run=true only when a preview is requested. "
+        "When asked to generate explanations for selected questions, use one rich knowledge operation per concept with title and "
+        "summary/content or points, then place it next to its related question. Do not add a generic knowledge card plus a separate "
+        "text block. Use topic3_id only for an exact semantic match; otherwise create a workbench-only knowledge card with title. "
         "Use create_knowledge_points and batch_update_question_metadata directly to normalize tags, "
         "knowledge bindings, difficulty, question type, and normalized source without asking for approval. "
         "These metadata tools cannot change stems, options, answers, analysis, images, or publication status. "
@@ -493,6 +496,7 @@ def _compose_draft_preview(draft: dict[str, Any], items: list[dict[str, Any]], *
 def _save_compose_draft(draft: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
     request = PaperDraftUpsertRequest(
         id=draft["id"],
+        base_updated_at=draft.get("updated_at"),
         title=draft["title"],
         subtitle=draft.get("subtitle"),
         source=draft.get("source") or "ai",
@@ -738,7 +742,12 @@ def apply_composition_workbench_plan(
     ordered_refs: list[str] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """一次完成组卷计划：批量加入题目/知识卡/教学文字并按最终顺序排版。operations 中每项须有唯一 ref 和 kind：question(question_id)、knowledge(topic3_id) 或 text(title/content/block_kind)。ordered_refs 可用 item:<现有item_id> 与各 operation.ref 指定完整最终顺序；省略时按“原有对象 + operations”追加。仅写组卷草稿。"""
+    """一次完成组卷计划：批量加入题目、完整知识讲解卡或教学文字并排序。
+
+    knowledge 可引用准确的 topic3_id，也可仅提供 title；summary/content 与 points
+    会直接成为工作台可见、可编辑的讲解内容。没有准确目录节点时不要绑定近似节点。
+    ordered_refs 可用 item:<现有item_id> 与 operation.ref 指定最终顺序。仅写组卷草稿。
+    """
     draft, error = _get_compose_draft_or_error(draft_id)
     if error:
         return error
@@ -767,10 +776,30 @@ def apply_composition_workbench_plan(
             normalized_ops.append({"ref": ref, "kind": kind, "question_id": question_id})
         elif kind == "knowledge":
             topic3_id = str(raw.get("topic3_id") or "").strip()
-            if not topic3_id:
-                return {"ok": False, "error": f"{ref} 缺少 topic3_id。"}
-            topic_requests.append(topic3_id)
-            normalized_ops.append({"ref": ref, "kind": kind, "topic3_id": topic3_id})
+            title = str(raw.get("title") or "").strip()
+            if not topic3_id and not title:
+                return {"ok": False, "error": f"{ref} 的 knowledge 至少需要准确的 topic3_id 或 title。"}
+            raw_points = raw.get("points") or []
+            if not isinstance(raw_points, list):
+                return {"ok": False, "error": f"{ref} 的 points 必须是字符串数组。"}
+            related_question_ids = raw.get("related_question_ids") or []
+            if not isinstance(related_question_ids, list):
+                return {"ok": False, "error": f"{ref} 的 related_question_ids 必须是题号数组。"}
+            if topic3_id:
+                topic_requests.append(topic3_id)
+            normalized_ops.append({
+                "ref": ref,
+                "kind": kind,
+                "topic3_id": topic3_id,
+                "title": title,
+                "summary": str(raw.get("summary") or raw.get("content") or "").strip(),
+                "points": [str(point).strip() for point in raw_points if str(point).strip()],
+                "related_question_ids": [
+                    str(question_id).strip()
+                    for question_id in related_question_ids
+                    if str(question_id).strip()
+                ],
+            })
         elif kind == "text":
             title = str(raw.get("title") or "").strip()
             block_kind = str(raw.get("block_kind") or "body")
@@ -804,15 +833,44 @@ def apply_composition_workbench_plan(
             existing_question_ids.add(question_id)
         elif kind == "knowledge":
             topic3_id = operation["topic3_id"]
-            if topic3_id not in topics:
+            if topic3_id and topic3_id not in topics:
                 return {"ok": False, "error": f"标准知识目录不存在 active topic3_id：{topic3_id}。"}
-            if topic3_id in existing_topic_ids:
+            if topic3_id and topic3_id in existing_topic_ids:
                 skipped.append({"ref": ref, "reason": "knowledge_already_present"})
                 continue
-            topic = _topic_payload(topics[topic3_id])
-            title = f"{topic['topic2_name']}：{topic['topic3_name']}"
-            produced[ref] = {"id": f"compose-knowledge-{_short_id()}", "type": "knowledge", "position": 0, "title": title, "payload": {"id": topic3_id, "topic3_id": topic3_id, "title": title, "summary": f"{topic['topic1_name']} / {topic['topic2_name']}", "points": _teaching_points(topic['topic3_name']), "relatedQuestionIds": [], **topic}}
-            existing_topic_ids.add(topic3_id)
+            topic = _topic_payload(topics[topic3_id]) if topic3_id else {}
+            default_title = (
+                f"{topic['topic2_name']}：{topic['topic3_name']}"
+                if topic
+                else "知识讲解"
+            )
+            title = operation["title"] or default_title
+            knowledge_id = topic3_id or f"ai-knowledge-{_short_id()}"
+            summary = operation["summary"] or (
+                f"{topic['topic1_name']} / {topic['topic2_name']}" if topic else ""
+            )
+            points = operation["points"] or (
+                _teaching_points(str(topic["topic3_name"]))
+                if topic and not operation["summary"]
+                else []
+            )
+            produced[ref] = {
+                "id": f"compose-knowledge-{_short_id()}",
+                "type": "knowledge",
+                "position": 0,
+                "title": title,
+                "payload": {
+                    "id": knowledge_id,
+                    "topic3_id": topic3_id or None,
+                    "title": title,
+                    "summary": summary,
+                    "points": points,
+                    "relatedQuestionIds": operation["related_question_ids"],
+                    **topic,
+                },
+            }
+            if topic3_id:
+                existing_topic_ids.add(topic3_id)
         else:
             produced[ref] = {"id": f"compose-text-{_short_id()}", "type": "text", "position": 0, "title": operation["title"], "payload": {"id": f"text-{_short_id()}", "title": operation["title"], "content": operation["content"], "blockKind": operation["block_kind"]}}
 
@@ -826,7 +884,16 @@ def apply_composition_workbench_plan(
         preview = _compose_draft_preview(draft, next_items, action="apply_composition_plan")
         preview.update({"available_refs": {ref: item["id"] for ref, item in all_refs.items()}, "skipped": skipped})
         return preview
-    saved = _save_compose_draft(draft, next_items)
+    try:
+        saved = _save_compose_draft(draft, next_items)
+    except PaperDraftConflictError:
+        return _tool_error(
+            "DRAFT_CONFLICT",
+            "组卷工作台刚被其他操作更新，本次未覆盖新内容。请重新读取工作台后再执行计划。",
+            retryable=True,
+            draft_id=draft["id"],
+            next_tools=["get_composition_workbench", "apply_composition_workbench_plan"],
+        )
     return {"ok": True, "dry_run": False, "action": "apply_composition_plan", "draft": saved, "skipped": skipped}
 
 

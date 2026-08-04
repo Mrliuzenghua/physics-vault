@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..repositories.paper_drafts import PaperDraftRepository
+from ..repositories.paper_drafts import PaperDraftConflictError, PaperDraftRepository
 from ..schemas.paper_drafts import (
     PaperDraftItem,
     PaperDraftListResponse,
@@ -8,8 +8,6 @@ from ..schemas.paper_drafts import (
     PaperDraftSummary,
     PaperDraftUpsertRequest,
 )
-
-
 class PaperDraftService:
     def __init__(self, repository: PaperDraftRepository | None = None) -> None:
         self._repo = repository or PaperDraftRepository()
@@ -37,6 +35,7 @@ class PaperDraftService:
         question_count = sum(1 for item in normalized_items if item.type == "question")
         row = self._repo.upsert(
             draft_id=request.id,
+            base_updated_at=request.base_updated_at,
             title=request.title.strip() or "未命名试卷",
             subtitle=request.subtitle,
             source=request.source,
@@ -52,4 +51,3 @@ class PaperDraftService:
 
     def delete(self, draft_id: str) -> bool:
         return self._repo.delete(draft_id)
-

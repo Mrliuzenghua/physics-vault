@@ -7,7 +7,7 @@ from ..schemas.paper_drafts import (
     PaperDraftResponse,
     PaperDraftUpsertRequest,
 )
-from ..services.paper_drafts import PaperDraftService
+from ..services.paper_drafts import PaperDraftConflictError, PaperDraftService
 
 
 def build_paper_drafts_router(service: PaperDraftService | None = None) -> APIRouter:
@@ -45,6 +45,8 @@ def build_paper_drafts_router(service: PaperDraftService | None = None) -> APIRo
     async def save_draft(request: PaperDraftUpsertRequest) -> PaperDraftResponse:
         try:
             return service.save(request)
+        except PaperDraftConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -58,4 +60,3 @@ def build_paper_drafts_router(service: PaperDraftService | None = None) -> APIRo
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return router
-

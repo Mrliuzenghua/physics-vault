@@ -2,6 +2,7 @@ import importlib.util
 import sqlite3
 import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 
 
@@ -134,6 +135,75 @@ def test_mcp_argument_errors_use_stable_shape(monkeypatch) -> None:
     missing = module.get_composition_workbench("missing-draft")
     assert missing["error_info"]["code"] == "DRAFT_NOT_FOUND"
     assert missing["draft_id"] == "missing-draft"
+
+
+def test_composition_plan_accepts_rich_workbench_only_knowledge_card(monkeypatch) -> None:
+    module = _load_mcp_server()
+
+    class DraftService:
+        def __init__(self):
+            self.saved = None
+
+        def get(self, draft_id):
+            return {
+                "id": draft_id,
+                "title": "Lesson",
+                "source": "compose",
+                "status": "draft",
+                "items": [],
+                "metadata": {},
+                "quality_report": {},
+                "question_count": 0,
+                "item_count": 0,
+                "total_score": 0,
+                "created_at": "v1",
+                "updated_at": "v1",
+            }
+
+        def save(self, request):
+            self.saved = request
+            return {
+                "id": request.id,
+                "title": request.title,
+                "source": request.source,
+                "status": request.status,
+                "items": request.items,
+                "metadata": request.metadata,
+                "quality_report": request.quality_report,
+                "question_count": 0,
+                "item_count": len(request.items),
+                "total_score": 0,
+                "created_at": "v1",
+                "updated_at": "v2",
+            }
+
+    service = DraftService()
+    monkeypatch.setattr(module, "_paper_draft_service", lambda: service)
+    monkeypatch.setattr(module, "_connect_formal_read_db", lambda: nullcontext(None))
+
+    result = module.apply_composition_workbench_plan(
+        draft_id="draft-1",
+        dry_run=False,
+        operations=[
+            {
+                "ref": "knowledge-1",
+                "kind": "knowledge",
+                "title": "Reference frames",
+                "content": "Choose a reference object before comparing positions.",
+                "points": ["Motion is relative", "Keep one frame throughout"],
+                "related_question_ids": ["q-3"],
+            }
+        ],
+    )
+
+    assert result["ok"] is True
+    assert service.saved.base_updated_at == "v1"
+    payload = service.saved.items[0].payload
+    assert payload["topic3_id"] is None
+    assert payload["title"] == "Reference frames"
+    assert payload["summary"].startswith("Choose a reference object")
+    assert payload["points"] == ["Motion is relative", "Keep one frame throughout"]
+    assert payload["relatedQuestionIds"] == ["q-3"]
 
 
 def test_word_folder_filter_and_duplicate_preview(tmp_path, monkeypatch) -> None:

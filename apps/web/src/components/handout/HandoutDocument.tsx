@@ -399,7 +399,7 @@ function KnowledgeBlock({ item }: { item: HandoutItem }) {
             fontWeight: 700,
           }}
         >
-          知识目录
+          知识讲解
         </span>
         <span style={{ fontSize: 18, fontWeight: 700, color: '#0f172a' }}>{item.title || '核心知识'}</span>
       </div>
