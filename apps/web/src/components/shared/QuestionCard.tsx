@@ -152,7 +152,7 @@ export default function QuestionCard({
 
       <div>
         <div className="text-[14px] leading-6 text-[#111827]">
-          <ImportStemRenderer title={question.title || question.canonical_title || '(无题干)'} figures={figures} maxImageHeight={360} thumbnailWidth={900} questionId={question.question_id} compactImages />
+          <ImportStemRenderer title={question.title || question.canonical_title || '(无题干)'} figures={figures} maxImageHeight={200} thumbnailWidth={640} questionId={question.question_id} compactImages />
         </div>
 
         {unreferencedFigures.length > 0 && (
@@ -198,7 +198,7 @@ export default function QuestionCard({
               <div key={option.opt} className="flex items-start gap-2">
                 <span className="font-semibold text-[var(--color-text-secondary)]">{option.opt}.</span>
                 <div className="min-w-0 flex-1">
-                  <ImportStemRenderer title={option.content} figures={figures} maxImageHeight={160} thumbnailWidth={520} questionId={question.question_id} compactImages />
+                  <ImportStemRenderer title={option.content} figures={figures} maxImageHeight={100} thumbnailWidth={360} questionId={question.question_id} compactImages />
                 </div>
               </div>
             ))}
