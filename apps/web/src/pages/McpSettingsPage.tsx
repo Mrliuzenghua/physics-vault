@@ -42,10 +42,6 @@ function withDefaultProviders(config: McpConfig): McpConfig {
   };
 }
 
-function hasRuntimeProviderConfig(config: Pick<McpConfig, 'vl' | 'llm'>): boolean {
-  return Boolean(config.vl?.api_key || config.llm?.api_key);
-}
-
 export default function McpSettingsPage() {
   const [config, setConfig] = useState<McpConfig>(() => withDefaultProviders(getMcpConfig()));
   const [backendStatus, setBackendStatus] = useState<McpRuntimeStatus | null>(null);
@@ -74,11 +70,12 @@ export default function McpSettingsPage() {
         fetchMcpStatus(),
         fetchMcpRuntimeConfig().catch(() => null),
       ]);
-      if (runtimeConfig && hasRuntimeProviderConfig(runtimeConfig)) {
+      if (runtimeConfig && (runtimeConfig.vl_configured || runtimeConfig.llm_configured)) {
+        const localConfig = getMcpConfig();
         const next = withDefaultProviders({
-          ...getMcpConfig(),
-          vl: runtimeConfig.vl,
-          llm: runtimeConfig.llm,
+          ...localConfig,
+          vl: { ...runtimeConfig.vl, api_key: localConfig.vl.api_key },
+          llm: { ...runtimeConfig.llm, api_key: localConfig.llm.api_key },
         });
         setConfig(next);
         saveMcpConfig(next);

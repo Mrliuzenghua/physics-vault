@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from pathlib import Path
 from typing import Any
 
 from ..paths import default_db_path, default_review_db_path
@@ -17,6 +18,14 @@ SUPPORTED_ROLLBACK_TYPES = {
 
 class ChangeAuditService:
     """Read controlled canonical DB changes and safely preview/apply rollbacks."""
+
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        review_db_path: str | Path | None = None,
+    ) -> None:
+        self._db_path = Path(db_path) if db_path else default_db_path()
+        self._review_db_path = Path(review_db_path) if review_db_path else default_review_db_path()
 
     def list_batches(
         self,
@@ -37,7 +46,7 @@ class ChangeAuditService:
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         params.append(limit)
 
-        with _connect_standard(writable=True) as conn:
+        with _connect_standard(self._db_path, writable=True) as conn:
             _ensure_change_audit_schema(conn)
             rows = conn.execute(
                 f"""
@@ -56,12 +65,12 @@ class ChangeAuditService:
             "items": [dict(row) for row in rows],
             "total": len(rows),
             "limit": limit,
-            "canonical_database_path": str(default_db_path()),
-            "review_database_path": str(default_review_db_path()),
+            "canonical_database_path": str(self._db_path),
+            "review_database_path": str(self._review_db_path),
         }
 
     def get_batch(self, batch_id: str) -> dict[str, Any]:
-        return _load_change_batch(batch_id)
+        return _load_change_batch(batch_id, self._db_path, self._review_db_path)
 
     def rollback_batch(
         self,
@@ -74,7 +83,7 @@ class ChangeAuditService:
         if not dry_run and not str(reason or "").strip():
             return {"ok": False, "error": "确认回滚时必须填写原因，便于审计。"}
 
-        batch = _load_change_batch(batch_id)
+        batch = _load_change_batch(batch_id, self._db_path, self._review_db_path)
         if not batch.get("ok"):
             return batch
 
@@ -88,7 +97,7 @@ class ChangeAuditService:
         if change_type not in SUPPORTED_ROLLBACK_TYPES:
             return {"ok": False, "batch_id": batch_id, "error": f"暂不支持回滚类型：{change_type}。"}
 
-        preview_items = _build_rollback_preview(change_type, batch["items"])
+        preview_items = _build_rollback_preview(change_type, batch["items"], self._db_path)
         conflicts = [item for item in preview_items if item["status"] == "current_value_conflict"]
         rollbackable = [item for item in preview_items if item["status"] in {"will_rollback", "already_rolled_back"}]
         changed = [item for item in preview_items if item["status"] == "will_rollback"]
@@ -104,7 +113,7 @@ class ChangeAuditService:
             }
 
         if not dry_run and changed:
-            with _connect_standard(writable=True) as conn:
+            with _connect_standard(self._db_path, writable=True) as conn:
                 if change_type == "tag_normalization":
                     _apply_tag_rollback(conn, changed)
                 elif change_type == "knowledge_binding_normalization":
@@ -123,7 +132,7 @@ class ChangeAuditService:
                 )
                 conn.commit()
             if change_type == "return_to_review":
-                _mark_review_queue_rolled_back(changed)
+                _mark_review_queue_rolled_back(changed, self._review_db_path)
 
         return {
             "ok": True,
@@ -139,8 +148,7 @@ class ChangeAuditService:
         }
 
 
-def _connect_standard(*, writable: bool) -> sqlite3.Connection:
-    path = default_db_path()
+def _connect_standard(path: Path, *, writable: bool) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     if writable:
         conn = sqlite3.connect(path)
@@ -151,8 +159,7 @@ def _connect_standard(*, writable: bool) -> sqlite3.Connection:
     return conn
 
 
-def _connect_review() -> sqlite3.Connection:
-    path = default_review_db_path()
+def _connect_review(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
@@ -235,11 +242,11 @@ def _ensure_review_db_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _load_change_batch(batch_id: str) -> dict[str, Any]:
+def _load_change_batch(batch_id: str, db_path: Path, review_db_path: Path) -> dict[str, Any]:
     bid = str(batch_id or "").strip()
     if not bid:
         return {"ok": False, "error": "batch_id 不能为空。"}
-    with _connect_standard(writable=True) as conn:
+    with _connect_standard(db_path, writable=True) as conn:
         _ensure_change_audit_schema(conn)
         batch_row = conn.execute(
             """
@@ -273,26 +280,30 @@ def _load_change_batch(batch_id: str) -> dict[str, Any]:
         "ok": True,
         "batch": dict(batch_row),
         "items": items,
-        "canonical_database_path": str(default_db_path()),
-        "review_database_path": str(default_review_db_path()),
+        "canonical_database_path": str(db_path),
+        "review_database_path": str(review_db_path),
     }
 
 
-def _build_rollback_preview(change_type: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_rollback_preview(
+    change_type: str,
+    items: list[dict[str, Any]],
+    db_path: Path,
+) -> list[dict[str, Any]]:
     if change_type == "tag_normalization":
-        return _build_tag_rollback_preview(items)
+        return _build_tag_rollback_preview(items, db_path)
     if change_type == "knowledge_binding_normalization":
-        return _build_knowledge_binding_rollback_preview(items)
+        return _build_knowledge_binding_rollback_preview(items, db_path)
     if change_type == "return_to_review":
-        return _build_return_to_review_rollback_preview(items)
+        return _build_return_to_review_rollback_preview(items, db_path)
     return []
 
 
-def _build_tag_rollback_preview(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_tag_rollback_preview(items: list[dict[str, Any]], db_path: Path) -> list[dict[str, Any]]:
     question_ids = [str(item["entity_id"]) for item in items]
     placeholders = ",".join("?" for _ in question_ids) or "?"
     params = question_ids or [""]
-    with _connect_standard(writable=False) as conn:
+    with _connect_standard(db_path, writable=False) as conn:
         rows = conn.execute(
             f"""
             SELECT question_id, tags_json
@@ -312,12 +323,15 @@ def _build_tag_rollback_preview(items: list[dict[str, Any]]) -> list[dict[str, A
     return preview
 
 
-def _build_knowledge_binding_rollback_preview(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_knowledge_binding_rollback_preview(
+    items: list[dict[str, Any]],
+    db_path: Path,
+) -> list[dict[str, Any]]:
     question_ids = [str(item["entity_id"]) for item in items]
     placeholders = ",".join("?" for _ in question_ids) or "?"
     params = question_ids or [""]
     current: dict[str, list[str]] = {qid: [] for qid in question_ids}
-    with _connect_standard(writable=False) as conn:
+    with _connect_standard(db_path, writable=False) as conn:
         rows = conn.execute(
             f"""
             SELECT question_id, topic3_id
@@ -339,11 +353,14 @@ def _build_knowledge_binding_rollback_preview(items: list[dict[str, Any]]) -> li
     return preview
 
 
-def _build_return_to_review_rollback_preview(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_return_to_review_rollback_preview(
+    items: list[dict[str, Any]],
+    db_path: Path,
+) -> list[dict[str, Any]]:
     question_ids = [str(item["entity_id"]) for item in items]
     placeholders = ",".join("?" for _ in question_ids) or "?"
     params = question_ids or [""]
-    with _connect_standard(writable=False) as conn:
+    with _connect_standard(db_path, writable=False) as conn:
         rows = conn.execute(
             f"""
             SELECT question_id, status, review_status
@@ -456,8 +473,8 @@ def _apply_return_to_review_rollback(conn: sqlite3.Connection, items: list[dict[
         )
 
 
-def _mark_review_queue_rolled_back(items: list[dict[str, Any]]) -> None:
-    with _connect_review() as conn:
+def _mark_review_queue_rolled_back(items: list[dict[str, Any]], review_db_path: Path) -> None:
+    with _connect_review(review_db_path) as conn:
         for item in items:
             conn.execute(
                 """

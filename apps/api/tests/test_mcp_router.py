@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 
 from physics_vault_api.app import create_app
 from physics_vault_api.config import McpSettings
+from physics_vault_api.routers import mcp as mcp_router
+from physics_vault_api.runtime_config import AiServiceConfig, RuntimeAiConfig
 from physics_vault_api.services.mcp_gateway import McpGatewayService
 
 
@@ -96,6 +98,41 @@ def test_test_connection_invalid_target() -> None:
     # Missing target field
     response = client.post("/api/mcp/test-connection", json={})
     assert response.status_code == 422
+
+
+def test_runtime_config_never_returns_saved_api_keys(monkeypatch) -> None:
+    runtime = RuntimeAiConfig(
+        vl=AiServiceConfig(base_url="https://vl.example", api_key="vl-secret", model_name="vl-model"),
+        llm=AiServiceConfig(base_url="https://llm.example", api_key="llm-secret", model_name="llm-model"),
+    )
+    monkeypatch.setattr(mcp_router, "get_runtime_config", lambda: runtime)
+
+    response = TestClient(create_app()).get("/api/mcp/config")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["vl_configured"] is True
+    assert payload["llm_configured"] is True
+    assert payload["vl"]["api_key"] == ""
+    assert payload["llm"]["api_key"] == ""
+    assert "vl-secret" not in response.text
+    assert "llm-secret" not in response.text
+
+
+def test_chat_test_validates_role_and_temperature_before_provider_call() -> None:
+    client = TestClient(create_app())
+
+    invalid_role = client.post(
+        "/api/mcp/chat-test",
+        json={"messages": [{"role": "tool", "content": "hello"}]},
+    )
+    invalid_temperature = client.post(
+        "/api/mcp/chat-test",
+        json={"messages": [{"role": "user", "content": "hello"}], "temperature": 9},
+    )
+
+    assert invalid_role.status_code == 422
+    assert invalid_temperature.status_code == 422
 
     # Empty body
     response = client.post("/api/mcp/test-connection")

@@ -184,28 +184,8 @@ class SimilarQuestionsService:
 
     def _get_question(self, question_id: str) -> dict[str, Any] | None:
         """Fetch a single question by ID."""
-        rows, _ = self._repo.search_questions(
-            search_mode="browse",
-            limit=1,
-            offset=0,
-        )
-        # The repo doesn't have a get_by_id — we fetch a small batch and filter.
-        # For the SQLite path we do a direct query via the mock fallback workaround.
-        for row in rows:
-            if row["question_id"] == question_id:
-                return row
-
-        # Try a broader fetch with no effective limit
-        rows2, _ = self._repo.search_questions(
-            search_mode="browse",
-            limit=200,
-            offset=0,
-        )
-        for row in rows2:
-            if row["question_id"] == question_id:
-                return row
-
-        return None
+        rows = self._repo.get_questions_by_ids([question_id])
+        return rows[0] if rows else None
 
     def _fetch_candidates(
         self,

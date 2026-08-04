@@ -21,13 +21,10 @@ from .review_queue import ReviewQueueRepository
 logger = logging.getLogger(__name__)
 
 # Reuse the same database path resolution as the rest of the API.
-_DB_PATH = default_db_path()
-
-
 def _resolve_db_path(path: str | None = None) -> Path:
     if path:
         return Path(path)
-    return _DB_PATH
+    return default_db_path()
 
 
 class QuestionWriteRepository:

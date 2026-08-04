@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
+from ..repositories.question_search import QuestionDatabaseUnavailableError
 from ..schemas.question_search import (
     BatchQuestionDeleteRequest,
     BatchQuestionDeleteResponse,
@@ -16,6 +17,13 @@ from ..schemas.question_search import (
 )
 from ..services.question_search import QuestionSearchService, SearchError
 from ..services.question_write import QuestionWriteService
+
+
+def _database_unavailable(exc: QuestionDatabaseUnavailableError) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={"code": "QUESTION_DATABASE_UNAVAILABLE", "message": str(exc), "retryable": True},
+    )
 
 
 def build_question_search_router(
@@ -102,6 +110,8 @@ def build_question_search_router(
             return service.search(params)
         except SearchError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except QuestionDatabaseUnavailableError as exc:
+            raise _database_unavailable(exc) from exc
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
@@ -121,6 +131,8 @@ def build_question_search_router(
     async def get_facets() -> FilterFacetsResponse:
         try:
             return service.get_facets()
+        except QuestionDatabaseUnavailableError as exc:
+            raise _database_unavailable(exc) from exc
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
@@ -137,6 +149,8 @@ def build_question_search_router(
     ) -> BatchQuestionFetchResponse:
         try:
             return service.get_by_ids(request)
+        except QuestionDatabaseUnavailableError as exc:
+            raise _database_unavailable(exc) from exc
         except Exception as exc:
             raise HTTPException(
                 status_code=500,

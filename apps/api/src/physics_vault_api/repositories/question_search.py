@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -13,16 +14,21 @@ from ..paths import default_db_path
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Database path resolution (mirrors legacy_app.py logic)
+# Database path resolution
 # ---------------------------------------------------------------------------
-
-_DB_PATH = default_db_path()
-
 
 def _resolve_db_path(path: str | None = None) -> Path:
     if path:
         return Path(path)
-    return _DB_PATH
+    return default_db_path()
+
+
+def _demo_data_enabled() -> bool:
+    return os.getenv("PHYSICS_ALLOW_DEMO_DATA", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+class QuestionDatabaseUnavailableError(RuntimeError):
+    """Raised when the configured canonical question database cannot be read."""
 
 
 # ---------------------------------------------------------------------------
@@ -243,18 +249,17 @@ _MOCK_KNOWLEDGE_POINTS: dict[str, list[dict[str, Any]]] = {
 class QuestionSearchRepository:
     """Data-access layer for question search.
 
-    If *db_path* points to an existing SQLite file it is used directly;
-    otherwise the repository falls back to a small in-memory mock dataset
-    so the API surface remains testable without a physical database.
+    Production calls fail clearly when the configured database is unavailable.
+    The small demo dataset is opt-in through ``PHYSICS_ALLOW_DEMO_DATA=true``.
     """
 
     def __init__(self, db_path: str | None = None) -> None:
         self._db_path = _resolve_db_path(db_path)
-        self._mock = not self._has_searchable_questions()
+        self._mock = _demo_data_enabled() and not self._has_searchable_questions()
 
         if self._mock:
             logger.warning(
-                "QuestionSearchRepository: database not found at %s – using mock fallback.",
+                "QuestionSearchRepository: canonical database unavailable at %s; demo data is explicitly enabled.",
                 self._db_path,
             )
 
@@ -298,7 +303,17 @@ class QuestionSearchRepository:
             logger.debug("QuestionSearchRepository: opened in-memory connection.")
             return conn
 
-        return connect_db(self._db_path, writable=False)
+        if not self._db_path.is_file():
+            raise QuestionDatabaseUnavailableError(
+                f"正式题库数据库不存在：{self._db_path}。请检查 PHYSICS_DB_PATH。"
+            )
+
+        try:
+            return connect_db(self._db_path, writable=False)
+        except sqlite3.Error as exc:
+            raise QuestionDatabaseUnavailableError(
+                f"正式题库数据库无法读取：{self._db_path}。请检查文件权限和数据库完整性。"
+            ) from exc
 
     # ------------------------------------------------------------------
     # Search

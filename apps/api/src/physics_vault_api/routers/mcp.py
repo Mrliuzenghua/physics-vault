@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from openai import OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..runtime_config import RuntimeAiConfig, get_runtime_config, update_runtime_config
 from ..schemas.mcp_api import (
@@ -21,9 +21,19 @@ from ..schemas.mcp_runtime import McpTestConnectionRequest, McpTestConnectionRes
 from ..services.mcp_gateway import AppError, McpGatewayService
 
 
+class McpProviderConfigPayload(BaseModel):
+    service_type: str = Field(default="OpenAI Compatible", max_length=80)
+    base_url: str = Field(default="", max_length=2048)
+    api_key: str = Field(default="", max_length=4096)
+    model_name: str = Field(default="", max_length=200)
+    timeout_seconds: int = Field(default=120, ge=1, le=600)
+    max_retries: int = Field(default=3, ge=0, le=10)
+    concurrency: int = Field(default=2, ge=1, le=20)
+
+
 class McpConfigPayload(BaseModel):
-    vl: dict[str, Any]
-    llm: dict[str, Any]
+    vl: McpProviderConfigPayload
+    llm: McpProviderConfigPayload
 
 
 class McpConfigResponse(BaseModel):
@@ -41,13 +51,13 @@ class McpRuntimeConfigResponse(BaseModel):
 
 
 class ChatTestMessage(BaseModel):
-    role: str
-    content: str
+    role: Literal["system", "user", "assistant"]
+    content: str = Field(min_length=1, max_length=100_000)
 
 
 class ChatTestRequest(BaseModel):
-    messages: list[ChatTestMessage]
-    temperature: float = 0.7
+    messages: list[ChatTestMessage] = Field(min_length=1, max_length=100)
+    temperature: float = Field(default=0.7, ge=0, le=2)
 
 
 class ChatTestResponse(BaseModel):
@@ -75,12 +85,31 @@ def _provider_error(exc: Exception) -> HTTPException:
         status_code=502,
         detail={
             "code": "AI_PROVIDER_ERROR",
-            "message": str(exc),
-            "retryable": False,
+            "message": "AI 服务调用失败，请检查服务地址、模型名称和网络状态。",
+            "retryable": True,
             "target": "ai-provider",
-            "details": {},
+            "details": {"error_type": exc.__class__.__name__},
         },
     )
+
+
+def _config_error(code: str, message: str, target: str) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={"code": code, "message": message, "retryable": False, "target": target, "details": {}},
+    )
+
+
+def _public_provider_config(config: Any) -> dict[str, Any]:
+    return {
+        "service_type": config.service_type,
+        "base_url": config.base_url,
+        "api_key": "",
+        "model_name": config.model_name,
+        "timeout_seconds": config.timeout_seconds,
+        "max_retries": config.max_retries,
+        "concurrency": config.concurrency,
+    }
 
 
 def build_mcp_router(service: McpGatewayService) -> APIRouter:
@@ -103,8 +132,8 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
         """Return saved AI service configuration for the settings page."""
         runtime = get_runtime_config()
         return McpRuntimeConfigResponse(
-            vl=runtime.vl.__dict__,
-            llm=runtime.llm.__dict__,
+            vl=_public_provider_config(runtime.vl),
+            llm=_public_provider_config(runtime.llm),
             vl_configured=runtime.is_configured("vl"),
             llm_configured=runtime.is_configured("llm"),
         )
@@ -112,10 +141,7 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
     @router.post("/config", response_model=McpConfigResponse)
     async def update_config(payload: McpConfigPayload) -> McpConfigResponse:
         """Receive AI service configuration from the frontend."""
-        runtime = RuntimeAiConfig.from_dict({
-            "vl": payload.vl,
-            "llm": payload.llm,
-        })
+        runtime = RuntimeAiConfig.from_dict(payload.model_dump())
         update_runtime_config(runtime)
         service.notify_config_updated(runtime)
         return McpConfigResponse(
@@ -138,11 +164,11 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
 
         runtime = get_runtime_config()
         if not runtime.llm.api_key.strip():
-            raise HTTPException(status_code=400, detail="Missing API key")
+            raise _config_error("MISSING_API_KEY", "请先配置文本模型 API Key。", "llm.api_key")
         if not runtime.llm.base_url.strip():
-            raise HTTPException(status_code=400, detail="Missing base URL")
+            raise _config_error("MISSING_BASE_URL", "请先配置文本模型服务地址。", "llm.base_url")
         if not runtime.llm.model_name.strip():
-            raise HTTPException(status_code=400, detail="Missing model name")
+            raise _config_error("MISSING_MODEL_NAME", "请先配置文本模型名称。", "llm.model_name")
 
         messages = [
             {"role": message.role.strip(), "content": message.content}
@@ -150,7 +176,7 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
             if message.content.strip()
         ]
         if not messages:
-            raise HTTPException(status_code=400, detail="At least one message is required")
+            raise _config_error("EMPTY_MESSAGES", "至少需要一条非空消息。", "messages")
 
         try:
             client = OpenAI(
@@ -164,7 +190,7 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
                 temperature=request.temperature,
             )
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"AI request failed: {exc}") from exc
+            raise _provider_error(exc) from exc
 
         reply = ""
         if response.choices:

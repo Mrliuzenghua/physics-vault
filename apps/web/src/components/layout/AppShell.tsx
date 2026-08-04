@@ -107,12 +107,10 @@ export default function AppShell() {
       const localConfig = getMcpConfig();
       const backendConfig = await fetchMcpRuntimeConfig().catch(() => null);
       if (isCancelled) return;
-      const sourceConfig = backendConfig && (backendConfig.vl_configured || backendConfig.llm_configured)
-        ? { ...localConfig, vl: backendConfig.vl, llm: backendConfig.llm }
-        : localConfig;
-      const hasProviderKey = Boolean(sourceConfig?.vl?.api_key || sourceConfig?.llm?.api_key);
+      if (backendConfig?.vl_configured || backendConfig?.llm_configured) return;
+      const hasProviderKey = Boolean(localConfig.vl.api_key || localConfig.llm.api_key);
       if (!hasProviderKey) return;
-      await pushMcpConfigToBackend(sourceConfig);
+      await pushMcpConfigToBackend(localConfig);
     };
     syncRuntimeConfig().catch(() => {
       // Backend not ready yet or config rejected; the periodic status poll

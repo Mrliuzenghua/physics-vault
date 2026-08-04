@@ -14,8 +14,6 @@ from ..paths import default_db_path
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = default_db_path()
-
 CREATE_GROUPS = """
 CREATE TABLE IF NOT EXISTS favorite_groups (
     id         TEXT PRIMARY KEY,
@@ -39,7 +37,7 @@ CREATE TABLE IF NOT EXISTS favorite_items (
 
 
 def _resolve_db_path(path: str | None = None) -> Path:
-    return Path(path) if path else _DB_PATH
+    return Path(path) if path else default_db_path()
 
 
 class FavoritesRepository:

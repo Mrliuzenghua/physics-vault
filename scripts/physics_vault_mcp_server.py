@@ -38,6 +38,7 @@ from physics_vault_api.services.document_pipeline import (  # noqa: E402
 )
 from physics_vault_api.services.lesson_exports import LessonExportService  # noqa: E402
 from physics_vault_api.services.ai_assistant import _candidate_query_tokens  # noqa: E402
+from physics_vault_api.services.change_audit import ChangeAuditService  # noqa: E402
 from physics_vault_api.services.question_search import QuestionSearchService  # noqa: E402
 from physics_vault_api.services.paper_drafts import PaperDraftService  # noqa: E402
 from physics_vault_api.services.similar_questions import SimilarQuestionsService  # noqa: E402
@@ -101,6 +102,13 @@ def _task_center_service() -> TaskCenterService:
 
 def _paper_draft_service() -> PaperDraftService:
     return PaperDraftService()
+
+
+def _change_audit_service() -> ChangeAuditService:
+    return ChangeAuditService(
+        db_path=_formal_db_path(),
+        review_db_path=_review_db_path(),
+    )
 
 
 def _formal_db_path() -> Path:
@@ -292,6 +300,29 @@ def _clean_args(args: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in args.items() if value not in (None, "")}
 
 
+def _tool_error(
+    code: str,
+    message: str,
+    *,
+    field: str | None = None,
+    retryable: bool = False,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Return one stable MCP error shape while keeping the legacy text field."""
+    details = {"field": field} if field else {}
+    return {
+        "ok": False,
+        "error": message,
+        "error_info": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "details": details,
+        },
+        **extra,
+    }
+
+
 _REVIEW_INTENT_RE = re.compile(
     r"(校对中心|待校对|审核任务|审核队列|送审|已送审|草稿|回炉|复核|review center|submitted|draft)",
     re.IGNORECASE,
@@ -396,19 +427,39 @@ def search_questions(
 @server.tool()
 def get_questions_by_ids(question_ids: list[str]) -> dict[str, Any]:
     """按题号批量读取正式题库题目详情。只读。"""
-    return _dump_model(_search_service().get_by_ids(BatchQuestionFetchRequest(question_ids=question_ids[:50])))
+    normalized_ids = list(dict.fromkeys(str(item).strip() for item in question_ids if str(item).strip()))
+    if not normalized_ids:
+        return _tool_error("INVALID_ARGUMENT", "question_ids 至少需要一个有效题号。", field="question_ids")
+    if len(normalized_ids) > 50:
+        return _tool_error(
+            "LIMIT_EXCEEDED",
+            "一次最多读取 50 道题，请分批调用。",
+            field="question_ids",
+            requested_count=len(normalized_ids),
+            max_count=50,
+        )
+    return _dump_model(_search_service().get_by_ids(BatchQuestionFetchRequest(question_ids=normalized_ids)))
 
 
 def _get_compose_draft_or_error(draft_id: str | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     service = _paper_draft_service()
     requested_id = str(draft_id or "").strip()
-    draft = service.get(requested_id) if requested_id else service.get_latest()
+    try:
+        draft = service.get(requested_id) if requested_id else service.get_latest()
+    except ValueError:
+        return None, _tool_error(
+            "DRAFT_NOT_FOUND",
+            f"组卷工作台草稿不存在：{requested_id}。",
+            field="draft_id",
+            draft_id=requested_id,
+            next_tools=["list_composition_workbenches", "create_composition_workbench"],
+        )
     if draft is None:
-        return None, {
-            "ok": False,
-            "error": "尚未创建组卷工作台草稿。请先调用 create_composition_workbench。",
-            "next_tools": ["create_composition_workbench", "list_composition_workbenches"],
-        }
+        return None, _tool_error(
+            "DRAFT_NOT_FOUND",
+            "尚未创建组卷工作台草稿。请先调用 create_composition_workbench。",
+            next_tools=["create_composition_workbench", "list_composition_workbenches"],
+        )
     return _dump_model(draft), None
 
 
@@ -908,12 +959,19 @@ def list_knowledge_tree(keyword: str | None = None, limit: int = 200) -> dict[st
 @server.tool()
 def search_knowledge_points(keyword: str, limit: int = 20) -> dict[str, Any]:
     """按关键词搜索正式知识点，适合先找标准考点名和 topic3_id。只读。"""
-    return {"items": _query_knowledge_points(keyword=keyword, limit=min(max(int(limit or 20), 1), 100)), "limit": limit}
+    clean_keyword = str(keyword or "").strip()
+    if not clean_keyword:
+        return _tool_error("INVALID_ARGUMENT", "keyword 不能为空。", field="keyword")
+    bounded_limit = min(max(int(limit or 20), 1), 100)
+    return {"items": _query_knowledge_points(keyword=clean_keyword, limit=bounded_limit), "limit": bounded_limit}
 
 
 @server.tool()
 def get_question_knowledge_points(question_id: str) -> dict[str, Any]:
     """读取某道题绑定的知识点。只读。"""
+    clean_question_id = str(question_id or "").strip()
+    if not clean_question_id:
+        return _tool_error("INVALID_ARGUMENT", "question_id 不能为空。", field="question_id")
     with _connect_formal_read_db() as conn:
         rows = conn.execute(
             """
@@ -922,9 +980,9 @@ def get_question_knowledge_points(question_id: str) -> dict[str, Any]:
             WHERE question_id = ?
             ORDER BY rank, topic3_id
             """,
-            (question_id,),
+            (clean_question_id,),
         ).fetchall()
-    return {"question_id": question_id, "items": [dict(row) for row in rows]}
+    return {"question_id": clean_question_id, "items": [dict(row) for row in rows]}
 
 
 @server.tool()
@@ -1506,7 +1564,7 @@ def get_review_task(task_id: str, content_limit: int = 20) -> dict[str, Any]:
     """读取审核库中一个校对任务的草稿内容摘要。只读。"""
     tid = str(task_id or "").strip()
     if not tid:
-        return {"ok": False, "error": "task_id 不能为空。"}
+        return _tool_error("INVALID_ARGUMENT", "task_id 不能为空。", field="task_id")
     with _connect_review_db() as conn:
         if not _table_exists(conn, "import_pipeline_tasks"):
             return {"ok": False, "table_missing": True, "error": "import_pipeline_tasks 表不存在。"}
@@ -1561,7 +1619,7 @@ def get_review_task_full(
     """读取审核库中校对任务的完整草稿字段，不截断题干。只读。"""
     tid = str(task_id or "").strip()
     if not tid:
-        return {"ok": False, "error": "task_id 不能为空。"}
+        return _tool_error("INVALID_ARGUMENT", "task_id 不能为空。", field="task_id")
     with _connect_review_db() as conn:
         if not _table_exists(conn, "import_pipeline_tasks"):
             return {"ok": False, "table_missing": True, "error": "import_pipeline_tasks 表不存在。"}
@@ -1789,46 +1847,17 @@ def list_change_batches(
     limit: int = 50,
 ) -> dict[str, Any]:
     """列出正式库受控变更批次，用于审计和回滚前定位 batch_id。"""
-    limit = min(max(int(limit or 50), 1), 200)
-    params: list[Any] = []
-    where_parts: list[str] = []
-    if change_type and str(change_type).strip().lower() not in {"all", "*", "全部"}:
-        where_parts.append("change_type = ?")
-        params.append(str(change_type).strip())
-    if status and str(status).strip().lower() not in {"all", "*", "全部"}:
-        where_parts.append("status = ?")
-        params.append(str(status).strip())
-    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
-    params.append(limit)
-    with _connect_formal_write_db() as conn:
-        _ensure_change_audit_schema(conn)
-        rows = conn.execute(
-            f"""
-            SELECT batch_id, change_type, reason, source, status, target_count,
-                   changed_count, created_at, applied_at, rolled_back_at, rollback_reason
-            FROM change_batches
-            {where_sql}
-            ORDER BY COALESCE(applied_at, created_at) DESC, batch_id DESC
-            LIMIT ?
-            """,
-            params,
-        ).fetchall()
-    return {
-        "ok": True,
-        "items": [dict(row) for row in rows],
-        "total": len(rows),
-        "limit": limit,
-        "canonical_database_path": str(_formal_db_path()),
-    }
+    return _change_audit_service().list_batches(
+        change_type=change_type,
+        status=status,
+        limit=limit,
+    )
 
 
 @server.tool()
 def get_change_batch(batch_id: str) -> dict[str, Any]:
     """读取一个受控变更批次及逐项 diff。只读。"""
-    batch = _load_change_batch(batch_id)
-    if not batch.get("ok"):
-        return batch
-    return batch
+    return _change_audit_service().get_batch(batch_id)
 
 
 @server.tool()
@@ -1839,70 +1868,12 @@ def rollback_change_batch(
     allow_conflicts: bool = False,
 ) -> dict[str, Any]:
     """按审计批次回滚正式库变更。默认只预览；确认后 dry_run=false 才执行。"""
-    if not dry_run and not str(reason or "").strip():
-        return {"ok": False, "error": "dry_run=false 时必须填写 reason，便于审计。"}
-    batch = _load_change_batch(batch_id)
-    if not batch.get("ok"):
-        return batch
-    info = batch["batch"]
-    if info["status"] == "rolled_back":
-        return {"ok": False, "batch_id": batch_id, "error": "该批次已经回滚。", "batch": info}
-    if info["status"] != "applied":
-        return {"ok": False, "batch_id": batch_id, "error": f"该批次状态为 {info['status']}，不能回滚。", "batch": info}
-
-    change_type = info["change_type"]
-    items = batch["items"]
-    if change_type not in {"tag_normalization", "knowledge_binding_normalization", "return_to_review"}:
-        return {"ok": False, "batch_id": batch_id, "error": f"暂不支持回滚类型：{change_type}。"}
-
-    preview_items = _build_rollback_preview(change_type, items)
-    conflicts = [item for item in preview_items if item["status"] == "current_value_conflict"]
-    rollbackable = [item for item in preview_items if item["status"] in {"will_rollback", "already_rolled_back"}]
-    changed = [item for item in preview_items if item["status"] == "will_rollback"]
-    if conflicts and not dry_run and not allow_conflicts:
-        return {
-            "ok": False,
-            "batch_id": batch_id,
-            "dry_run": dry_run,
-            "error": "当前值与该批次记录的修改后值不一致，可能已有后续修改；请先 dry-run 检查，确认后可 allow_conflicts=true。",
-            "conflict_count": len(conflicts),
-            "items": preview_items,
-        }
-
-    if not dry_run and changed:
-        with _connect_formal_write_db() as conn:
-            if change_type == "tag_normalization":
-                _apply_tag_rollback(conn, changed)
-            elif change_type == "knowledge_binding_normalization":
-                _apply_knowledge_binding_rollback(conn, changed, reason)
-            elif change_type == "return_to_review":
-                _apply_return_to_review_rollback(conn, changed)
-            conn.execute(
-                """
-                UPDATE change_batches
-                SET status = 'rolled_back',
-                    rolled_back_at = CURRENT_TIMESTAMP,
-                    rollback_reason = ?
-                WHERE batch_id = ?
-                """,
-                (reason, info["batch_id"]),
-            )
-            conn.commit()
-        if change_type == "return_to_review":
-            _mark_review_queue_rolled_back(changed)
-
-    return {
-        "ok": True,
-        "batch_id": info["batch_id"],
-        "change_type": change_type,
-        "dry_run": dry_run,
-        "requires_confirmation": dry_run and bool(changed),
-        "rollbackable_count": len(rollbackable),
-        "changed_count": len(changed),
-        "conflict_count": len(conflicts),
-        "items": preview_items,
-        "message": "回滚预览完成，未写入数据库；确认后才可 dry_run=false。" if dry_run else "已按审计批次回滚正式库变更。",
-    }
+    return _change_audit_service().rollback_batch(
+        batch_id,
+        dry_run=dry_run,
+        reason=reason,
+        allow_conflicts=allow_conflicts,
+    )
 
 
 @server.tool()
@@ -2391,7 +2362,7 @@ def get_job_status(task_id: str) -> dict[str, Any]:
     """查询单个后台任务状态。只读。"""
     tid = str(task_id or "").strip()
     if not tid:
-        return {"ok": False, "error": "task_id 不能为空。"}
+        return _tool_error("INVALID_ARGUMENT", "task_id 不能为空。", field="task_id")
     try:
         task = _task_center_service().get_task(tid)
     except Exception as exc:  # noqa: BLE001
@@ -2587,7 +2558,7 @@ def _submit_export_job(
     context: TaskActionContext,
 ) -> dict[str, Any]:
     if not isinstance(lesson_package, dict) or not str(lesson_package.get("id") or "").strip():
-        return {"ok": False, "error": "lesson_package.id 不能为空。"}
+        return _tool_error("INVALID_ARGUMENT", "lesson_package.id 不能为空。", field="lesson_package.id")
     service = _task_center_service()
     submitter = getattr(service, "submit_export_job", None)
     if not callable(submitter):
@@ -2619,7 +2590,14 @@ def _submit_export_job(
 def _job_tool_error(exc: Exception) -> dict[str, Any]:
     detail = getattr(exc, "detail", None)
     message = str(detail if detail is not None else exc)
-    return {"ok": False, "error": message[:800] or exc.__class__.__name__}
+    status_code = getattr(exc, "status_code", None)
+    retryable = status_code in {429, 502, 503, 504}
+    return _tool_error(
+        "TASK_SERVICE_ERROR",
+        message[:800] or exc.__class__.__name__,
+        retryable=retryable,
+        status_code=status_code,
+    )
 
 
 def _query_knowledge_points(keyword: str, limit: int) -> list[dict[str, Any]]:
@@ -2978,279 +2956,6 @@ def _raw_tags(raw: Any) -> list[str]:
     except (TypeError, json.JSONDecodeError):
         pass
     return [item.strip() for item in str(raw).replace("，", ",").replace("、", ",").split(",") if item.strip()]
-
-
-def _parse_json_value(raw: Any) -> Any:
-    if raw is None:
-        return None
-    if isinstance(raw, (dict, list, int, float, bool)):
-        return raw
-    try:
-        return json.loads(str(raw))
-    except (TypeError, json.JSONDecodeError):
-        return raw
-
-
-def _load_change_batch(batch_id: str) -> dict[str, Any]:
-    bid = str(batch_id or "").strip()
-    if not bid:
-        return {"ok": False, "error": "batch_id 不能为空。"}
-    with _connect_formal_write_db() as conn:
-        _ensure_change_audit_schema(conn)
-        batch_row = conn.execute(
-            """
-            SELECT batch_id, change_type, reason, source, status, target_count,
-                   changed_count, created_at, applied_at, rolled_back_at, rollback_reason
-            FROM change_batches
-            WHERE batch_id = ?
-            """,
-            (bid,),
-        ).fetchone()
-        if batch_row is None:
-            return {"ok": False, "batch_id": bid, "status": "missing", "error": "变更批次不存在。"}
-        item_rows = conn.execute(
-            """
-            SELECT item_id, batch_id, entity_type, entity_id, field_name,
-                   before_value_json, after_value_json, status, risk_level, created_at
-            FROM change_items
-            WHERE batch_id = ?
-            ORDER BY created_at, item_id
-            """,
-            (bid,),
-        ).fetchall()
-    items = []
-    for row in item_rows:
-        item = dict(row)
-        item["before_value"] = _parse_json_value(item.pop("before_value_json"))
-        item["after_value"] = _parse_json_value(item.pop("after_value_json"))
-        items.append(item)
-    return {
-        "ok": True,
-        "batch": dict(batch_row),
-        "items": items,
-        "canonical_database_path": str(_formal_db_path()),
-    }
-
-
-def _build_rollback_preview(change_type: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if change_type == "tag_normalization":
-        return _build_tag_rollback_preview(items)
-    if change_type == "knowledge_binding_normalization":
-        return _build_knowledge_binding_rollback_preview(items)
-    if change_type == "return_to_review":
-        return _build_return_to_review_rollback_preview(items)
-    return []
-
-
-def _build_tag_rollback_preview(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    question_ids = [str(item["entity_id"]) for item in items]
-    placeholders = ",".join("?" for _ in question_ids) or "?"
-    params = question_ids or [""]
-    with _connect_formal_read_db() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT question_id, tags_json
-            FROM question_text_index
-            WHERE question_id IN ({placeholders})
-            """,
-            params,
-        ).fetchall()
-    current = {row["question_id"]: _parse_tags(row["tags_json"]) for row in rows}
-    preview = []
-    for item in items:
-        qid = str(item["entity_id"])
-        before = _normalize_tags(item.get("before_value"))
-        after = _normalize_tags(item.get("after_value"))
-        now = current.get(qid, [])
-        if now == before:
-            status = "already_rolled_back"
-        elif now == after:
-            status = "will_rollback"
-        else:
-            status = "current_value_conflict"
-        preview.append(
-            {
-                "question_id": qid,
-                "field_name": item["field_name"],
-                "current_value": now,
-                "rollback_to": before,
-                "expected_current": after,
-                "status": status,
-            }
-        )
-    return preview
-
-
-def _build_knowledge_binding_rollback_preview(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    question_ids = [str(item["entity_id"]) for item in items]
-    placeholders = ",".join("?" for _ in question_ids) or "?"
-    params = question_ids or [""]
-    current: dict[str, list[str]] = {qid: [] for qid in question_ids}
-    with _connect_formal_read_db() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT question_id, topic3_id
-            FROM question_knowledge_points
-            WHERE question_id IN ({placeholders})
-            ORDER BY question_id, rank, topic3_id
-            """,
-            params,
-        ).fetchall()
-    for row in rows:
-        current.setdefault(row["question_id"], []).append(row["topic3_id"])
-    preview = []
-    for item in items:
-        qid = str(item["entity_id"])
-        before = [str(value) for value in (item.get("before_value") or [])]
-        after = [str(value) for value in (item.get("after_value") or [])]
-        now = current.get(qid, [])
-        if now == before:
-            status = "already_rolled_back"
-        elif now == after:
-            status = "will_rollback"
-        else:
-            status = "current_value_conflict"
-        preview.append(
-            {
-                "question_id": qid,
-                "field_name": item["field_name"],
-                "current_value": now,
-                "rollback_to": before,
-                "expected_current": after,
-                "status": status,
-            }
-        )
-    return preview
-
-
-def _build_return_to_review_rollback_preview(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    question_ids = [str(item["entity_id"]) for item in items]
-    placeholders = ",".join("?" for _ in question_ids) or "?"
-    params = question_ids or [""]
-    with _connect_formal_read_db() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT question_id, status, review_status
-            FROM questions
-            WHERE question_id IN ({placeholders})
-            """,
-            params,
-        ).fetchall()
-    current = {
-        row["question_id"]: {"status": row["status"], "review_status": row["review_status"]}
-        for row in rows
-    }
-    preview = []
-    for item in items:
-        qid = str(item["entity_id"])
-        before = item.get("before_value") if isinstance(item.get("before_value"), dict) else {}
-        after = item.get("after_value") if isinstance(item.get("after_value"), dict) else {}
-        now = current.get(qid, {})
-        if now == before:
-            status = "already_rolled_back"
-        elif now == after:
-            status = "will_rollback"
-        else:
-            status = "current_value_conflict"
-        preview.append(
-            {
-                "question_id": qid,
-                "field_name": item["field_name"],
-                "current_value": now,
-                "rollback_to": before,
-                "expected_current": after,
-                "status": status,
-            }
-        )
-    return preview
-
-
-def _apply_tag_rollback(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> None:
-    for item in items:
-        conn.execute(
-            """
-            INSERT INTO question_text_index (question_id, tags_json, source_text, created_at, updated_at)
-            VALUES (?, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT(question_id) DO UPDATE SET
-                tags_json = excluded.tags_json,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (item["question_id"], json.dumps(item["rollback_to"], ensure_ascii=False)),
-        )
-
-
-def _apply_knowledge_binding_rollback(
-    conn: sqlite3.Connection,
-    items: list[dict[str, Any]],
-    reason: str | None,
-) -> None:
-    topic_ids = sorted({topic_id for item in items for topic_id in item.get("rollback_to", [])})
-    topics = _fetch_topics(conn, topic_ids)
-    for item in items:
-        qid = item["question_id"]
-        rollback_to = [str(topic_id) for topic_id in item.get("rollback_to", [])]
-        conn.execute("DELETE FROM question_knowledge_points WHERE question_id = ?", (qid,))
-        for rank, topic3_id in enumerate(rollback_to, start=1):
-            conn.execute(
-                """
-                INSERT INTO question_knowledge_points (
-                    link_id, question_id, topic3_id, rank, source, confidence, note,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'rollback', 1.0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                """,
-                (f"QKP-{qid}-{rank}-{_short_id()}", qid, topic3_id, rank, reason),
-            )
-        primary = _topic_payload(topics[rollback_to[0]]) if rollback_to and rollback_to[0] in topics else {}
-        conn.execute(
-            """
-            UPDATE questions
-            SET module = ?, topic2 = ?, topic3 = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE question_id = ?
-            """,
-            (
-                primary.get("topic3_name"),
-                primary.get("topic2_name"),
-                primary.get("topic3_name"),
-                qid,
-            ),
-        )
-
-
-def _apply_return_to_review_rollback(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> None:
-    for item in items:
-        rollback_to = item.get("rollback_to") if isinstance(item.get("rollback_to"), dict) else {}
-        conn.execute(
-            """
-            UPDATE questions
-            SET status = ?,
-                review_status = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE question_id = ?
-            """,
-            (
-                rollback_to.get("status"),
-                rollback_to.get("review_status"),
-                item["question_id"],
-            ),
-        )
-
-
-def _mark_review_queue_rolled_back(items: list[dict[str, Any]]) -> None:
-    with _connect_review_db() as conn:
-        for item in items:
-            conn.execute(
-                """
-                UPDATE review_queue
-                SET status = 'rolled_back',
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE entity_type = 'question'
-                  AND entity_id = ?
-                  AND queue_type = 'rework'
-                  AND status = 'pending'
-                """,
-                (item["question_id"],),
-            )
-        conn.commit()
 
 
 def _parse_json_dict(raw: Any) -> dict[str, Any]:

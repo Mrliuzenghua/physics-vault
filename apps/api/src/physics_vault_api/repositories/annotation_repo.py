@@ -14,8 +14,6 @@ from ..paths import default_db_path
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = default_db_path()
-
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS question_annotations (
     annotation_id   TEXT PRIMARY KEY,
@@ -42,7 +40,7 @@ ON question_annotations(question_id)
 
 
 def _resolve_db_path(path: str | None = None) -> str:
-    return path or str(_DB_PATH)
+    return path or str(default_db_path())
 
 
 def _utc_now() -> str:

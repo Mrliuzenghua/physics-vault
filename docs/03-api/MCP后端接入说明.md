@@ -25,7 +25,7 @@
 
 参考文件：
 
-- `C:\Users\lzh\OneDrive\Pysics Vault3.0\09-项目工程\physics-vault\config\examples\mcp.env.example`
+- `config/examples/mcp.env.example`
 
 关键变量：
 
@@ -45,8 +45,8 @@
 
 当前项目已提供两个本地 mock 服务脚本：
 
-- `C:\Users\lzh\OneDrive\Pysics Vault3.0\09-项目工程\physics-vault\scripts\dev\mock_vl_mcp.py`
-- `C:\Users\lzh\OneDrive\Pysics Vault3.0\09-项目工程\physics-vault\scripts\dev\mock_llm_mcp.py`
+- `scripts/dev/mock_vl_mcp.py`
+- `scripts/dev/mock_llm_mcp.py`
 
 它们遵循 stdin 输入、stdout 输出 JSON 的约定，后续替换成真实视觉模型或文本模型时，只要保持相同输入输出结构即可。
 

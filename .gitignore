@@ -43,6 +43,8 @@ data/agent_config.json
 data/runtime_ai_config.json
 data/mcp/memory.jsonl
 data/mcp/*.sqlite3
+data/mcp/*.sqlite3-shm
+data/mcp/*.sqlite3-wal
 data/assets/questions/*
 data/assets/extracted/*
 data/cache/knowledge/*

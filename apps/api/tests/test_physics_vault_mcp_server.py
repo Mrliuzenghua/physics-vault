@@ -14,9 +14,11 @@ def _load_mcp_server():
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
+            self.tools = []
 
         def tool(self):
             def decorator(func):
+                self.tools.append(func)
                 return func
 
             return decorator
@@ -36,6 +38,82 @@ def _load_mcp_server():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+EXPECTED_MCP_TOOLS = {
+    "list_filter_facets",
+    "search_questions",
+    "get_questions_by_ids",
+    "list_composition_workbenches",
+    "get_composition_workbench",
+    "create_composition_workbench",
+    "add_questions_to_composition_workbench",
+    "add_knowledge_to_composition_workbench",
+    "insert_teaching_block_to_composition_workbench",
+    "reorder_composition_workbench",
+    "apply_composition_workbench_plan",
+    "curate_questions_to_composition_workbench",
+    "list_knowledge_tree",
+    "search_knowledge_points",
+    "get_question_knowledge_points",
+    "database_boundary_report",
+    "database_health_report",
+    "list_review_queue",
+    "import_word_folder_to_review",
+    "list_review_tasks",
+    "get_review_task",
+    "get_review_task_full",
+    "clean_review_task_latex",
+    "update_review_task_draft",
+    "list_question_tags",
+    "list_change_batches",
+    "get_change_batch",
+    "rollback_change_batch",
+    "batch_replace_question_tags",
+    "return_question_to_review",
+    "batch_replace_question_knowledge_points",
+    "find_similar_questions",
+    "submit_ai_generated_review",
+    "submit_import_job",
+    "submit_ai_clean_job",
+    "submit_word_export_job",
+    "submit_pptx_export_job",
+    "get_job_status",
+    "list_jobs",
+    "retry_job",
+    "cancel_job",
+}
+
+
+def test_mcp_tool_inventory_is_explicit_and_unique() -> None:
+    module = _load_mcp_server()
+    names = [tool.__name__ for tool in module.server.tools]
+
+    assert len(names) == len(set(names))
+    assert set(names) == EXPECTED_MCP_TOOLS
+
+
+def test_mcp_argument_errors_use_stable_shape(monkeypatch) -> None:
+    module = _load_mcp_server()
+
+    empty_ids = module.get_questions_by_ids([])
+    too_many_ids = module.get_questions_by_ids([f"q-{index}" for index in range(51)])
+    empty_keyword = module.search_knowledge_points("  ")
+
+    for result in (empty_ids, too_many_ids, empty_keyword):
+        assert result["ok"] is False
+        assert isinstance(result["error"], str)
+        assert result["error_info"]["code"]
+        assert result["error_info"]["retryable"] is False
+
+    class MissingDraftService:
+        def get(self, draft_id):
+            raise ValueError(draft_id)
+
+    monkeypatch.setattr(module, "_paper_draft_service", lambda: MissingDraftService())
+    missing = module.get_composition_workbench("missing-draft")
+    assert missing["error_info"]["code"] == "DRAFT_NOT_FOUND"
+    assert missing["draft_id"] == "missing-draft"
 
 
 def _seed_standard_db(path: Path) -> None:

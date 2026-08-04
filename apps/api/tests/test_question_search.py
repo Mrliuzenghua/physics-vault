@@ -1,14 +1,19 @@
 """Tests for the question search API and filter facets endpoint.
 
-These tests run against the in-memory mock repository because the
-production SQLite database is not available in this workspace.
+These tests explicitly enable the in-memory demo repository. Production
+calls never fall back to demo questions unless PHYSICS_ALLOW_DEMO_DATA is set.
 """
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from physics_vault_api.app import create_app
+from physics_vault_api.repositories.question_search import (
+    QuestionDatabaseUnavailableError,
+    QuestionSearchRepository,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -16,8 +21,24 @@ from physics_vault_api.app import create_app
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _enable_explicit_demo_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHYSICS_ALLOW_DEMO_DATA", "true")
+
+
 def _client() -> TestClient:
     return TestClient(create_app())
+
+
+def test_missing_database_never_returns_demo_data_unless_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.delenv("PHYSICS_ALLOW_DEMO_DATA", raising=False)
+    repository = QuestionSearchRepository(str(tmp_path / "missing.sqlite3"))
+
+    with pytest.raises(QuestionDatabaseUnavailableError, match="PHYSICS_DB_PATH"):
+        repository.search_questions(search_mode="browse")
 
 
 # ---------------------------------------------------------------------------

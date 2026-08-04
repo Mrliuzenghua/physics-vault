@@ -3,7 +3,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from physics_vault_api.db_schema import initialize_database
-from physics_vault_api.repositories.question_search import QuestionSearchRepository
+from physics_vault_api.repositories.question_search import (
+    QuestionDatabaseUnavailableError,
+    QuestionSearchRepository,
+)
 from physics_vault_api.repositories.question_write import QuestionWriteRepository
 from physics_vault_api.services.question_write import QuestionWriteService
 
@@ -33,14 +36,18 @@ def _save_question(db_path: Path, question_id: str = "q-delete") -> None:
 def test_search_repository_recovers_when_database_becomes_available() -> None:
     db_path = _temp_db()
     repo = QuestionSearchRepository(str(db_path))
-    assert repo._mock is True
+    try:
+        repo.search_questions(limit=10)
+    except QuestionDatabaseUnavailableError:
+        pass
+    else:
+        raise AssertionError("missing databases must not silently return demo questions")
 
     initialize_database(db_path)
     _save_question(db_path, "q-live")
 
     rows, total = repo.search_questions(limit=10)
 
-    assert repo._mock is False
     assert total == 1
     assert rows[0]["question_id"] == "q-live"
 

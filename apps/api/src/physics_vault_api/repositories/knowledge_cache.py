@@ -17,8 +17,6 @@ from ..paths import default_db_path
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = default_db_path()
-
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS knowledge_cache (
     cache_key             TEXT PRIMARY KEY,
@@ -35,7 +33,7 @@ CREATE TABLE IF NOT EXISTS knowledge_cache (
 
 
 def _resolve_db_path(path: str | None = None) -> str:
-    return path or str(_DB_PATH)
+    return path or str(default_db_path())
 
 
 class KnowledgeCacheRepository:

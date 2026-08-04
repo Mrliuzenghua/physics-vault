@@ -33,11 +33,6 @@ from ..schemas.assets_manager import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_ASSETS_DIR = default_assets_dir()
-_DEFAULT_DB_PATH = default_db_path()
-_DEFAULT_IMPORT_BATCHES_DIR = default_import_batches_dir()
-_PROJECT_ROOT = project_root()
-
 _SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 _MIME_MAP: dict[str, str] = {
@@ -57,9 +52,10 @@ class AssetsManagerService:
         db_path: str | None = None,
         import_batches_dir: str | None = None,
     ) -> None:
-        self._assets_dir = Path(assets_dir) if assets_dir else _DEFAULT_ASSETS_DIR
-        self._import_batches_dir = Path(import_batches_dir) if import_batches_dir else _DEFAULT_IMPORT_BATCHES_DIR
-        resolved_db = Path(db_path) if db_path else _DEFAULT_DB_PATH
+        self._project_root = project_root()
+        self._assets_dir = Path(assets_dir) if assets_dir else default_assets_dir()
+        self._import_batches_dir = Path(import_batches_dir) if import_batches_dir else default_import_batches_dir()
+        resolved_db = Path(db_path) if db_path else default_db_path()
         self._db_path = resolved_db if resolved_db.exists() else None
         self._scan_cache: tuple[float, list[AssetItem], bool] | None = None
         self._cache_ttl_seconds = 10.0
@@ -451,12 +447,12 @@ class AssetsManagerService:
                     abs_path = str(asset.get("absolute_path") or "").strip()
                     if not rel_path and not abs_path:
                         continue
-                    entry = Path(abs_path) if abs_path else (_PROJECT_ROOT / rel_path)
+                    entry = Path(abs_path) if abs_path else (self._project_root / rel_path)
                     add(entry, rel_path or self._relative_asset_path(entry), "import_batch")
 
             for entry in sorted(self._import_batches_dir.rglob("*")):
                 try:
-                    rel_path = entry.relative_to(_PROJECT_ROOT).as_posix()
+                    rel_path = entry.relative_to(self._project_root).as_posix()
                 except ValueError:
                     try:
                         rel_path = f"data/import-batches/{entry.relative_to(self._import_batches_dir).as_posix()}"
@@ -469,8 +465,8 @@ class AssetsManagerService:
     def _relative_asset_path(self, path: Path) -> str:
         if self._is_under(path, self._assets_dir):
             return path.relative_to(self._assets_dir).as_posix()
-        if self._is_under(path, _PROJECT_ROOT):
-            return path.relative_to(_PROJECT_ROOT).as_posix()
+        if self._is_under(path, self._project_root):
+            return path.relative_to(self._project_root).as_posix()
         return path.name
 
     def _resolve_asset_identifier(self, identifier: str) -> Path | None:
@@ -478,10 +474,10 @@ class AssetsManagerService:
         candidates: list[Path] = []
 
         if value.startswith("data/assets/questions/") or value.startswith("data/import-batches/"):
-            candidates.append(_PROJECT_ROOT / value)
+            candidates.append(self._project_root / value)
         elif "/" in value:
             candidates.append(self._assets_dir / value)
-            candidates.append(_PROJECT_ROOT / value)
+            candidates.append(self._project_root / value)
         else:
             if self._assets_dir.exists():
                 candidates.extend(self._assets_dir.rglob(value))
