@@ -144,6 +144,62 @@ def test_knowledge_suggestions_return_only_existing_topic_ids(tmp_path: Path) ->
     assert weak["unmatched"][0]["suggested_parent"]["topic2_name"] == "万有引力与航天"
 
 
+def test_organize_knowledge_tree_creates_reuses_and_binds(tmp_path: Path) -> None:
+    db_path = _database(tmp_path)
+    service = MetadataManagementService(db_path)
+    point = {
+        "topic1_id": "KP-MECH",
+        "topic1_name": "力学",
+        "topic2_name": "曲线运动",
+        "topic3_name": "平抛运动",
+    }
+
+    result = service.organize_knowledge_tree(
+        [
+            {"question_id": "q-1", "knowledge_points": [point]},
+            {"question_id": "draft-2", "knowledge_points": [point]},
+        ],
+        reason="AI automatic organization",
+    )
+
+    assert result["ok"] is True
+    assert result["summary"] == {
+        "received": 2,
+        "created": 1,
+        "reused": 1,
+        "bound": 1,
+        "draft_updates": 1,
+        "failed": 0,
+    }
+    topic3_id = result["created"][0]["topic3_id"]
+    assert result["draft_updates"][0]["topic3_ids"] == [topic3_id]
+    with sqlite3.connect(db_path) as conn:
+        binding = conn.execute(
+            "SELECT topic3_id FROM question_knowledge_points WHERE question_id='q-1'"
+        ).fetchone()
+    assert binding == (topic3_id,)
+
+
+def test_knowledge_search_uses_fuzzy_chinese_aliases(tmp_path: Path) -> None:
+    service = MetadataManagementService(_database(tmp_path))
+    created = service.create_knowledge_points(
+        [
+            {
+                "topic1_id": "KP-MECH",
+                "topic1_name": "力学",
+                "topic2_name": "万有引力与航天",
+                "topic3_name": "人造卫星的运行规律",
+            }
+        ]
+    )
+
+    result = service.search_knowledge_points("卫星轨道")
+
+    assert result
+    assert result[0]["topic3_id"] == created["created"][0]["topic3_id"]
+    assert result[0]["score"] >= 12
+
+
 def test_import_metadata_normalization_extracts_answer_fields() -> None:
     normalized = normalize_import_question_metadata(
         {

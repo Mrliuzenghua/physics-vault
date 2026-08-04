@@ -945,8 +945,17 @@ def curate_questions_to_composition_workbench(
 
 @server.tool()
 def list_knowledge_tree(keyword: str | None = None, limit: int = 200) -> dict[str, Any]:
-    """读取正式知识点树，按一级/二级/三级知识点组织。只读。"""
-    rows = _query_knowledge_points(keyword=str(keyword or "").strip(), limit=min(max(int(limit or 200), 1), 500))
+    """读取正式知识点树；关键词命中时返回命中节点所在的完整二级分支。只读。"""
+    clean_keyword = str(keyword or "").strip()
+    bounded_limit = min(max(int(limit or 200), 1), 500)
+    rows = _query_knowledge_points(keyword="", limit=500)
+    if clean_keyword:
+        matches = _metadata_management_service().search_knowledge_points(
+            clean_keyword, limit=100
+        )
+        matched_topic2_ids = {str(item["topic2_id"]) for item in matches}
+        rows = [row for row in rows if str(row["topic2_id"]) in matched_topic2_ids]
+    rows = rows[:bounded_limit]
     tree: dict[str, Any] = {}
     for row in rows:
         t1 = tree.setdefault(row["topic1_id"], {"id": row["topic1_id"], "name": row["topic1_name"], "children": {}})
@@ -967,12 +976,18 @@ def list_knowledge_tree(keyword: str | None = None, limit: int = 200) -> dict[st
 
 @server.tool()
 def search_knowledge_points(keyword: str, limit: int = 20) -> dict[str, Any]:
-    """按关键词搜索正式知识点，适合先找标准考点名和 topic3_id。只读。"""
+    """按中文关键词模糊搜索正式知识点，返回相关度与匹配说明。只读。"""
     clean_keyword = str(keyword or "").strip()
     if not clean_keyword:
         return _tool_error("INVALID_ARGUMENT", "keyword 不能为空。", field="keyword")
     bounded_limit = min(max(int(limit or 20), 1), 100)
-    return {"items": _query_knowledge_points(keyword=clean_keyword, limit=bounded_limit), "limit": bounded_limit}
+    try:
+        items = _metadata_management_service().search_knowledge_points(
+            clean_keyword, limit=bounded_limit
+        )
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
+    return {"items": items, "limit": bounded_limit, "total": len(items)}
 
 
 @server.tool()
@@ -1001,6 +1016,43 @@ def create_knowledge_points(points: list[dict[str, Any]]) -> dict[str, Any]:
         return _metadata_management_service().create_knowledge_points(points)
     except (FileNotFoundError, sqlite3.Error) as exc:
         return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
+
+
+@server.tool()
+def organize_knowledge_tree(
+    assignments: list[dict[str, Any]],
+    task_id: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """AI 一次完成知识点匹配结果落库、缺失节点创建和题目绑定。
+
+    assignments 每项包含 question_id 与 knowledge_points（最多 3 个三级节点，
+    每个节点提供 topic1/topic2/topic3 名称及可选 ID）。正式题目直接绑定；传入
+    task_id 时，尚未入库的题目会同步写回当前校对草稿。元数据整理无需人工审核。
+    """
+    try:
+        result = _metadata_management_service().organize_knowledge_tree(
+            assignments, reason=reason
+        )
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
+
+    draft_updates = result.get("draft_updates") or []
+    clean_task_id = str(task_id or "").strip()
+    if draft_updates and not clean_task_id:
+        result["ok"] = False
+        result["error"] = "包含尚未入库的题目，请提供 task_id 以写回当前校对草稿。"
+        return result
+    if draft_updates:
+        applied = update_review_task_draft(
+            clean_task_id,
+            draft_updates,
+            dry_run=False,
+            reason=reason or "AI 自动整理知识树",
+        )
+        result["review_task_update"] = applied
+        result["ok"] = bool(result.get("ok")) and bool(applied.get("ok"))
+    return result
 
 
 @server.tool()
@@ -1866,8 +1918,8 @@ def update_review_task_draft(
     reason: str | None = None,
 ) -> dict[str, Any]:
     """按题号直接更新当前校对草稿的字段。默认预览，不会生成新校对任务。"""
-    if len(updates) > 50:
-        return {"ok": False, "error": "一次最多修改 50 道草稿题。"}
+    if len(updates) > 100:
+        return {"ok": False, "error": "一次最多修改 100 道草稿题。"}
     full = get_review_task_full(task_id)
     if not full.get("ok"):
         return full
@@ -1881,9 +1933,17 @@ def update_review_task_draft(
         "tags",
         "knowledge_point",
         "knowledge_points",
+        "topic3_ids",
+        "topic1_id",
+        "topic1_name",
+        "topic2_id",
+        "topic2_name",
+        "topic3_id",
+        "topic3_name",
         "question_type",
         "difficulty",
         "source",
+        "year",
         "status",
         "review_status",
     }
@@ -1919,6 +1979,19 @@ def update_review_task_draft(
             if difficulty < 1 or difficulty > 5:
                 return _tool_error("INVALID_ARGUMENT", f"{qid} 的 difficulty 必须是 1 到 5。", field="updates.difficulty")
             patch["difficulty"] = difficulty
+        if "year" in patch and patch["year"] is not None:
+            try:
+                year = int(patch["year"])
+            except (TypeError, ValueError):
+                return _tool_error("INVALID_ARGUMENT", f"{qid} 的 year 必须是有效年份。", field="updates.year")
+            if year < 1900 or year > 2100:
+                return _tool_error("INVALID_ARGUMENT", f"{qid} 的 year 必须在 1900 到 2100 之间。", field="updates.year")
+            patch["year"] = year
+        if "topic3_ids" in patch:
+            topic3_ids = list(dict.fromkeys(str(item).strip() for item in patch.get("topic3_ids") or [] if str(item).strip()))
+            if len(topic3_ids) > 3:
+                return _tool_error("INVALID_ARGUMENT", f"{qid} 最多绑定 3 个知识点。", field="updates.topic3_ids")
+            patch["topic3_ids"] = topic3_ids
         normalized.append({"question_id": qid, "patch": patch})
 
     updated_questions = [dict(item) if isinstance(item, dict) else item for item in full.get("questions", [])]

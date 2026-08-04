@@ -900,19 +900,15 @@ export default function BrowsePage() {
         {catalogOpen && <aside className="absolute inset-y-2 left-2 z-20 flex w-[calc(100%-1rem)] max-w-[300px] shrink-0 flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-white shadow-lg sm:static sm:inset-auto sm:w-60 sm:shadow-sm">
           <div className="border-b border-[var(--color-border)] p-3">
             <div className="mb-2 flex items-center gap-2">
-              <button className="rounded-md bg-[var(--color-teal)] px-3 py-1.5 text-sm font-bold text-white">
+              <div className="rounded-md bg-[var(--color-teal)] px-3 py-1.5 text-sm font-bold text-white">
                 高中物理
-              </button>
-              <button
-                type="button"
-                onClick={() => navigate('/collections')}
-                className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-1.5 text-sm font-semibold text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
-              >
-                目录管理
-              </button>
+              </div>
+              <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700">
+                AI 自动归类
+              </span>
             </div>
             <div className="text-xs leading-5 text-[var(--color-text-muted)]">
-              {filters.topic3_id || filters.topic2_id || filters.topic1_id ? '已按当前目录筛选题目' : '选择目录后自动联动题目列表'}
+              {filters.topic3_id || filters.topic2_id || filters.topic1_id ? '已按当前知识点筛选题目' : '知识树由 AI 匹配并随题目入库自动更新'}
             </div>
           </div>
 

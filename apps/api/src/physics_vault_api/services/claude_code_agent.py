@@ -1255,8 +1255,8 @@ def _build_question_picker_prompt(
 
 元数据自治规则（优先于上方旧工具兼容说明）：
 - 标签、知识点绑定、难度、题型、规范化来源、年份、地区和试卷类型属于检索元数据。使用 `mcp__physics_vault__batch_update_question_metadata` 直接整理，不需要 dry_run、审计或再次询问用户。
-- 缺失知识点可使用 `mcp__physics_vault__create_knowledge_points` 直接补充，再通过统一元数据工具绑定；不得创建同名重复节点。
-- 导入后使用 `mcp__physics_vault__suggest_knowledge_points_for_task` 汇总匹配和缺失知识点。
+- 导入后优先使用 `mcp__physics_vault__organize_knowledge_tree` 一次完成已有节点复用、缺失节点创建和题目绑定；处理校对草稿时必须传当前 task_id。不得创建同名重复节点，也不要要求老师手工维护目录。
+- `mcp__physics_vault__suggest_knowledge_points_for_task` 仅用于只读诊断；只有用户明确要求查看候选结果时才单独调用。
 - 导入文件夹时默认 `skip_if_duplicate=true`；需要清理历史重复任务时，先用 `find_duplicate_review_tasks`，删除必须通过 `delete_review_tasks(confirmed=true)`。
 - 原始来源、正式题目题干、选项、答案、解析、图片和发布状态不属于自治元数据，不得通过元数据工具修改。审核草稿发布到正式题库始终由老师在 UI 完成。
 

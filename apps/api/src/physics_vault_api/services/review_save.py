@@ -20,6 +20,7 @@ from ..schemas.review_save import (
     SaveReviewedQuestionsResponse,
 )
 from .question_write import QuestionWriteService
+from .metadata_management import MetadataManagementService
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +34,13 @@ class ReviewSaveService:
     - ``pending`` / ``modified`` questions are also skipped (not confirmed yet).
     """
 
-    def __init__(self, write_service: QuestionWriteService | None = None) -> None:
+    def __init__(
+        self,
+        write_service: QuestionWriteService | None = None,
+        metadata_service: MetadataManagementService | None = None,
+    ) -> None:
         self._write = write_service or QuestionWriteService()
+        self._metadata = metadata_service or MetadataManagementService()
 
     def save(
         self,
@@ -67,6 +73,7 @@ class ReviewSaveService:
             )
 
         result = self._write.save_batch(confirmed)
+        self._bind_knowledge_metadata(confirmed, result.errors)
 
         # ── Build per-item results ──
         results: list[SaveResultItem] = list(skipped)
@@ -107,6 +114,65 @@ class ReviewSaveService:
             failed_count=failed_count,
             results=results,
         )
+
+    def _bind_knowledge_metadata(
+        self,
+        questions: list[dict[str, Any]],
+        write_errors: list[str],
+    ) -> None:
+        """Persist AI knowledge assignments after the question rows exist."""
+
+        failed_ids = {
+            str(question.get("question_id") or "")
+            for question in questions
+            if any(str(question.get("question_id") or "") in error for error in write_errors)
+        }
+        explicit: list[dict[str, Any]] = []
+        fallback: list[dict[str, Any]] = []
+        for question in questions:
+            question_id = str(question.get("question_id") or "").strip()
+            if not question_id or question_id in failed_ids:
+                continue
+            points = question.get("knowledge_points") or []
+            if isinstance(points, list) and any(isinstance(point, dict) for point in points):
+                explicit.append(
+                    {
+                        "question_id": question_id,
+                        "knowledge_points": [point for point in points if isinstance(point, dict)],
+                        "tags": question.get("tags") or [],
+                        "source": question.get("source") or "",
+                        **({"year": question["year"]} if question.get("year") else {}),
+                    }
+                )
+                continue
+            topic3_ids = [str(item).strip() for item in question.get("topic3_ids") or [] if str(item).strip()]
+            if topic3_ids:
+                fallback.append({"question_id": question_id, "topic3_ids": topic3_ids[:3]})
+                continue
+            hint = str(question.get("knowledge_point") or "").strip()
+            if not hint:
+                continue
+            try:
+                matches = self._metadata.search_knowledge_points(hint, limit=1)
+            except FileNotFoundError:
+                logger.warning("Knowledge database is unavailable; skipping automatic binding")
+                return
+            if matches and int(matches[0].get("score") or 0) >= 45:
+                fallback.append(
+                    {"question_id": question_id, "topic3_ids": [matches[0]["topic3_id"]]}
+                )
+
+        try:
+            if explicit:
+                self._metadata.organize_knowledge_tree(
+                    explicit, reason="review save automatic knowledge organization"
+                )
+            if fallback:
+                self._metadata.batch_update_question_metadata(
+                    fallback, reason="review save automatic knowledge matching"
+                )
+        except Exception:
+            logger.exception("Questions were saved, but automatic knowledge binding failed")
 
     def save_knowledge(
         self,

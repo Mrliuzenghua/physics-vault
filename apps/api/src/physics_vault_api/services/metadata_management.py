@@ -137,6 +137,192 @@ class MetadataManagementService:
             },
         }
 
+    def search_knowledge_points(
+        self,
+        keyword: str,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return fuzzy-ranked knowledge points for Chinese queries."""
+
+        corpus = _search_query_text(keyword)
+        if not corpus:
+            return []
+        bounded_limit = min(max(int(limit or 20), 1), 100)
+        with closing(self._connect(writable=False)) as conn:
+            rows = conn.execute(
+                """
+                SELECT topic3_id, topic3_name, topic2_id, topic2_name,
+                       topic1_id, topic1_name, source_chapter, status, note
+                FROM knowledge_points
+                WHERE status = 'active'
+                ORDER BY topic1_id, topic2_id, topic3_name
+                """
+            ).fetchall()
+        ranked = sorted(
+            ((_knowledge_score(corpus, dict(row)), dict(row)) for row in rows),
+            key=lambda item: (-item[0], item[1]["topic3_id"]),
+        )
+        return [
+            {
+                **point,
+                "score": score,
+                "confidence": _confidence(score),
+                "rationale": _knowledge_rationale(corpus, point, score),
+            }
+            for score, point in ranked[:bounded_limit]
+            if score >= 12
+        ]
+
+    def organize_knowledge_tree(
+        self,
+        assignments: list[dict[str, Any]],
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Create missing nodes and bind formal questions in one transaction.
+
+        Draft question IDs are returned as structured patches. The MCP layer can
+        apply those patches to a review task without requiring a second AI pass.
+        """
+
+        if not assignments:
+            return _error("INVALID_ARGUMENT", "assignments must contain at least one item.", "assignments")
+        if len(assignments) > MAX_METADATA_UPDATES:
+            return _error(
+                "LIMIT_EXCEEDED",
+                f"At most {MAX_METADATA_UPDATES} assignments can be organized at once.",
+                "assignments",
+            )
+
+        created: list[dict[str, Any]] = []
+        existing: list[dict[str, Any]] = []
+        bound: list[dict[str, Any]] = []
+        draft_updates: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for index, assignment in enumerate(assignments):
+                    question_id = str(
+                        assignment.get("question_id") or assignment.get("id") or ""
+                    ).strip()
+                    raw_points = assignment.get("knowledge_points") or []
+                    if isinstance(raw_points, dict):
+                        raw_points = [raw_points]
+                    if not question_id or not isinstance(raw_points, list) or not raw_points:
+                        failed.append(
+                            {
+                                "index": index,
+                                "question_id": question_id,
+                                "error": "question_id and knowledge_points are required.",
+                            }
+                        )
+                        continue
+
+                    resolved: list[dict[str, Any]] = []
+                    for point_index, raw_point in enumerate(raw_points[:3]):
+                        if not isinstance(raw_point, dict):
+                            failed.append(
+                                {
+                                    "index": index,
+                                    "question_id": question_id,
+                                    "error": f"knowledge_points[{point_index}] must be an object.",
+                                }
+                            )
+                            continue
+                        result_kind, result_point = self._create_one_knowledge_point(
+                            conn, raw_point, point_index
+                        )
+                        if result_kind == "invalid":
+                            failed.append(
+                                {
+                                    "index": index,
+                                    "question_id": question_id,
+                                    "error": result_point.get("reason") or "Invalid knowledge point.",
+                                }
+                            )
+                            continue
+                        resolved.append(result_point)
+                        (created if result_kind == "created" else existing).append(result_point)
+
+                    topic3_ids = list(
+                        dict.fromkeys(str(point["topic3_id"]) for point in resolved)
+                    )
+                    if not topic3_ids:
+                        continue
+                    primary = resolved[0]
+                    patch: dict[str, Any] = {
+                        "question_id": question_id,
+                        "knowledge_point": primary["topic3_name"],
+                        "knowledge_points": resolved,
+                        "topic3_ids": topic3_ids,
+                        "topic1_id": primary["topic1_id"],
+                        "topic1_name": primary["topic1_name"],
+                        "topic2_id": primary["topic2_id"],
+                        "topic2_name": primary["topic2_name"],
+                        "topic3_id": primary["topic3_id"],
+                        "topic3_name": primary["topic3_name"],
+                    }
+                    for field in ("year", "tags", "source"):
+                        if field in assignment and assignment.get(field) is not None:
+                            patch[field] = assignment[field]
+
+                    formal = conn.execute(
+                        "SELECT primary_paper_id FROM questions WHERE question_id = ?",
+                        (question_id,),
+                    ).fetchone()
+                    if formal is None:
+                        draft_updates.append(patch)
+                        continue
+
+                    metadata_update: dict[str, Any] = {
+                        "question_id": question_id,
+                        "topic3_ids": topic3_ids,
+                    }
+                    if "tags" in patch:
+                        metadata_update["tags"] = patch["tags"]
+                    if "source" in patch:
+                        metadata_update["source_normalized"] = patch["source"]
+                    if "year" in patch and str(formal["primary_paper_id"] or "").strip():
+                        metadata_update["year"] = patch["year"]
+                    elif "year" in patch:
+                        warnings.append(
+                            {
+                                "question_id": question_id,
+                                "field": "year",
+                                "message": "The question has no linked paper, so year was kept out of the formal metadata update.",
+                            }
+                        )
+                    _, update_result = self._update_one_question_metadata(
+                        conn, metadata_update, index
+                    )
+                    bound.append(update_result)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        return {
+            "ok": not failed,
+            "reason": " ".join(str(reason or "").split())[:300] or None,
+            "created": _dedupe_points(created),
+            "existing": _dedupe_points(existing),
+            "bound": bound,
+            "draft_updates": draft_updates,
+            "failed": failed,
+            "warnings": warnings,
+            "summary": {
+                "received": len(assignments),
+                "created": len(_dedupe_points(created)),
+                "reused": len(_dedupe_points(existing)),
+                "bound": len(bound),
+                "draft_updates": len(draft_updates),
+                "failed": len(failed),
+            },
+        }
+
     def batch_update_question_metadata(
         self,
         updates: list[dict[str, Any]],
@@ -248,13 +434,21 @@ class MetadataManagementService:
             else:
                 return "invalid", {"index": index, "reason": "未指定 topic2_id 时必须提供 topic2_name。"}
 
-        same_name = conn.execute(
+        same_name_rows = conn.execute(
             """
             SELECT * FROM knowledge_points
-            WHERE topic2_id = ? AND lower(trim(topic3_name)) = lower(trim(?))
+            WHERE topic2_id = ?
             """,
-            (topic2_id, topic3_name),
-        ).fetchone()
+            (topic2_id,),
+        ).fetchall()
+        same_name = next(
+            (
+                row
+                for row in same_name_rows
+                if _name_key(row["topic3_name"]) == _name_key(topic3_name)
+            ),
+            None,
+        )
         if same_name is not None:
             return "existing", dict(same_name)
 
@@ -442,6 +636,19 @@ def _search_text(value: Any) -> str:
     return _name_key(value)
 
 
+def _search_query_text(value: Any) -> str:
+    normalized = _search_text(value)
+    aliases = {
+        "参考系": "参照物参考系",
+        "参照物": "参考系参照物",
+        "卫星轨道": "人造卫星圆周运动轨道",
+        "磁感应强度": "磁场磁感应强度",
+        "平抛运动": "抛体运动平抛运动",
+        "宇宙速度": "人造卫星宇宙速度",
+    }
+    return aliases.get(normalized, normalized)
+
+
 def _bigrams(value: str) -> set[str]:
     if len(value) < 2:
         return {value} if value else set()
@@ -497,6 +704,15 @@ def _normalize_tags(value: Any) -> list[str]:
         if len(result) >= MAX_TAGS_PER_QUESTION:
             break
     return result
+
+
+def _dedupe_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    for point in points:
+        topic3_id = str(point.get("topic3_id") or "").strip()
+        if topic3_id:
+            unique.setdefault(topic3_id, point)
+    return list(unique.values())
 
 
 def _error(code: str, message: str, field: str) -> dict[str, Any]:

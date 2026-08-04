@@ -18,8 +18,17 @@ class ReviewedQuestionPayload(BaseModel):
     figures: list[dict[str, Any]] = Field(default_factory=list)
     difficulty: int | None = Field(default=None, ge=0, le=5)
     knowledge_point: str = Field(default="")
+    knowledge_points: list[dict[str, Any]] = Field(default_factory=list)
+    topic3_ids: list[str] = Field(default_factory=list, max_length=3)
+    topic1_id: str = Field(default="")
+    topic1_name: str = Field(default="")
+    topic2_id: str = Field(default="")
+    topic2_name: str = Field(default="")
+    topic3_id: str = Field(default="")
+    topic3_name: str = Field(default="")
     tags: list[str] = Field(default_factory=list)
     source: str = Field(default="")
+    year: int | None = Field(default=None, ge=1900, le=2100)
     import_batch_id: str | None = None
     source_page: int | None = None
     source_region_id: str | None = None

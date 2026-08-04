@@ -57,6 +57,7 @@ EXPECTED_MCP_TOOLS = {
     "search_knowledge_points",
     "get_question_knowledge_points",
     "create_knowledge_points",
+    "organize_knowledge_tree",
     "batch_update_question_metadata",
     "database_boundary_report",
     "database_health_report",
