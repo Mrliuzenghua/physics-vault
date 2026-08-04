@@ -1,8 +1,11 @@
+import { resolveServiceStatus } from './statusBarStatus';
+
 interface Props {
   questionCount: number;
   lastImportTime?: string;
-  mcpVlOnline: boolean | null;
-  mcpLlmOnline: boolean | null;
+  mcpVlOnline: boolean;
+  mcpLlmOnline: boolean;
+  mcpRuntimeEnabled: boolean;
   mcpMode?: string;
   mcpVlModel?: string | null;
   mcpLlmModel?: string | null;
@@ -13,36 +16,31 @@ interface Props {
 
 function StatusDot({
   online,
+  runtimeEnabled,
   label,
   model,
   mode,
   lastCheckedAt,
 }: {
-  online: boolean | null;
+  online: boolean;
+  runtimeEnabled: boolean;
   label: string;
   model?: string | null;
   mode?: string;
   lastCheckedAt?: string | null;
 }) {
-  const isUnknown = online === null;
-  const statusText = isUnknown ? '检查中' : online ? '在线' : '离线';
-  const color = isUnknown ? 'var(--color-text-muted)' : online ? 'var(--color-green)' : 'var(--color-red)';
-  const dotClass = isUnknown
-    ? 'bg-[var(--color-text-muted)]'
-    : online
-      ? 'bg-[var(--color-green)]'
-      : 'bg-[var(--color-red)]';
+  const status = resolveServiceStatus(online, runtimeEnabled, lastCheckedAt);
   const title = [
-    `${label}: ${statusText}`,
+    `${label}: ${status.text}`,
     model ? `模型: ${model}` : '',
     mode ? `模式: ${mode}` : '',
     lastCheckedAt ? `检查: ${new Date(lastCheckedAt).toLocaleString()}` : '',
   ].filter(Boolean).join('\n');
   return (
     <span className="inline-flex items-center gap-1.5" title={title}>
-      <span className={`inline-block h-1.5 w-1.5 rounded-full ${dotClass}`} />
-      <span className="text-[11px]" style={{ color }}>
-        {label}: {statusText}
+      <span className={`inline-block h-1.5 w-1.5 rounded-full ${status.dotClass}`} />
+      <span className="text-[11px]" style={{ color: status.colorToken }}>
+        {label}: {status.text}
       </span>
     </span>
   );
@@ -53,6 +51,7 @@ export default function StatusBar({
   lastImportTime,
   mcpVlOnline,
   mcpLlmOnline,
+  mcpRuntimeEnabled,
   mcpMode,
   mcpVlModel,
   mcpLlmModel,
@@ -83,8 +82,8 @@ export default function StatusBar({
 
       {aiEnabled ? (
         <div className="flex items-center gap-3">
-          <StatusDot online={mcpVlOnline} label="VL" model={mcpVlModel} mode={mcpMode} lastCheckedAt={mcpLastCheckedAt} />
-          <StatusDot online={mcpLlmOnline} label="LLM" model={mcpLlmModel} mode={mcpMode} lastCheckedAt={mcpLastCheckedAt} />
+          <StatusDot online={mcpVlOnline} runtimeEnabled={mcpRuntimeEnabled} label="VL" model={mcpVlModel} mode={mcpMode} lastCheckedAt={mcpLastCheckedAt} />
+          <StatusDot online={mcpLlmOnline} runtimeEnabled={mcpRuntimeEnabled} label="LLM" model={mcpLlmModel} mode={mcpMode} lastCheckedAt={mcpLastCheckedAt} />
         </div>
       ) : (
         <span className="text-[11px] font-medium text-[var(--color-orange)]">

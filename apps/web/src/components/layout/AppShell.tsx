@@ -279,8 +279,9 @@ export default function AppShell() {
       </div>
       <StatusBar
         questionCount={questionCount}
-        mcpVlOnline={mcpStatus.last_checked_at ? mcpStatus.vl_available : null}
-        mcpLlmOnline={mcpStatus.last_checked_at ? mcpStatus.llm_available : null}
+        mcpVlOnline={mcpStatus.vl_available}
+        mcpLlmOnline={mcpStatus.llm_available}
+        mcpRuntimeEnabled={mcpStatus.enabled}
         mcpMode={mcpStatus.mode}
         mcpVlModel={mcpStatus.vl_model}
         mcpLlmModel={mcpStatus.llm_model}
