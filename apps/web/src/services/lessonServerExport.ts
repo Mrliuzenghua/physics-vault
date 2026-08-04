@@ -42,6 +42,7 @@ export async function exportLessonOnServer(
       lesson_package: lessonPackage,
       include_answers: options.includeAnswers,
       include_analysis: options.includeAnalysis,
+      answer_position: options.answerPosition || 'after_question',
       file_name: lessonPackage.title,
     }),
   });

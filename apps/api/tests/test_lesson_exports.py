@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,7 +40,7 @@ def _lesson_package(image_path: str) -> dict:
             {
                 "question_id": "q-1",
                 "question_type": "single_choice",
-                "title": "质量为 $m$ 的小球速度满足 $v^2=2gh$，下列说法正确的是？ ![fig:fig-1]",
+                "title": "质量为 $m$ 的小球速度满足 $v^2=2gh$，拉力记为 $F_1$，下列说法正确的是？ ![fig:fig-1]",
                 "options": [
                     {"opt": "A", "content": "动能为 $\\frac{1}{2}mv^2$"},
                     {"opt": "B", "content": "重力势能为 $mgh$"},
@@ -70,8 +71,25 @@ def _lesson_package(image_path: str) -> dict:
                 "relatedQuestionIds": ["q-1"],
             }
         ],
-        "textBlocks": [],
+        "textBlocks": [
+            {
+                "id": "text-title",
+                "title": "机械能专题训练",
+                "content": "机械能专题训练",
+                "blockKind": "exam_title",
+                "style": {"textAlign": "center", "fontWeight": "bold"},
+            },
+            {
+                "id": "text-section",
+                "title": "一、选择题",
+                "content": "一、选择题",
+                "blockKind": "section_title",
+                "style": {"fontWeight": "bold"},
+            },
+        ],
         "nodes": [
+            {"type": "text", "id": "node-title", "textBlockId": "text-title"},
+            {"type": "text", "id": "node-section", "textBlockId": "text-section"},
             {"type": "knowledge", "id": "node-k", "knowledgeId": "k-1"},
             {"type": "question", "id": "node-q", "questionId": "q-1"},
         ],
@@ -169,16 +187,47 @@ def test_word_export_snapshot_structure_and_safe_download(tmp_path: Path) -> Non
 
     snapshot = json.loads((task_dir / "snapshot.json").read_text(encoding="utf-8"))
     assert snapshot["lesson_package"]["title"] == "机械能守恒练习"
-    assert snapshot["options"] == {"include_answers": True, "include_analysis": True}
+    assert snapshot["options"] == {
+        "include_answers": True,
+        "include_analysis": True,
+        "answer_position": "after_question",
+    }
 
     document = Document(output_path)
     text = "\n".join(paragraph.text for paragraph in document.paragraphs)
     table_text = "\n".join(cell.text for table in document.tables for row in table.rows for cell in row.cells)
-    assert "机械能守恒练习" in text
-    assert "v²=2gh" in text
+    assert "机械能守恒练习" not in text
+    assert "学生版与教师版共用快照" not in text
+    assert "机械能专题训练" in text
     assert "答案：" in text
     assert "解析：" in text
-    assert "A. 动能为 (1)/(2)mv²" in table_text
+    assert "A. 动能为" in table_text
+    assert document.styles["Normal"].font.name == "SimSun"
+    assert document.styles["Normal"].font.size.pt == 10.5
+    title_run = next(paragraph for paragraph in document.paragraphs if paragraph.text == "机械能专题训练").runs[0]
+    section_run = next(paragraph for paragraph in document.paragraphs if paragraph.text == "一、选择题").runs[0]
+    knowledge_run = next(paragraph for paragraph in document.paragraphs if paragraph.text == "机械能守恒").runs[0]
+    knowledge_body_run = next(paragraph for paragraph in document.paragraphs if "只有重力做功" in paragraph.text).runs[0]
+    answer_run = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("答案：")).runs[0]
+    analysis_run = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("解析：")).runs[0]
+    assert (title_run.font.name, title_run.font.size.pt, str(title_run.font.color.rgb)) == ("SimSun", 16, "000000")
+    assert (section_run.font.name, section_run.font.size.pt, str(section_run.font.color.rgb)) == ("SimSun", 14, "000000")
+    assert (knowledge_run.font.name, knowledge_run.font.size.pt, str(knowledge_run.font.color.rgb)) == ("SimSun", 14, "000000")
+    assert (knowledge_body_run.font.name, knowledge_body_run.font.size.pt, str(knowledge_body_run.font.color.rgb)) == ("SimSun", 10.5, "000000")
+    assert (answer_run.font.name, answer_run.font.size.pt, str(answer_run.font.color.rgb)) == ("KaiTi", 10.5, "000000")
+    assert (analysis_run.font.name, analysis_run.font.size.pt, str(analysis_run.font.color.rgb)) == ("KaiTi", 10.5, "000000")
+    question_paragraph = next(paragraph for paragraph in document.paragraphs if "质量为" in paragraph.text)
+    assert all(run.bold in {None, False} for run in question_paragraph.runs)
+    with zipfile.ZipFile(output_path) as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+    assert document_xml.count("<m:oMath>") >= 5
+    assert "<m:sSup>" in document_xml
+    assert "<m:sSub>" in document_xml
+    assert "<m:f>" in document_xml
+    assert "<m:t>F</m:t>" in document_xml
+    assert "<m:t>v</m:t>" in document_xml
+    assert "<m:t>mgh</m:t>" in document_xml
+    assert '<w:jc w:val="left"/>' in document_xml
     assert len(document.inline_shapes) == 1
     assert document.sections[0].header.paragraphs[0].text == "高二物理"
     assert "Physics Vault" in document.sections[0].footer.paragraphs[0].text
@@ -187,6 +236,31 @@ def test_word_export_snapshot_structure_and_safe_download(tmp_path: Path) -> Non
     assert download.status_code == 200
     assert download.content[:2] == b"PK"
     assert "physics-vault-export.docx" in download.headers["content-disposition"]
+
+
+def test_word_export_can_place_answers_at_document_end(tmp_path: Path) -> None:
+    from docx import Document
+
+    client, _service, _repository, project_dir = _build_test_stack(tmp_path)
+    response = client.post(
+        "/api/exports/word",
+        json={
+            "lesson_package": _lesson_package("data/assets/questions/motion.png"),
+            "include_answers": True,
+            "include_analysis": True,
+            "answer_position": "end",
+        },
+    )
+
+    assert response.status_code == 200
+    task = response.json()
+    output_path = project_dir / task["result"]["result_file_path"]
+    document = Document(output_path)
+    paragraphs = [paragraph.text for paragraph in document.paragraphs]
+    heading_index = paragraphs.index("参考答案与解析")
+    answer_index = next(index for index, text in enumerate(paragraphs) if text.startswith("1. 答案："))
+    assert heading_index < answer_index
+    assert all("答案：" not in text for text in paragraphs[:heading_index])
 
 
 def test_pptx_export_preserves_template_teacher_content_and_images(tmp_path: Path) -> None:
@@ -206,7 +280,7 @@ def test_pptx_export_preserves_template_teacher_content_and_images(tmp_path: Pat
     task = response.json()
     output_path = project_dir / task["result"]["result_file_path"]
     presentation = Presentation(output_path)
-    assert len(presentation.slides) == 4  # cover, knowledge, question, teacher answer
+    assert len(presentation.slides) == 6  # cover, two title blocks, knowledge, question, teacher answer
     all_text = "\n".join(
         shape.text
         for slide in presentation.slides

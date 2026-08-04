@@ -78,6 +78,23 @@ const FONT_FAMILY_OPTIONS: Array<{ value: HandoutStyleConfig['fontFamily']; labe
   { value: 'fangsong', label: '仿宋' },
   { value: 'system', label: '系统' },
 ];
+
+type AnswerExportMode = 'end_answer' | 'end_answer_analysis' | 'after_answer' | 'after_answer_analysis';
+
+const ANSWER_EXPORT_OPTIONS: Array<{ value: AnswerExportMode; label: string }> = [
+  { value: 'end_answer', label: '卷尾答案' },
+  { value: 'end_answer_analysis', label: '卷尾答案和解析' },
+  { value: 'after_answer', label: '题后答案' },
+  { value: 'after_answer_analysis', label: '题后答案和解析' },
+];
+
+function resolveAnswerExportOptions(mode: AnswerExportMode) {
+  return {
+    includeAnswers: true,
+    includeAnalysis: mode.endsWith('_analysis'),
+    answerPosition: mode.startsWith('end_') ? 'end' as const : 'after_question' as const,
+  };
+}
 const PX_PER_MM = 96 / 25.4;
 const RULER_LEFT_WIDTH_PX = 34;
 const SPREAD_GAP_MM = 10;
@@ -225,6 +242,7 @@ export default function ComposePage() {
   const [canvasWidth, setCanvasWidth] = useState(0);
   const [showAnswers, setShowAnswers] = useState(false);
   const [showAnalysis, setShowAnalysis] = useState(false);
+  const [answerExportMode, setAnswerExportMode] = useState<AnswerExportMode>('end_answer_analysis');
   const [outputProfile, setOutputProfile] = useState<'student' | 'teacher'>('student');
   const [lessonTitle, setLessonTitleRaw] = useState('未命名试卷');
   const [lessonSubtitle, setLessonSubtitleRaw] = useState('');
@@ -1204,7 +1222,7 @@ export default function ComposePage() {
       return;
     }
     setExportState('word');
-    const options = { includeAnswers: showAnswers, includeAnalysis: showAnalysis };
+    const options = resolveAnswerExportOptions(answerExportMode);
     void exportLessonOnServer('word', previewLessonPackage, options)
       .then(() => null)
       .catch(() => exportLessonAsWord(previewLessonPackage, { ...options, download: false }))
@@ -1219,7 +1237,7 @@ export default function ComposePage() {
         setExportState('done');
       })
       .catch(() => setExportState('error'));
-  }, [diagnostics.figureIssueCount, diagnostics.formulaIssueCount, diagnostics.missingAnswerCount, lessonTitle, previewLessonPackage, showAnalysis, showAnswers]);
+  }, [answerExportMode, diagnostics.figureIssueCount, diagnostics.formulaIssueCount, diagnostics.missingAnswerCount, lessonTitle, previewLessonPackage]);
 
   const downloadWordPreview = useCallback(() => {
     if (!wordPreviewFile) return;
@@ -1236,13 +1254,13 @@ export default function ComposePage() {
 
   const handleExportPptx = useCallback(() => {
     setExportState('pptx');
-    const options = { includeAnswers: showAnswers, includeAnalysis: showAnalysis };
+    const options = resolveAnswerExportOptions(answerExportMode);
     void exportLessonOnServer('pptx', previewLessonPackage, options)
       .then(() => setExportState('done'))
       .catch(() => exportLessonAsPptx(previewLessonPackage, options))
       .then(() => setExportState('done'))
       .catch(() => setExportState('error'));
-  }, [previewLessonPackage, showAnalysis, showAnswers]);
+  }, [answerExportMode, previewLessonPackage]);
 
   const nudgeZoom = useCallback((delta: number) => {
     setZoomMode('manual');
@@ -1568,8 +1586,6 @@ export default function ComposePage() {
                           editingItemId={editingItemId}
                           onItemSelect={selectCanvasItem}
                           onItemEdit={editCanvasItem}
-                          onTitleChange={setLessonTitle}
-                          onSubtitleChange={setLessonSubtitle}
                           sortable={!editingItemId}
                           renderItemActions={(itemId) => itemId === selectedItem?.id ? (
                             <div className="pv-canvas-actions" role="toolbar" aria-label="内容操作">
@@ -1697,6 +1713,15 @@ export default function ComposePage() {
                   <div className="space-y-2">
                     <ToggleRow label="显示答案" active={showAnswers} onClick={() => setShowAnswers((prev) => !prev)} />
                     <ToggleRow label="显示解析" active={showAnalysis} onClick={() => setShowAnalysis((prev) => !prev)} />
+                    <div className="rounded-lg bg-[var(--color-bg-hover)] px-3 py-2">
+                      <Select
+                        label="Word 答案安排"
+                        size="sm"
+                        value={answerExportMode}
+                        options={ANSWER_EXPORT_OPTIONS}
+                        onChange={(event) => setAnswerExportMode(event.target.value as AnswerExportMode)}
+                      />
+                    </div>
                     <ToggleRow label="渲染全部页面" active={renderAllPreviewPages} onClick={() => setRenderAllPreviewPages((prev) => !prev)} />
                   </div>
                 </PanelCard>

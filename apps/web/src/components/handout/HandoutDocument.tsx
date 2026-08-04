@@ -20,8 +20,6 @@ interface Props {
   editingItemId?: string | null;
   renderItemEditor?: () => ReactNode;
   sortable?: boolean;
-  onTitleChange?: (value: string) => void;
-  onSubtitleChange?: (value: string) => void;
   renderItemActions?: (itemId: string) => ReactNode;
 }
 
@@ -306,79 +304,6 @@ function PageFooter({ config, pageNum }: { config: HandoutConfig; pageNum: numbe
   );
 }
 
-function DocumentTitle({
-  config,
-  onTitleChange,
-  onSubtitleChange,
-}: {
-  config: HandoutConfig;
-  onTitleChange?: (value: string) => void;
-  onSubtitleChange?: (value: string) => void;
-}) {
-  const editable = Boolean(onTitleChange || onSubtitleChange);
-  const titleSnapshot = useRef(config.title || '');
-  const subtitleSnapshot = useRef(config.subtitle || '');
-  if (!editable && !config.title?.trim() && !config.subtitle?.trim()) return null;
-
-  return (
-    <div
-      style={{
-        marginBottom: 18,
-        paddingBottom: 12,
-        borderBottom: '1px solid #cbd5e1',
-        textAlign: 'center',
-      }}
-    >
-      {editable ? (
-        <input
-          className="pv-document-title-input"
-          value={config.title || ''}
-          placeholder="未命名试卷"
-          aria-label="白纸试卷标题"
-          onFocus={() => { titleSnapshot.current = config.title || ''; }}
-          onChange={(event) => onTitleChange?.(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') event.currentTarget.blur();
-            if (event.key === 'Escape') {
-              onTitleChange?.(titleSnapshot.current);
-              event.currentTarget.blur();
-            }
-          }}
-          onClick={(event) => event.stopPropagation()}
-          style={{ width: '100%', border: 0, borderBottom: '1px solid transparent', background: 'transparent', padding: '1px 4px', outline: 'none', textAlign: 'center', fontFamily: 'inherit', fontSize: 22, lineHeight: 1.4, fontWeight: 700, color: '#0f172a' }}
-        />
-      ) : config.title?.trim() && (
-        <div style={{ fontSize: 22, lineHeight: 1.4, fontWeight: 700, color: '#0f172a' }}>
-          {config.title}
-        </div>
-      )}
-      {editable ? (
-        <input
-          className="pv-document-title-input"
-          value={config.subtitle || ''}
-          placeholder="添加副标题"
-          aria-label="白纸试卷副标题"
-          onFocus={() => { subtitleSnapshot.current = config.subtitle || ''; }}
-          onChange={(event) => onSubtitleChange?.(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') event.currentTarget.blur();
-            if (event.key === 'Escape') {
-              onSubtitleChange?.(subtitleSnapshot.current);
-              event.currentTarget.blur();
-            }
-          }}
-          onClick={(event) => event.stopPropagation()}
-          style={{ width: '100%', marginTop: 5, border: 0, borderBottom: '1px solid transparent', background: 'transparent', padding: '1px 4px', outline: 'none', textAlign: 'center', fontFamily: 'inherit', fontSize: 12.5, lineHeight: 1.6, color: '#64748b' }}
-        />
-      ) : config.subtitle?.trim() && (
-        <div style={{ marginTop: 5, fontSize: 12.5, lineHeight: 1.6, color: '#64748b' }}>
-          {config.subtitle}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function KnowledgeBlock({ item }: { item: HandoutItem }) {
   return (
     <div
@@ -557,7 +482,6 @@ function HandoutFlowContent({ items, config }: Pick<Props, 'items' | 'config'>) 
   let questionNum = 0;
   return (
     <div className="pv-paged-flow">
-      <DocumentTitle config={config} />
       <div className="pv-paged-flow-body">
         {items.map((item, index) => {
           if (item.type === 'page_break') return <div key={`break-${index}`} className="pv-paged-manual-break" />;
@@ -622,7 +546,7 @@ export function PagedHandoutDocument({ items, config }: Pick<Props, 'items' | 'c
   );
 }
 
-export default function HandoutDocument({ items, config, screenPagesPerRow = 1, screenCompact = false, screenPageLimit, paginationEngine = 'estimated', selectedItemId, selectedItemIds = [], onItemSelect, onItemEdit, editingItemId, renderItemEditor, sortable = false, onTitleChange, onSubtitleChange, renderItemActions }: Props) {
+export default function HandoutDocument({ items, config, screenPagesPerRow = 1, screenCompact = false, screenPageLimit, paginationEngine = 'estimated', selectedItemId, selectedItemIds = [], onItemSelect, onItemEdit, editingItemId, renderItemEditor, sortable = false, renderItemActions }: Props) {
   if (!items || items.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -707,8 +631,6 @@ export default function HandoutDocument({ items, config, screenPagesPerRow = 1, 
           >
             {/* Page header */}
             <PageHeader config={config} />
-            {pageIndex === 0 && <DocumentTitle config={config} onTitleChange={onTitleChange} onSubtitleChange={onSubtitleChange} />}
-
             {/* Page body */}
             <div
               className="handout-page-body"

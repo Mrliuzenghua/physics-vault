@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -11,6 +11,7 @@ class LessonExportRequest(BaseModel):
     lesson_package: dict[str, Any]
     include_answers: bool = False
     include_analysis: bool = False
+    answer_position: Literal["after_question", "end"] = "after_question"
     file_name: str | None = Field(default=None, max_length=160)
 
     @field_validator("lesson_package")

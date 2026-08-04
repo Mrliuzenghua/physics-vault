@@ -7,6 +7,7 @@ import { normalizeLessonPackageForOutput } from './lessonLayoutModel';
 export interface LessonExportOptions {
   includeAnswers: boolean;
   includeAnalysis: boolean;
+  answerPosition?: 'after_question' | 'end';
   download?: boolean;
 }
 
@@ -315,37 +316,19 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
   pkg = normalizeLessonPackageForOutput(pkg);
   const docx = await import('docx');
   const style = pkg.styleConfig;
-  const bodyFont = style?.fontFamily === 'heiti'
-    ? 'SimHei'
-    : style?.fontFamily === 'kaiti'
-      ? 'KaiTi'
-      : style?.fontFamily === 'fangsong'
-        ? 'FangSong'
-        : style?.fontFamily === 'system'
-          ? 'Microsoft YaHei'
-          : 'SimSun';
-  const bodySize = Math.round((style?.fontSize || 12) * 2);
+  const bodyFont = 'SimSun';
+  const answerFont = 'KaiTi';
+  const bodySize = 21;
+  const titleSize = 32;
+  const smallTitleSize = 28;
+  const wordColor = '000000';
   const lineSpacing = Math.round((style?.lineHeight || 1.55) * 240);
   const questionMap = new Map(pkg.questions.map((question) => [question.question_id, question]));
   const knowledgeMap = new Map(pkg.knowledgeCards.map((card) => [card.id, card]));
   const textMap = new Map(pkg.textBlocks.map((block) => [block.id, block]));
   let questionIndex = 0;
   const children: InstanceType<typeof docx.Paragraph>[] = [];
-
-  children.push(new docx.Paragraph({
-    alignment: docx.AlignmentType.CENTER,
-    spacing: { after: 100 },
-    keepNext: true,
-    children: [new docx.TextRun({ text: pkg.title || '未命名学案', bold: true, size: 36, font: 'Microsoft YaHei' })],
-  }));
-  if (pkg.subtitle) {
-    children.push(new docx.Paragraph({
-      alignment: docx.AlignmentType.CENTER,
-      spacing: { after: 280 },
-      keepNext: true,
-      children: [new docx.TextRun({ text: pkg.subtitle, color: '53647A', size: 22, font: 'Microsoft YaHei' })],
-    }));
-  }
+  const trailingAnswerBlocks: Array<{ questionIndex: number; question: Question }> = [];
 
   for (const node of pkg.nodes) {
     if (node.type === 'page_break') {
@@ -359,11 +342,11 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
         heading: docx.HeadingLevel.HEADING_2,
         spacing: { before: 220, after: 90 },
         keepNext: true,
-        children: docxMathChildren(docx, card.title, { color: COLORS.ink, bold: true, font: 'Microsoft YaHei', size: bodySize + 4 }) as never,
+        children: docxMathChildren(docx, card.title, { color: wordColor, bold: true, font: bodyFont, size: smallTitleSize }) as never,
       }));
-      children.push(new docx.Paragraph({ children: docxMathChildren(docx, card.summary, { font: bodyFont, size: bodySize }) as never, spacing: { line: lineSpacing, after: 100 }, keepNext: true, keepLines: true }));
+      children.push(new docx.Paragraph({ children: docxMathChildren(docx, card.summary, { color: wordColor, font: bodyFont, size: bodySize }) as never, spacing: { line: lineSpacing, after: 100 }, keepNext: true, keepLines: true }));
       card.points.forEach((point, pointIndex) => children.push(new docx.Paragraph({
-        children: docxMathChildren(docx, point, { font: bodyFont, size: bodySize }) as never,
+        children: docxMathChildren(docx, point, { color: wordColor, font: bodyFont, size: bodySize }) as never,
         bullet: { level: 0 },
         spacing: { line: lineSpacing, after: 60 },
         keepLines: true,
@@ -375,13 +358,18 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
       const block = textMap.get(node.textBlockId);
       if (!block) continue;
       const isHeading = block.blockKind === 'section_title' || block.blockKind === 'exam_title';
+      const blockSize = block.blockKind === 'exam_title'
+        ? titleSize
+        : block.blockKind === 'section_title'
+          ? smallTitleSize
+          : bodySize;
       children.push(new docx.Paragraph({
         alignment: block.style?.textAlign ? toDocxAlignment(block.style.textAlign, docx.AlignmentType) as never : undefined,
         heading: isHeading ? (block.blockKind === 'exam_title' ? docx.HeadingLevel.TITLE : docx.HeadingLevel.HEADING_2) : undefined,
         spacing: { before: isHeading ? 200 : 100, after: 100 },
         keepNext: isHeading,
         keepLines: true,
-        children: docxMathChildren(docx, block.content || block.title, { bold: block.style?.fontWeight === 'bold' || isHeading, size: (block.style?.fontSize || 12) * 2, font: 'Microsoft YaHei' }) as never,
+        children: docxMathChildren(docx, block.content || block.title, { color: wordColor, bold: block.style?.fontWeight === 'bold' || isHeading, size: blockSize, font: bodyFont }) as never,
       }));
       continue;
     }
@@ -392,7 +380,7 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
       spacing: { before: 160, after: 70, line: lineSpacing },
       keepNext: Boolean((question.figures || []).length || (question.options || []).length),
       keepLines: true,
-      children: [new docx.TextRun({ text: `${questionIndex}. `, bold: true, font: bodyFont, size: bodySize }), ...docxMathChildren(docx, question.title || question.stem_text || '', { bold: true, font: bodyFont, size: bodySize })] as never,
+      children: [new docx.TextRun({ text: `${questionIndex}. `, font: bodyFont, size: bodySize }), ...docxMathChildren(docx, question.title || question.stem_text || '', { font: bodyFont, size: bodySize })] as never,
     }));
     const figureById = new Map((question.figures || []).map((figure) => [figure.fig_uuid, figure]));
     const optionFigureIds = new Set((question.options || []).flatMap((option) => extractFigureIds(option.content)));
@@ -420,9 +408,7 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
         }
       }
       if (figureRuns.length > 0) {
-        const figureAlignment = uniqueFigures[0]?.display_align === 'left'
-          ? docx.AlignmentType.LEFT
-          : uniqueFigures[0]?.display_align === 'right' ? docx.AlignmentType.RIGHT : docx.AlignmentType.CENTER;
+        const figureAlignment = docx.AlignmentType.LEFT;
         children.push(new docx.Paragraph({
           alignment: figureAlignment,
           spacing: { after: 90 },
@@ -434,7 +420,7 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
           children.push(new docx.Paragraph({
             alignment: figureAlignment,
             spacing: { after: 80 },
-            children: [new docx.TextRun({ text: uniqueFigures[0].caption, color: COLORS.muted, italics: true, font: bodyFont, size: Math.max(18, bodySize - 2) })],
+            children: [new docx.TextRun({ text: uniqueFigures[0].caption, color: wordColor, italics: true, font: bodyFont, size: Math.max(18, bodySize - 2) })],
           }));
         }
       }
@@ -445,7 +431,7 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
         .map((figureId) => figureById.get(figureId))
         .filter(Boolean);
       children.push(new docx.Paragraph({
-        children: [new docx.TextRun({ text: `${option.opt}. `, bold: true, font: bodyFont, size: bodySize }), ...docxMathChildren(docx, option.content, { font: bodyFont, size: bodySize })] as never,
+        children: [new docx.TextRun({ text: `${option.opt}. `, font: bodyFont, size: bodySize }), ...docxMathChildren(docx, option.content, { font: bodyFont, size: bodySize })] as never,
         indent: { left: 360, hanging: 0 },
         spacing: { line: lineSpacing, after: optionImages.length > 0 ? 30 : 45 },
         keepLines: true,
@@ -464,19 +450,35 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
         }));
       }
     }
-    if (options.includeAnswers && question.answer) children.push(new docx.Paragraph({ spacing: { before: 70, after: 45, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: '答案：', bold: true, color: COLORS.answer, font: bodyFont, size: bodySize }), ...docxMathChildren(docx, question.answer, { color: COLORS.answer, font: bodyFont, size: bodySize })] as never }));
-    if (options.includeAnalysis && question.analysis) children.push(new docx.Paragraph({ spacing: { before: 35, after: 100, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: '解析：', bold: true, color: COLORS.muted, font: bodyFont, size: bodySize }), ...docxMathChildren(docx, question.analysis, { color: COLORS.muted, font: bodyFont, size: bodySize })] as never }));
+    if (options.answerPosition === 'end') {
+      trailingAnswerBlocks.push({ questionIndex, question });
+    } else {
+      if (options.includeAnswers && question.answer) children.push(new docx.Paragraph({ spacing: { before: 70, after: 45, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: '答案：', color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, question.answer, { color: wordColor, font: answerFont, size: bodySize })] as never }));
+      if (options.includeAnalysis && question.analysis) children.push(new docx.Paragraph({ spacing: { before: 35, after: 100, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: '解析：', color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, question.analysis, { color: wordColor, font: answerFont, size: bodySize })] as never }));
+    }
+  }
+
+  if (trailingAnswerBlocks.length > 0 && (options.includeAnswers || options.includeAnalysis)) {
+    children.push(new docx.Paragraph({ children: [new docx.PageBreak()] }));
+    children.push(new docx.Paragraph({
+      spacing: { after: 120 },
+      children: [new docx.TextRun({ text: options.includeAnalysis ? '参考答案与解析' : '参考答案', bold: true, color: wordColor, font: bodyFont, size: smallTitleSize })],
+    }));
+    for (const item of trailingAnswerBlocks) {
+      if (options.includeAnswers && item.question.answer) children.push(new docx.Paragraph({ spacing: { before: 70, after: 45, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: `${item.questionIndex}. 答案：`, color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, item.question.answer, { color: wordColor, font: answerFont, size: bodySize })] as never }));
+      if (options.includeAnalysis && item.question.analysis) children.push(new docx.Paragraph({ spacing: { before: 35, after: 100, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: item.question.answer ? '解析：' : `${item.questionIndex}. 解析：`, color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, item.question.analysis, { color: wordColor, font: answerFont, size: bodySize })] as never }));
+    }
   }
 
   const headerText = pkg.headerFooter?.headerEnabled ? pkg.headerFooter.headerText : '';
   const footerText = pkg.headerFooter?.footerEnabled ? pkg.headerFooter.footerText : '';
   const footerChildren = [];
-  if (footerText) footerChildren.push(new docx.TextRun({ text: footerText, font: bodyFont, size: 18 }));
+  if (footerText) footerChildren.push(new docx.TextRun({ text: footerText, color: wordColor, font: bodyFont, size: 18 }));
   if (pkg.headerFooter?.showPageNumber) {
-    if (footerChildren.length > 0) footerChildren.push(new docx.TextRun({ text: '  ·  ', color: COLORS.muted, size: 18 }));
-    footerChildren.push(new docx.TextRun({ text: '第 ', font: bodyFont, size: 18 }));
-    footerChildren.push(new docx.TextRun({ children: [docx.PageNumber.CURRENT], font: bodyFont, size: 18 }));
-    footerChildren.push(new docx.TextRun({ text: ' 页', font: bodyFont, size: 18 }));
+    if (footerChildren.length > 0) footerChildren.push(new docx.TextRun({ text: '  ·  ', color: wordColor, font: bodyFont, size: 18 }));
+    footerChildren.push(new docx.TextRun({ text: '第 ', color: wordColor, font: bodyFont, size: 18 }));
+    footerChildren.push(new docx.TextRun({ children: [docx.PageNumber.CURRENT], color: wordColor, font: bodyFont, size: 18 }));
+    footerChildren.push(new docx.TextRun({ text: ' 页', color: wordColor, font: bodyFont, size: 18 }));
   }
   const pageSize = style?.pageSize === 'A3'
     ? { width: 16838, height: 23811 }
@@ -489,7 +491,7 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
     styles: {
       default: {
         document: {
-          run: { font: bodyFont, size: bodySize, color: COLORS.ink },
+          run: { font: bodyFont, size: bodySize, color: wordColor },
           paragraph: { spacing: { line: lineSpacing, after: 60 } },
         },
       },
@@ -500,7 +502,7 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
           basedOn: 'Normal',
           next: 'Normal',
           quickFormat: true,
-          run: { font: 'Microsoft YaHei', size: 36, bold: true, color: COLORS.ink },
+          run: { font: bodyFont, size: titleSize, bold: true, color: wordColor },
           paragraph: { alignment: docx.AlignmentType.CENTER, spacing: { before: 0, after: 160 }, keepNext: true },
         },
         {
@@ -509,7 +511,7 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
           basedOn: 'Normal',
           next: 'Normal',
           quickFormat: true,
-          run: { font: 'Microsoft YaHei', size: bodySize + 4, bold: true, color: COLORS.ink },
+          run: { font: bodyFont, size: smallTitleSize, bold: true, color: wordColor },
           paragraph: { spacing: { before: 220, after: 90 }, keepNext: true },
         },
       ],
@@ -534,7 +536,7 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
           ? { count: 2, space: 680, separate: true, equalWidth: true }
           : { count: 1 },
       },
-      headers: headerText ? { default: new docx.Header({ children: [new docx.Paragraph({ alignment: toDocxAlignment(pkg.headerFooter?.headerAlign || 'center', docx.AlignmentType) as never, children: [new docx.TextRun({ text: headerText, font: bodyFont, size: 18, color: COLORS.muted })] })] }) } : undefined,
+      headers: headerText ? { default: new docx.Header({ children: [new docx.Paragraph({ alignment: toDocxAlignment(pkg.headerFooter?.headerAlign || 'center', docx.AlignmentType) as never, children: [new docx.TextRun({ text: headerText, font: bodyFont, size: 18, color: wordColor })] })] }) } : undefined,
       footers: footerChildren.length > 0 ? { default: new docx.Footer({ children: [new docx.Paragraph({ alignment: toDocxAlignment(pkg.headerFooter?.footerAlign || 'center', docx.AlignmentType) as never, children: footerChildren as never })] }) } : undefined,
       children,
     }],

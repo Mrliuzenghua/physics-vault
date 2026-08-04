@@ -27,6 +27,7 @@ _EXPORT_MIME_TYPES = {
     "word": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
+_LESSON_EXPORT_SNAPSHOT_SCHEMA = "physics-vault/lesson-export-snapshot/v3"
 _WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -70,12 +71,13 @@ class LessonExportService:
         force_new: bool = False,
     ) -> ImportTask:
         snapshot = {
-            "schema": "physics-vault/lesson-export-snapshot/v1",
+            "schema": _LESSON_EXPORT_SNAPSHOT_SCHEMA,
             "export_format": export_format,
             "lesson_package": payload.lesson_package,
             "options": {
                 "include_answers": payload.include_answers,
                 "include_analysis": payload.include_analysis,
+                "answer_position": payload.answer_position,
             },
             "requested_file_name": payload.file_name,
             "created_at": datetime.now(UTC).isoformat(),
@@ -98,6 +100,7 @@ class LessonExportService:
             "export_format": export_format,
             "include_answers": payload.include_answers,
             "include_analysis": payload.include_analysis,
+            "answer_position": payload.answer_position,
             "question_count": len(lesson.get("questions") or []),
         }
         if request_context:
@@ -178,6 +181,7 @@ class LessonExportService:
                 lesson_package=dict(snapshot["lesson_package"]),
                 include_answers=bool(snapshot.get("options", {}).get("include_answers")),
                 include_analysis=bool(snapshot.get("options", {}).get("include_analysis")),
+                answer_position=str(snapshot.get("options", {}).get("answer_position") or "after_question"),  # type: ignore[arg-type]
                 file_name=snapshot.get("requested_file_name"),
             ),
             max_attempts=max_attempts,
@@ -345,7 +349,7 @@ class LessonExportService:
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
-        from docx.shared import Mm, Pt
+        from docx.shared import Mm, Pt, RGBColor
 
         warnings: list[str] = []
         document = Document()
@@ -363,44 +367,41 @@ class LessonExportService:
         section.left_margin = Mm(float(style.get("pageMarginLeft") or 20))
         section.right_margin = Mm(float(style.get("pageMarginRight") or 20))
 
-        font_name = _word_font(str(style.get("fontFamily") or "songti"))
-        body_size = float(style.get("fontSize") or 12)
+        # Server Word export follows the standard printable exam style:
+        # SimSun body text at 5 hao (10.5 pt), regardless of screen preview scale.
+        font_name = "SimSun"
+        answer_font = "KaiTi"
+        body_size = 10.5
+        title_size = 16
+        small_title_size = 14
+        word_color = "000000"
+        answer_position = str(options.get("answer_position") or "after_question")
+        trailing_answer_blocks: list[tuple[int, dict[str, Any]]] = []
         normal = document.styles["Normal"]
         normal.font.name = font_name
         normal.font.size = Pt(body_size)
+        normal.font.color.rgb = RGBColor.from_string(word_color)
         normal._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
         normal.paragraph_format.line_spacing = float(style.get("lineHeight") or 1.55)
         normal.paragraph_format.space_after = Pt(float(style.get("paragraphSpacing") or 4))
-
-        title = document.add_paragraph()
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        title.paragraph_format.space_after = Pt(4)
-        run = title.add_run(_office_text(str(lesson.get("title") or "未命名物理学案")))
-        _format_run(run, "Microsoft YaHei", 22, bold=True)
-        subtitle_value = str(lesson.get("subtitle") or "").strip()
-        if subtitle_value:
-            subtitle = document.add_paragraph()
-            subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            subtitle.paragraph_format.space_after = Pt(14)
-            _format_run(subtitle.add_run(_office_text(subtitle_value)), "Microsoft YaHei", 11, color="53647A")
 
         header_footer = lesson.get("headerFooter") if isinstance(lesson.get("headerFooter"), dict) else {}
         if header_footer.get("headerEnabled"):
             paragraph = section.header.paragraphs[0]
             paragraph.alignment = _docx_alignment(str(header_footer.get("headerAlign") or "center"))
-            _format_run(paragraph.add_run(_office_text(str(header_footer.get("headerText") or ""))), font_name, 9, color="53647A")
+            _add_docx_text(paragraph, str(header_footer.get("headerText") or ""), font_name, 9, color=word_color)
         footer = section.footer.paragraphs[0]
         footer.alignment = _docx_alignment(str(header_footer.get("footerAlign") or "center"))
         if header_footer.get("footerEnabled"):
-            _format_run(footer.add_run(_office_text(str(header_footer.get("footerText") or ""))), font_name, 9, color="53647A")
+            _add_docx_text(footer, str(header_footer.get("footerText") or ""), font_name, 9, color=word_color)
         if header_footer.get("showPageNumber"):
             if footer.text:
-                footer.add_run("  ·  ")
-            footer.add_run("第 ")
+                _format_run(footer.add_run("  ·  "), font_name, 9, color=word_color)
+            _format_run(footer.add_run("第 "), font_name, 9, color=word_color)
             field = OxmlElement("w:fldSimple")
             field.set(qn("w:instr"), "PAGE")
             footer._p.append(field)
-            footer.add_run(" 页")
+            _format_run(footer.add_run(" 页"), font_name, 9, color=word_color)
 
         question_map = {
             str(item.get("question_id")): item
@@ -431,22 +432,40 @@ class LessonExportService:
                 if not card:
                     warnings.append(f"Missing knowledge card for node {node.get('id')}")
                     continue
-                heading = document.add_heading(_office_text(str(card.get("title") or "知识梳理")), level=2)
+                heading = document.add_paragraph()
+                heading.paragraph_format.space_before = Pt(10)
+                heading.paragraph_format.space_after = Pt(4)
                 heading.paragraph_format.keep_with_next = True
-                document.add_paragraph(_office_text(str(card.get("summary") or "")))
+                _add_docx_text(heading, str(card.get("title") or "知识梳理"), font_name, small_title_size, bold=True, color=word_color)
+                _add_docx_text(document.add_paragraph(), str(card.get("summary") or ""), font_name, body_size, color=word_color)
                 for point in card.get("points") or []:
-                    document.add_paragraph(_office_text(str(point)), style="List Bullet")
+                    _add_docx_text(document.add_paragraph(style="List Bullet"), str(point), font_name, body_size, color=word_color)
                 continue
             if node_type == "text":
                 block = text_map.get(str(node.get("textBlockId") or ""))
                 if not block:
                     warnings.append(f"Missing text block for node {node.get('id')}")
                     continue
-                value = _office_text(str(block.get("content") or block.get("title") or ""))
-                if block.get("blockKind") in {"exam_title", "section_title"}:
-                    document.add_heading(value, level=1 if block.get("blockKind") == "exam_title" else 2)
-                else:
-                    document.add_paragraph(value)
+                block_kind = str(block.get("blockKind") or "body")
+                paragraph = document.add_paragraph()
+                block_style = block.get("style") if isinstance(block.get("style"), dict) else {}
+                if block_style.get("textAlign"):
+                    paragraph.alignment = _docx_alignment(str(block_style["textAlign"]))
+                elif block_kind == "exam_title":
+                    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                is_heading = block_kind in {"exam_title", "section_title"}
+                paragraph.paragraph_format.keep_with_next = is_heading
+                paragraph.paragraph_format.space_before = Pt(10 if is_heading else 4)
+                paragraph.paragraph_format.space_after = Pt(6 if is_heading else 4)
+                block_size = title_size if block_kind == "exam_title" else small_title_size if block_kind == "section_title" else body_size
+                _add_docx_text(
+                    paragraph,
+                    str(block.get("content") or block.get("title") or ""),
+                    font_name,
+                    block_size,
+                    bold=is_heading or block_style.get("fontWeight") == "bold",
+                    color=word_color,
+                )
                 continue
             if node_type != "question":
                 continue
@@ -458,13 +477,8 @@ class LessonExportService:
             paragraph = document.add_paragraph()
             paragraph.paragraph_format.keep_with_next = True
             paragraph.paragraph_format.space_before = Pt(float(style.get("questionSpacing") or 10))
-            _format_run(paragraph.add_run(f"{question_number}. "), font_name, body_size, bold=True)
-            _format_run(
-                paragraph.add_run(_office_text(str(question.get("title") or question.get("stem_text") or ""))),
-                font_name,
-                body_size,
-                bold=True,
-            )
+            _format_run(paragraph.add_run(f"{question_number}. "), font_name, body_size)
+            _add_docx_text(paragraph, str(question.get("title") or question.get("stem_text") or ""), font_name, body_size)
 
             figures = [item for item in question.get("figures") or [] if isinstance(item, dict)]
             for figure in figures:
@@ -477,13 +491,12 @@ class LessonExportService:
                 available_inches = max(1.0, (section.page_width - section.left_margin - section.right_margin) / 914400)
                 width_inches = min(available_inches * scale / 100, image_width / 96)
                 picture = document.add_paragraph()
-                picture.alignment = _docx_alignment(str(figure.get("display_align") or "center"))
+                picture.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 picture.add_run().add_picture(image_stream, width=int(width_inches * 914400))
                 if figure.get("caption"):
-                    caption = document.add_paragraph(_office_text(str(figure["caption"])))
+                    caption = document.add_paragraph()
                     caption.alignment = picture.alignment
-                    for caption_run in caption.runs:
-                        _format_run(caption_run, font_name, max(9, body_size - 2), italic=True, color="53647A")
+                    _add_docx_text(caption, str(figure["caption"]), font_name, max(9, body_size - 2), italic=True, color=word_color)
 
             options_list = [item for item in question.get("options") or [] if isinstance(item, dict)]
             option_layout = str(style.get("optionLayout") or "auto")
@@ -498,8 +511,9 @@ class LessonExportService:
                 for index, option in enumerate(options_list):
                     cell = table.cell(index // 2, index % 2)
                     cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-                    text = f"{option.get('opt') or chr(65 + index)}. {_office_text(str(option.get('content') or ''))}"
-                    cell.paragraphs[0].add_run(text)
+                    label = str(option.get("opt") or chr(65 + index))
+                    _format_run(cell.paragraphs[0].add_run(f"{label}. "), font_name, body_size)
+                    _add_docx_text(cell.paragraphs[0], str(option.get("content") or ""), font_name, body_size)
                 borders = OxmlElement("w:tblBorders")
                 for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
                     element = OxmlElement(f"w:{edge}")
@@ -509,17 +523,22 @@ class LessonExportService:
             else:
                 for index, option in enumerate(options_list):
                     label = str(option.get("opt") or chr(65 + index))
-                    document.add_paragraph(
-                        f"{label}. {_office_text(str(option.get('content') or ''))}"
-                    )
-            if options.get("include_answers") and question.get("answer"):
-                answer = document.add_paragraph()
-                _format_run(answer.add_run("答案："), font_name, body_size, bold=True, color="0E7A58")
-                _format_run(answer.add_run(_office_text(str(question["answer"]))), font_name, body_size, color="0E7A58")
-            if options.get("include_analysis") and question.get("analysis"):
-                analysis = document.add_paragraph()
-                _format_run(analysis.add_run("解析："), font_name, body_size, bold=True, color="53647A")
-                _format_run(analysis.add_run(_office_text(str(question["analysis"]))), font_name, body_size, color="53647A")
+                    option_paragraph = document.add_paragraph()
+                    _format_run(option_paragraph.add_run(f"{label}. "), font_name, body_size)
+                    _add_docx_text(option_paragraph, str(option.get("content") or ""), font_name, body_size)
+            if answer_position == "end":
+                trailing_answer_blocks.append((question_number, question))
+            else:
+                _add_docx_answer_block(document, question, None, options, answer_font, body_size)
+
+        if trailing_answer_blocks and (options.get("include_answers") or options.get("include_analysis")):
+            document.add_page_break()
+            heading = document.add_paragraph()
+            heading.paragraph_format.space_after = Pt(8)
+            heading_text = "参考答案与解析" if options.get("include_analysis") else "参考答案"
+            _format_run(heading.add_run(heading_text), font_name, small_title_size, bold=True, color=word_color)
+            for item_number, question in trailing_answer_blocks:
+                _add_docx_answer_block(document, question, item_number, options, answer_font, body_size)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         document.save(output_path)
@@ -794,6 +813,29 @@ def _resolve_project_image(raw_path: str, root: Path) -> Path | None:
     return candidate
 
 
+def _add_docx_answer_block(
+    document: Any,
+    question: dict[str, Any],
+    question_number: int | None,
+    options: dict[str, Any],
+    font_name: str,
+    body_size: float,
+) -> None:
+    from docx.shared import Pt
+
+    if options.get("include_answers") and question.get("answer"):
+        answer = document.add_paragraph()
+        answer.paragraph_format.space_before = Pt(4)
+        prefix = f"{question_number}. 答案：" if question_number is not None else "答案："
+        _format_run(answer.add_run(prefix), font_name, body_size, color="000000")
+        _add_docx_text(answer, str(question["answer"]), font_name, body_size, color="000000")
+    if options.get("include_analysis") and question.get("analysis"):
+        analysis = document.add_paragraph()
+        prefix = f"{question_number}. 解析：" if question_number is not None and not question.get("answer") else "解析："
+        _format_run(analysis.add_run(prefix), font_name, body_size, color="000000")
+        _add_docx_text(analysis, str(question["analysis"]), font_name, body_size, color="000000")
+
+
 def _office_text(value: str) -> str:
     text = _FIGURE_RE.sub("", str(value or ""))
 
@@ -806,6 +848,255 @@ def _office_text(value: str) -> str:
     text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
     text = re.sub(r"`([^`\n]+)`", r"\1", text)
     return re.sub(r"[ \t]+", " ", text).strip()
+
+
+def _office_text_parts(value: str) -> list[tuple[str, str]]:
+    text = _FIGURE_RE.sub("", str(value or ""))
+    text = re.sub(r"^#{1,4}\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
+    text = re.sub(r"`([^`\n]+)`", r"\1", text)
+    text = re.sub(r"[ \t]+", " ", text).strip()
+    if not text:
+        return []
+
+    parts: list[tuple[str, str]] = []
+    cursor = 0
+    for match in _FORMULA_RE.finditer(text):
+        plain = text[cursor : match.start()]
+        if plain:
+            parts.append(("text", plain))
+        formula = next((group for group in match.groups() if group is not None), "").strip()
+        if formula:
+            parts.append(("math", formula))
+        cursor = match.end()
+    tail = text[cursor:]
+    if tail:
+        parts.append(("text", tail))
+    return parts
+
+
+def _add_docx_text(
+    paragraph: Any,
+    value: str,
+    font: str,
+    size: float,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    color: str | None = None,
+) -> None:
+    for kind, text in _office_text_parts(value):
+        if kind == "math":
+            paragraph._p.append(_latex_to_omml(text))
+            continue
+        run = paragraph.add_run(text)
+        _format_run(run, font, size, bold=bold, italic=italic, color=color)
+
+
+def _latex_to_omml(value: str) -> Any:
+    from docx.oxml import OxmlElement
+
+    math = OxmlElement("m:oMath")
+    children = _latex_to_math_elements(value)
+    if not children:
+        children = [_math_run("")]
+    for child in children:
+        math.append(child)
+    return math
+
+
+def _latex_to_math_elements(value: str) -> list[Any]:
+    source = str(value or "").strip()
+    index = 0
+
+    def parse_sequence(stop: str | None = None) -> list[Any]:
+        nonlocal index
+        items: list[Any] = []
+        while index < len(source):
+            current = source[index]
+            if stop is not None and current == stop:
+                index += 1
+                break
+            if current == "}":
+                break
+            if current.isspace():
+                while index < len(source) and source[index].isspace():
+                    index += 1
+                items.append(_math_run(" "))
+                continue
+            if current in {"_", "^"}:
+                items.append(_math_run(current))
+                index += 1
+                continue
+
+            base = parse_atom()
+            subscript: list[Any] | None = None
+            superscript: list[Any] | None = None
+            while index < len(source) and source[index] in {"_", "^"}:
+                marker = source[index]
+                index += 1
+                script = parse_script_atom()
+                if marker == "_":
+                    subscript = script
+                else:
+                    superscript = script
+            if subscript is not None or superscript is not None:
+                items.append(_math_script(base, subscript, superscript))
+            else:
+                items.extend(base)
+        return items
+
+    def parse_script_atom() -> list[Any]:
+        nonlocal index
+        while index < len(source) and source[index].isspace():
+            index += 1
+        if index >= len(source):
+            return [_math_run("")]
+        if source[index] == "{":
+            index += 1
+            return parse_sequence("}")
+        if source[index] == "\\":
+            return parse_command()
+        char = source[index]
+        index += 1
+        return [_math_run(char)]
+
+    def parse_required_group() -> list[Any]:
+        nonlocal index
+        while index < len(source) and source[index].isspace():
+            index += 1
+        if index < len(source) and source[index] == "{":
+            index += 1
+            return parse_sequence("}")
+        return parse_script_atom()
+
+    def parse_atom() -> list[Any]:
+        nonlocal index
+        if source[index] == "{":
+            index += 1
+            return parse_sequence("}")
+        if source[index] == "\\":
+            return parse_command()
+
+        start = index
+        while index < len(source) and source[index] not in "\\{}_^" and not source[index].isspace():
+            index += 1
+        return [_math_run(source[start:index])]
+
+    def parse_command() -> list[Any]:
+        nonlocal index
+        index += 1
+        start = index
+        while index < len(source) and source[index].isalpha():
+            index += 1
+        command = source[start:index]
+        if not command and index < len(source):
+            command = source[index]
+            index += 1
+
+        if command in {"frac", "dfrac", "tfrac"}:
+            return [_math_fraction(parse_required_group(), parse_required_group())]
+        if command == "sqrt":
+            return [_math_radical(parse_required_group())]
+        if command in {"text", "mathrm", "mathbf", "operatorname"}:
+            return parse_required_group()
+        if command in {"left", "right"}:
+            return parse_script_atom() if index < len(source) else []
+        if command in {"quad", "qquad", ",", ";", ":"}:
+            return [_math_run(" ")]
+        if command == "!":
+            return []
+        if command in _LATEX_MATH_SYMBOLS:
+            return [_math_run(_LATEX_MATH_SYMBOLS[command])]
+        return [_math_run(command)]
+
+    return parse_sequence()
+
+
+_LATEX_MATH_SYMBOLS = {
+    "alpha": "\u03b1",
+    "beta": "\u03b2",
+    "gamma": "\u03b3",
+    "Delta": "\u0394",
+    "delta": "\u03b4",
+    "theta": "\u03b8",
+    "lambda": "\u03bb",
+    "mu": "\u03bc",
+    "nu": "\u03bd",
+    "pi": "\u03c0",
+    "rho": "\u03c1",
+    "sigma": "\u03c3",
+    "phi": "\u03c6",
+    "omega": "\u03c9",
+    "times": "\u00d7",
+    "cdot": "\u00b7",
+    "leq": "\u2264",
+    "geq": "\u2265",
+    "neq": "\u2260",
+    "pm": "\u00b1",
+    "infty": "\u221e",
+    "rightarrow": "\u2192",
+    "leftarrow": "\u2190",
+}
+
+
+def _math_run(text: str) -> Any:
+    from docx.oxml import OxmlElement
+
+    run = OxmlElement("m:r")
+    text_element = OxmlElement("m:t")
+    if text.startswith(" ") or text.endswith(" "):
+        text_element.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    text_element.text = text
+    run.append(text_element)
+    return run
+
+
+def _math_arg(tag: str, children: list[Any] | None) -> Any:
+    from docx.oxml import OxmlElement
+
+    arg = OxmlElement(f"m:{tag}")
+    for child in children or [_math_run("")]:
+        arg.append(child)
+    return arg
+
+
+def _math_fraction(numerator: list[Any], denominator: list[Any]) -> Any:
+    from docx.oxml import OxmlElement
+
+    fraction = OxmlElement("m:f")
+    fraction.append(_math_arg("num", numerator))
+    fraction.append(_math_arg("den", denominator))
+    return fraction
+
+
+def _math_radical(children: list[Any]) -> Any:
+    from docx.oxml import OxmlElement
+
+    radical = OxmlElement("m:rad")
+    radical.append(OxmlElement("m:deg"))
+    radical.append(_math_arg("e", children))
+    return radical
+
+
+def _math_script(base: list[Any], subscript: list[Any] | None, superscript: list[Any] | None) -> Any:
+    from docx.oxml import OxmlElement
+
+    if subscript is not None and superscript is not None:
+        element = OxmlElement("m:sSubSup")
+        element.append(_math_arg("e", base))
+        element.append(_math_arg("sub", subscript))
+        element.append(_math_arg("sup", superscript))
+        return element
+    if subscript is not None:
+        element = OxmlElement("m:sSub")
+        element.append(_math_arg("e", base))
+        element.append(_math_arg("sub", subscript))
+        return element
+    element = OxmlElement("m:sSup")
+    element.append(_math_arg("e", base))
+    element.append(_math_arg("sup", superscript))
+    return element
 
 
 def _linearize_latex(value: str) -> str:
