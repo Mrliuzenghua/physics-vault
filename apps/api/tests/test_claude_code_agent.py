@@ -422,6 +422,19 @@ $\\frac{m}{\\text{kg}}$ $\\frac{a}{\\left( \\text{m} \\cdot \\text{s}^{\\text{-2
     assert "-------------------------" not in cleaned
 
 
+def test_latex_cleanup_preserves_balanced_display_math_and_repairs_mixed_delimiters():
+    raw = {
+        "title": "能量关系为 $$E=mc^{2}$$。",
+        "analysis": "$$E=6.6 \\times 10^{-34}\\text{ J}$",
+    }
+
+    cleaned, replacements = _clean_latex_in_value(raw)
+
+    assert cleaned["title"] == "能量关系为 $E=mc^{2}$。"
+    assert cleaned["analysis"] == "$$E=6.6 \\times 10^{-34}\\text{ J}$$"
+    assert replacements == 2
+
+
 def test_direct_review_latex_cleanup_request_matches_current_page_context():
     request = QuestionPickerAgentRequest(
         messages=[

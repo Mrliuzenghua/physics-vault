@@ -34,6 +34,7 @@ from .ai_assistant import (
     _latest_user_text,
     _row_to_context,
 )
+from .math_text import normalize_math_delimiters
 
 logger = logging.getLogger(__name__)
 
@@ -786,8 +787,8 @@ def _replace_markdown_math_italics(text: str) -> tuple[str, int]:
         return f"${expr}$"
 
     cleaned = _MATH_ITALIC_RE.sub(repl, text)
-    cleaned = cleaned.replace("}$$", "}$")
-    return cleaned, count
+    cleaned, delimiter_count = normalize_math_delimiters(cleaned)
+    return cleaned, count + delimiter_count
 
 
 def _normalize_ocr_tables_in_text(text: str) -> tuple[str, int]:

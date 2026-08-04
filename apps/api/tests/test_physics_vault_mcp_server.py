@@ -98,6 +98,20 @@ def test_mcp_tool_inventory_is_explicit_and_unique() -> None:
     assert set(names) == EXPECTED_MCP_TOOLS
 
 
+def test_mcp_latex_cleanup_does_not_truncate_display_math() -> None:
+    module = _load_mcp_server()
+    raw = {
+        "title": "能量关系为 $$E=mc^{2}$$。",
+        "analysis": "$$E=6.6 \\times 10^{-34}\\text{ J}$",
+    }
+
+    cleaned, replacements = module._clean_latex_value(raw)
+
+    assert cleaned["title"] == "能量关系为 $E=mc^{2}$。"
+    assert cleaned["analysis"] == "$$E=6.6 \\times 10^{-34}\\text{ J}$$"
+    assert replacements == 2
+
+
 def test_mcp_argument_errors_use_stable_shape(monkeypatch) -> None:
     module = _load_mcp_server()
 

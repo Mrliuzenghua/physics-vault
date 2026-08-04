@@ -42,6 +42,7 @@ from physics_vault_api.services.lesson_exports import LessonExportService  # noq
 from physics_vault_api.services.ai_assistant import _candidate_query_tokens  # noqa: E402
 from physics_vault_api.services.change_audit import ChangeAuditService  # noqa: E402
 from physics_vault_api.services.metadata_management import MetadataManagementService  # noqa: E402
+from physics_vault_api.services.math_text import normalize_math_delimiters  # noqa: E402
 from physics_vault_api.services.question_search import QuestionSearchService  # noqa: E402
 from physics_vault_api.services.paper_drafts import PaperDraftService  # noqa: E402
 from physics_vault_api.services.similar_questions import SimilarQuestionsService  # noqa: E402
@@ -2915,8 +2916,9 @@ def _clean_latex_value(value: Any, key: str | None = None) -> tuple[Any, int]:
             return f"${expression}$"
 
         cleaned, table_count = _normalize_ocr_tables_in_text(value)
-        cleaned = _REVIEW_MATH_ITALIC_RE.sub(replace, cleaned).replace("}$$", "}$")
-        return cleaned, count + table_count
+        cleaned = _REVIEW_MATH_ITALIC_RE.sub(replace, cleaned)
+        cleaned, delimiter_count = normalize_math_delimiters(cleaned)
+        return cleaned, count + table_count + delimiter_count
     if isinstance(value, list):
         cleaned = []
         count = 0

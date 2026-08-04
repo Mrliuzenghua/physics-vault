@@ -18,11 +18,23 @@ def normalize_short_inline_display_math(text: str) -> str:
     kept when it occupies the whole line or looks like a real multi-line block.
     """
 
-    if not text or "$$" not in text:
-        return text
+    normalized, _ = normalize_math_delimiters(text)
+    return normalized
 
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    return "\n".join(_normalize_math_line(line) for line in lines)
+
+def normalize_math_delimiters(text: str) -> tuple[str, int]:
+    """Normalize display/inline delimiters and report actual replacements."""
+
+    if not text or "$$" not in text:
+        return text, 0
+
+    count = 0
+    normalized_lines: list[str] = []
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        normalized, line_count = _normalize_math_line(line)
+        normalized_lines.append(normalized)
+        count += line_count
+    return "\n".join(normalized_lines), count
 
 
 def normalize_question_math(question: dict) -> dict:
@@ -59,20 +71,36 @@ def _normalize_option_math(option: dict) -> dict:
     return normalized
 
 
-def _normalize_math_line(line: str) -> str:
+def _normalize_math_line(line: str) -> tuple[str, int]:
     stripped = line.strip()
     if not stripped:
-        return line
+        return line, 0
 
-    line = _DISPLAY_MATH.sub(lambda match: _replace_math(line, match.group(0), match.group(1)), line)
-    return _MIXED_MATH.sub(
-        lambda match: _replace_math(line, match.group(0), match.group(1) or match.group(2) or ""),
-        line,
-    )
+    count = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal count
+        replacement = _replace_math(line, match.group(0), match.group(1))
+        if replacement != match.group(0):
+            count += 1
+        return replacement
+
+    normalized = _DISPLAY_MATH.sub(replace, line)
+
+    def repair(match: re.Match[str]) -> str:
+        nonlocal count
+        replacement = _replace_math(normalized, match.group(0), match.group(1) or match.group(2) or "")
+        if replacement != match.group(0):
+            count += 1
+        return replacement
+
+    return _MIXED_MATH.sub(repair, normalized), count
 
 
 def _replace_math(line: str, full: str, formula: str) -> str:
     formula = formula.strip()
+    if formula and line.strip() == full:
+        return f"$${formula}$$"
     if not _should_downgrade(line, full, formula):
         return full
     return f"${formula}$"

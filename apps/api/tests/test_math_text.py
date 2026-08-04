@@ -1,4 +1,5 @@
 from physics_vault_api.services.math_text import (
+    normalize_math_delimiters,
     normalize_question_math,
     normalize_short_inline_display_math,
 )
@@ -20,6 +21,24 @@ def test_standalone_display_math_stays_display() -> None:
     text = "由能量关系可得\n$$E=h\\nu$$\n所以频率可求。"
 
     assert normalize_short_inline_display_math(text) == text
+
+
+def test_balanced_display_math_ending_in_brace_is_not_truncated() -> None:
+    text = "$$E=6.6 \\times 10^{-34}\\text{ J}$$"
+
+    normalized, replacements = normalize_math_delimiters(text)
+
+    assert normalized == text
+    assert replacements == 0
+
+
+def test_standalone_mixed_display_delimiter_is_repaired() -> None:
+    text = "$$E=6.6 \\times 10^{-34}\\text{ J}$"
+
+    normalized, replacements = normalize_math_delimiters(text)
+
+    assert normalized == "$$E=6.6 \\times 10^{-34}\\text{ J}$$"
+    assert replacements == 1
 
 
 def test_mixed_inline_delimiters_are_repaired() -> None:
