@@ -1,421 +1,656 @@
-import { useCallback, useEffect, useState } from 'react';
-
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  Clipboard,
+  Database,
+  FolderArchive,
+  HardDrive,
+  Image as ImageIcon,
+  RefreshCw,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react';
+
+import { Button } from '../components/ui/Button';
+import { Input } from '../components/ui/Input';
+import { Select } from '../components/ui/Select';
+import {
+  cleanupImportCache,
   cleanupUnreferencedAssets,
   deleteSingleAsset,
+  fetchAssetCleanupPreview,
   fetchAssetList,
+  fetchAssetStorageAnalysis,
+  fetchImportCacheCleanupPreview,
 } from '../services/api';
-import type { AssetItem, AssetListResponse } from '../types';
+import type {
+  AssetItem,
+  AssetListResponse,
+  CacheCleanupPreviewResponse,
+  CleanupPreviewResponse,
+  StorageAnalysisResponse,
+} from '../types';
+import { imageFileUrl } from '../utils/imageUrl';
+
+const PAGE_SIZE = 48;
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-const FILTER_OPTIONS = [
-  { value: 'all', label: '全部' },
-  { value: 'referenced', label: '已引用' },
-  { value: 'unreferenced', label: '无引用' },
-] as const;
+function formatDate(value: string): string {
+  if (!value) return '未知时间';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+function shortBatchId(batchId?: string | null): string {
+  if (!batchId) return '未识别批次';
+  return batchId.replace(/^batch_/, '').replace(/_/g, ' · ');
+}
+
+function statusDisplay(asset: AssetItem): { label: string; className: string } {
+  switch (asset.lifecycle_status) {
+    case 'referenced':
+      return { label: `被 ${asset.reference_count} 道题引用`, className: 'bg-[var(--color-green-light)] text-[var(--color-green)]' };
+    case 'imported':
+      return { label: `已入库引用 ${asset.reference_count}`, className: 'bg-[var(--color-green-light)] text-[var(--color-green)]' };
+    case 'staged':
+      return { label: '待入库', className: 'bg-[var(--color-orange-light)] text-[var(--color-orange)]' };
+    case 'unreferenced':
+      return { label: '孤立素材', className: 'bg-[var(--color-red-light)] text-[var(--color-red)]' };
+    default:
+      return { label: '引用状态未知', className: 'bg-[var(--color-bg-hover)] text-[var(--color-text-muted)]' };
+  }
+}
+
+function AssetThumbnail({ asset, className = '' }: { asset: AssetItem; className?: string }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <div className={`flex items-center justify-center bg-[var(--color-bg-code)] ${className}`}>
+      {!failed ? (
+        <img
+          src={imageFileUrl(asset.relative_path, 'data/assets/questions') || ''}
+          alt={asset.filename}
+          loading="lazy"
+          decoding="async"
+          className="h-full w-full object-contain p-2"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <div className="flex flex-col items-center gap-2 text-xs text-[var(--color-text-muted)]">
+          <AlertTriangle size={24} />
+          <span>图片无法预览</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function AssetsManagerPage() {
   const [data, setData] = useState<AssetListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [filterMode, setFilterMode] = useState<string>('all');
-  const [keyword, setKeyword] = useState('');
+  const [source, setSource] = useState<'question_bank' | 'import_batch'>('import_batch');
+  const [filterMode, setFilterMode] = useState('all');
   const [searchInput, setSearchInput] = useState('');
-  const [cleaning, setCleaning] = useState(false);
-  const [cleanResult, setCleanResult] = useState<string | null>(null);
-  const [deletingFile, setDeletingFile] = useState<string | null>(null);
+  const [keyword, setKeyword] = useState('');
+  const [batchId, setBatchId] = useState('');
+  const [sortBy, setSortBy] = useState('modified_at');
+  const [sortOrder, setSortOrder] = useState('desc');
+  const [page, setPage] = useState(1);
   const [previewAsset, setPreviewAsset] = useState<AssetItem | null>(null);
+  const [deleteAsset, setDeleteAsset] = useState<AssetItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [cleanupPreview, setCleanupPreview] = useState<CleanupPreviewResponse | null>(null);
+  const [cacheCleanupPreview, setCacheCleanupPreview] = useState<CacheCleanupPreviewResponse | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [storageAnalysis, setStorageAnalysis] = useState<StorageAnalysisResponse | null>(null);
+  const [analyzingStorage, setAnalyzingStorage] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
 
-  // ── Load ──
-  const load = useCallback(async () => {
+  const load = useCallback(async (refresh = false) => {
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchAssetList(filterMode, keyword);
-      setData(result);
+      const result = await fetchAssetList({
+        filterMode,
+        keyword,
+        source,
+        batchId,
+        sortBy,
+        sortOrder,
+        page,
+        pageSize: PAGE_SIZE,
+        refresh,
+      });
+      const normalized: AssetListResponse = {
+        ...result,
+        library_stats: result.library_stats ?? result.stats,
+        batches: result.batches ?? [],
+        pagination: result.pagination ?? {
+          page,
+          page_size: PAGE_SIZE,
+          total_items: result.stats.total,
+          total_pages: Math.ceil(result.stats.total / PAGE_SIZE),
+        },
+        reference_scan_available: result.reference_scan_available ?? true,
+      };
+      setData(normalized);
+      if (normalized.pagination.total_pages > 0 && page > normalized.pagination.total_pages) {
+        setPage(normalized.pagination.total_pages);
+      }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '加载失败';
-      setError(msg);
+      setError(err instanceof Error ? err.message : '素材加载失败');
     } finally {
       setLoading(false);
     }
-  }, [filterMode, keyword]);
+  }, [batchId, filterMode, keyword, page, sortBy, sortOrder, source]);
+
+  useEffect(() => { void load(); }, [load]);
 
   useEffect(() => {
-    load();
-  }, [load]);
-
-  // ── Search ──
-  const handleSearch = useCallback(() => {
-    setKeyword(searchInput);
+    const timer = window.setTimeout(() => {
+      setKeyword(searchInput.trim());
+      setPage(1);
+    }, 300);
+    return () => window.clearTimeout(timer);
   }, [searchInput]);
 
-  // ── Cleanup ──
-  const handleCleanup = useCallback(async () => {
-    const unreferencedCount = data?.stats.unreferenced ?? 0;
-    if (unreferencedCount === 0) {
-      setCleanResult('没有可清理的无引用素材');
-      return;
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setPreviewAsset(null);
+        setDeleteAsset(null);
+        setCleanupPreview(null);
+        setCacheCleanupPreview(null);
+        setStorageAnalysis(null);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, []);
+
+  const importCount = useMemo(
+    () => (data?.batches ?? []).reduce((sum, batch) => sum + batch.asset_count, 0),
+    [data?.batches],
+  );
+  const questionCount = Math.max(0, (data?.library_stats.total ?? 0) - importCount);
+  const groupedAssets = useMemo(() => {
+    if (source === 'question_bank') return [{ id: 'question_bank', assets: data?.assets ?? [] }];
+    const groups = new Map<string, AssetItem[]>();
+    for (const asset of data?.assets ?? []) {
+      const key = asset.batch_id || 'unknown';
+      groups.set(key, [...(groups.get(key) ?? []), asset]);
     }
+    return Array.from(groups, ([id, assets]) => ({ id, assets }));
+  }, [data?.assets, source]);
 
-    const confirmed = window.confirm(
-      `确定要删除全部 ${unreferencedCount} 个无引用素材吗？此操作不可撤销。`,
-    );
-    if (!confirmed) return;
+  const switchSource = (next: 'question_bank' | 'import_batch') => {
+    setSource(next);
+    setFilterMode('all');
+    setBatchId('');
+    setPage(1);
+    setPreviewAsset(null);
+  };
 
+  const openCleanupPreview = async () => {
+    setPreviewLoading(true);
+    setMessage(null);
+    try {
+      setCleanupPreview(await fetchAssetCleanupPreview());
+    } catch (err: unknown) {
+      setMessage(err instanceof Error ? err.message : '清理预览失败');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const analyzeStorage = async () => {
+    setAnalyzingStorage(true);
+    setMessage(null);
+    try {
+      setStorageAnalysis(await fetchAssetStorageAnalysis(source, false));
+    } catch (err: unknown) {
+      setMessage(err instanceof Error ? err.message : '存储分析失败');
+    } finally {
+      setAnalyzingStorage(false);
+    }
+  };
+
+  const confirmCleanup = async () => {
     setCleaning(true);
-    setCleanResult(null);
     try {
       const result = await cleanupUnreferencedAssets();
-      const msg = result.deleted_count > 0
-        ? `已清理 ${result.deleted_count} 个文件，释放 ${formatSize(result.freed_bytes)}`
-        : '没有需要清理的素材';
-      setCleanResult(msg);
-      if (result.errors.length > 0) {
-        setCleanResult((prev) => `${prev}（${result.errors.length} 个错误）`);
-      }
-      // Reload
-      await load();
+      setCleanupPreview(null);
+      setMessage(result.errors.length
+        ? `已清理 ${result.deleted_count} 个文件；另有 ${result.errors.length} 个文件未处理`
+        : `已清理 ${result.deleted_count} 个文件，释放 ${formatSize(result.freed_bytes)}`);
+      await load(true);
     } catch (err: unknown) {
-      setCleanResult(`清理失败：${err instanceof Error ? err.message : '未知错误'}`);
+      setMessage(err instanceof Error ? err.message : '清理失败');
     } finally {
       setCleaning(false);
     }
-  }, [data, load]);
+  };
 
-  // ── Single delete ──
-  const handleDeleteSingle = useCallback(
-    async (asset: AssetItem) => {
-      if (asset.is_referenced) {
-        alert('该素材仍被题目引用，不能删除。');
-        return;
-      }
+  const openCacheCleanupPreview = async () => {
+    setPreviewLoading(true);
+    setMessage(null);
+    try {
+      setCacheCleanupPreview(await fetchImportCacheCleanupPreview(batchId));
+    } catch (err: unknown) {
+      setMessage(err instanceof Error ? err.message : '缓存清理预览失败');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
 
-      const confirmed = window.confirm(`确定要删除 "${asset.filename}" 吗？`);
-      if (!confirmed) return;
+  const confirmCacheCleanup = async () => {
+    setClearingCache(true);
+    try {
+      const result = await cleanupImportCache(cacheCleanupPreview?.batch_id || '');
+      setCacheCleanupPreview(null);
+      setMessage(result.errors.length
+        ? `已清除 ${result.deleted_count} 个缓存文件；另有 ${result.errors.length} 个文件未处理`
+        : `已清除 ${result.deleted_count} 个缓存文件，释放 ${formatSize(result.freed_bytes)}`);
+      await load(true);
+    } catch (err: unknown) {
+      setMessage(err instanceof Error ? err.message : '缓存清理失败');
+    } finally {
+      setClearingCache(false);
+    }
+  };
 
-      setDeletingFile(asset.filename);
-      try {
-        const result = await deleteSingleAsset(asset.filename);
-        if (result.success) {
-          await load();
-        } else {
-          alert(result.message);
-        }
-      } catch (err: unknown) {
-        alert(`删除失败：${err instanceof Error ? err.message : '未知错误'}`);
-      } finally {
-        setDeletingFile(null);
-      }
-    },
-    [load],
-  );
+  const confirmDelete = async () => {
+    if (!deleteAsset) return;
+    setDeleting(true);
+    try {
+      const result = await deleteSingleAsset(deleteAsset.relative_path);
+      setMessage(result.message || '素材已删除');
+      setDeleteAsset(null);
+      if (previewAsset?.relative_path === deleteAsset.relative_path) setPreviewAsset(null);
+      await load(true);
+    } catch (err: unknown) {
+      setMessage(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeleting(false);
+    }
+  };
 
-  // ── Filter change ──
-  const handleFilterChange = useCallback((mode: string) => {
-    setFilterMode(mode);
-  }, []);
+  const copyPath = async (path: string) => {
+    await navigator.clipboard.writeText(path);
+    setMessage('素材路径已复制');
+  };
 
-  // ── Derived ──
   const stats = data?.stats;
-  const assets = data?.assets ?? [];
+  const pagination = data?.pagination;
+  const batchOptions = [
+    { value: '', label: `全部批次（${data?.batches.length ?? 0}）` },
+    ...(data?.batches ?? []).map((batch) => ({
+      value: batch.batch_id,
+      label: `${shortBatchId(batch.batch_id)} · ${batch.asset_count} 张`,
+    })),
+  ];
 
-  // ── Render ──
   return (
-    <div className="flex h-full flex-col" style={{ background: 'var(--color-bg)' }}>
-      {/* Header */}
-      <div
-        className="flex-shrink-0 border-b px-4 py-3"
-        style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-card)' }}
-      >
-        <h1 className="text-lg font-bold" style={{ color: 'var(--color-text)' }}>
-          素材管理
-        </h1>
-        <p className="mt-0.5 text-xs" style={{ color: 'var(--color-text-muted)' }}>
-          管理题图素材，清理无引用文件
-        </p>
-      </div>
-
-      {/* Stats bar */}
-      {stats && (
-        <div
-          className="flex-shrink-0 border-b px-4 py-2"
-          style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-sidebar)' }}
-        >
-          <div className="flex items-center gap-6 text-xs">
-            <span style={{ color: 'var(--color-text-muted)' }}>
-              素材总数{' '}
-              <strong style={{ color: 'var(--color-text)' }}>{stats.total}</strong>
-            </span>
-            <span style={{ color: 'var(--color-text-muted)' }}>
-              已引用{' '}
-              <strong style={{ color: 'var(--color-green)' }}>{stats.referenced}</strong>
-            </span>
-            <span style={{ color: 'var(--color-text-muted)' }}>
-              无引用{' '}
-              <strong style={{ color: 'var(--color-red)' }}>
-                {stats.unreferenced}
-              </strong>
-            </span>
-            <span style={{ color: 'var(--color-text-muted)' }}>
-              总占用{' '}
-              <strong style={{ color: 'var(--color-text)' }}>
-                {formatSize(stats.total_size_bytes)}
-              </strong>
-            </span>
+    <div className="flex h-full min-h-0 flex-col bg-[var(--color-bg)]">
+      <header className="flex-shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-card)] px-5 py-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold text-[var(--color-text)]">素材管理</h1>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">管理题库正式素材与导入过程缓存，查看引用并安全释放空间</p>
           </div>
+          <Button variant="outline" size="sm" icon={<RefreshCw size={14} />} loading={loading} onClick={() => void load(true)}>
+            重新扫描
+          </Button>
         </div>
-      )}
 
-      {/* Toolbar */}
-      <div
-        className="flex-shrink-0 flex items-center gap-3 border-b px-4 py-2"
-        style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-card)' }}
-      >
-        {/* Filters */}
-        <div className="flex rounded-lg border overflow-hidden" style={{ borderColor: 'var(--color-border)' }}>
-          {FILTER_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => handleFilterChange(opt.value)}
-              className="cursor-pointer border-none px-3 py-1 text-xs font-medium transition-colors"
-              style={{
-                background: filterMode === opt.value ? 'var(--color-accent)' : 'transparent',
-                color: filterMode === opt.value ? '#fff' : 'var(--color-text-secondary)',
-                borderRight: '1px solid var(--color-border)',
-              }}
+        <div className="mt-4 flex gap-1 border-b border-[var(--color-border)]">
+          <SourceTab active={source === 'question_bank'} icon={<Database size={15} />} label="题库素材" count={questionCount} onClick={() => switchSource('question_bank')} />
+          <SourceTab active={source === 'import_batch'} icon={<FolderArchive size={15} />} label="导入缓存" count={importCount} onClick={() => switchSource('import_batch')} />
+        </div>
+      </header>
+
+      <div className="flex-shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-card)] px-5 py-3">
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <StatCard icon={<ImageIcon size={16} />} label="当前结果" value={`${stats?.total ?? 0} 项`} />
+          <StatCard icon={<HardDrive size={16} />} label="当前占用" value={formatSize(stats?.total_size_bytes ?? 0)} />
+          <StatCard label={source === 'import_batch' ? '已入库引用' : '引用中'} value={`${stats?.referenced ?? 0} 项`} tone="success" />
+          <StatCard label={source === 'import_batch' ? '待入库' : '孤立素材'} value={`${stats?.unreferenced ?? 0} 项`} tone={stats?.unreferenced ? 'warning' : 'neutral'} />
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Input
+            size="sm"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            placeholder="搜索文件名或路径"
+            leftIcon={<Search size={14} />}
+            wrapperClassName="min-w-[220px] flex-1 md:max-w-sm"
+          />
+          <Select
+            size="sm"
+            value={filterMode}
+            onChange={(event) => { setFilterMode(event.target.value); setPage(1); }}
+            options={source === 'import_batch' ? [
+              { value: 'all', label: '全部状态' },
+              { value: 'referenced', label: '已入库引用' },
+              { value: 'unreferenced', label: '待入库' },
+            ] : [
+              { value: 'all', label: '全部状态' },
+              { value: 'referenced', label: '引用中' },
+              { value: 'unreferenced', label: '孤立素材' },
+            ]}
+          />
+          {source === 'import_batch' && (
+            <Select size="sm" value={batchId} onChange={(event) => { setBatchId(event.target.value); setPage(1); }} options={batchOptions} className="max-w-[250px]" />
+          )}
+          <Select
+            size="sm"
+            value={`${sortBy}:${sortOrder}`}
+            onChange={(event) => {
+              const [nextSort, nextOrder] = event.target.value.split(':');
+              setSortBy(nextSort);
+              setSortOrder(nextOrder);
+              setPage(1);
+            }}
+            options={[
+              { value: 'modified_at:desc', label: '最近更新' },
+              { value: 'modified_at:asc', label: '最早更新' },
+              { value: 'name:asc', label: '名称 A–Z' },
+              { value: 'size_bytes:desc', label: '文件从大到小' },
+              { value: 'reference_count:desc', label: '引用数最多' },
+            ]}
+          />
+          <Button variant="outline" size="sm" icon={<HardDrive size={14} />} loading={analyzingStorage} onClick={() => void analyzeStorage()}>
+            存储分析
+          </Button>
+          {source === 'import_batch' && (
+            <Button
+              variant="danger"
+              size="sm"
+              icon={<Trash2 size={14} />}
+              loading={previewLoading}
+              disabled={!data?.reference_scan_available || (stats?.total ?? 0) === 0}
+              onClick={() => void openCacheCleanupPreview()}
             >
-              {opt.label}
-            </button>
-          ))}
+              {batchId ? '清除此批次' : '清除缓存'}
+            </Button>
+          )}
+          {source === 'question_bank' && (
+            <Button
+              variant="danger"
+              size="sm"
+              icon={<Trash2 size={14} />}
+              loading={previewLoading}
+              disabled={!data?.reference_scan_available}
+              onClick={() => void openCleanupPreview()}
+            >
+              清理孤立素材
+            </Button>
+          )}
         </div>
-
-        {/* Search */}
-        <input
-          type="text"
-          value={searchInput}
-          onChange={(e) => setSearchInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
-          placeholder="搜索文件名..."
-          className="rounded border px-2 py-1 text-xs outline-none"
-          style={{
-            borderColor: 'var(--color-border)',
-            background: 'var(--color-bg-card)',
-            color: 'var(--color-text)',
-            width: 180,
-          }}
-        />
-        <button
-          onClick={handleSearch}
-          className="cursor-pointer rounded border px-2.5 py-1 text-xs transition-colors"
-          style={{
-            borderColor: 'var(--color-border)',
-            background: 'var(--color-bg-hover)',
-            color: 'var(--color-text-secondary)',
-          }}
-        >
-          搜索
-        </button>
-
-        <div style={{ flex: 1 }} />
-
-        {/* Cleanup button */}
-        <button
-          onClick={handleCleanup}
-          disabled={cleaning || (stats?.unreferenced ?? 0) === 0}
-          className="cursor-pointer rounded-lg border-none px-4 py-1.5 text-xs font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-          style={{ background: 'var(--color-red)' }}
-        >
-          {cleaning ? '清理中...' : '清理无引用素材'}
-        </button>
-
-        {/* Refresh */}
-        <button
-          onClick={load}
-          disabled={loading}
-          className="cursor-pointer rounded border px-3 py-1 text-xs transition-colors"
-          style={{
-            borderColor: 'var(--color-border)',
-            background: 'var(--color-bg-hover)',
-            color: 'var(--color-text-secondary)',
-          }}
-        >
-          刷新
-        </button>
       </div>
 
-      {/* Result message */}
-      {cleanResult && (
-        <div
-          className="flex-shrink-0 px-4 py-1.5 text-xs"
-          style={{
-            background: 'var(--color-green-light)',
-            color: 'var(--color-green)',
-          }}
-        >
-          {cleanResult}
+      {!data?.reference_scan_available && (
+        <div className="flex items-center gap-2 bg-[var(--color-orange-light)] px-5 py-2 text-xs text-[var(--color-orange)]">
+          <AlertTriangle size={14} />引用数据库不可用，当前状态显示为未知，删除与清理已自动禁用。
         </div>
       )}
-
-      {/* Error */}
-      {error && (
-        <div className="flex-shrink-0 px-4 py-1.5 text-xs" style={{ background: 'var(--color-red-light)', color: 'var(--color-red)' }}>
-          {error}
+      {message && (
+        <div className="flex items-center justify-between bg-[var(--color-accent-light)] px-5 py-2 text-xs text-[var(--color-accent)]">
+          <span>{message}</span>
+          <button type="button" aria-label="关闭消息" onClick={() => setMessage(null)}><X size={14} /></button>
         </div>
       )}
+      {error && <div className="bg-[var(--color-red-light)] px-5 py-2 text-xs text-[var(--color-red)]">{error}</div>}
 
-      {/* Loading */}
-      {loading && (
-        <div className="flex flex-1 items-center justify-center">
-          <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
-            加载中...
-          </p>
-        </div>
-      )}
-
-      {/* Empty */}
-      {!loading && !error && assets.length === 0 && (
-        <div className="flex flex-1 items-center justify-center">
-          <div className="text-center">
-            <div className="mb-3 text-4xl">🖼</div>
-            <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-              暂无素材文件
-            </p>
-            <p className="mt-1 text-xs" style={{ color: 'var(--color-text-muted)' }}>
-              {filterMode !== 'all' ? '当前筛选条件下无结果' : '素材目录为空或不存在支持的图片格式'}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Asset grid with thumbnails */}
-      {!loading && !error && assets.length > 0 && (
-        <div className="flex-1 overflow-y-auto p-4">
-          <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))' }}>
-            {assets.map((asset) => (
-              <div
-                key={asset.relative_path}
-                className="rounded-lg border overflow-hidden transition-all hover:-translate-y-0.5"
-                style={{
-                  borderColor: 'var(--color-border)',
-                  background: 'var(--color-bg-card)',
-                  boxShadow: 'var(--shadow-card)',
-                  opacity: asset.is_referenced ? 1 : 0.75,
-                }}
-              >
-                {/* Thumbnail — click to preview */}
-                <div
-                  onClick={() => setPreviewAsset(previewAsset?.relative_path === asset.relative_path ? null : asset)}
-                  className="cursor-pointer flex items-center justify-center"
-                  style={{
-                    height: 120,
-                    background: 'var(--color-bg-code)',
-                    borderBottom: '1px solid var(--color-border)',
-                    overflow: 'hidden',
-                  }}
-                >
-                  <img
-                    src={`/files/data/assets/questions/${asset.relative_path}`}
-                    alt={asset.filename}
-                    style={{
-                      width: '100%',
-                      height: '100%',
-                      objectFit: 'cover',
-                    }}
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).style.display = 'none';
-                      const ph = (e.target as HTMLImageElement).nextElementSibling;
-                      if (ph) (ph as HTMLElement).style.display = 'flex';
-                    }}
-                  />
-                  <span
-                    style={{
-                      display: 'none',
-                      fontSize: 36,
-                      color: 'var(--color-text-muted)',
-                    }}
-                  >
-                    🖼
-                  </span>
-                </div>
-
-                {/* Info */}
-                <div className="p-2 space-y-1">
-                  <div className="text-xs font-medium truncate" style={{ color: 'var(--color-text)' }} title={asset.filename}>
-                    {asset.filename}
+      <main className="min-h-0 flex-1 overflow-y-auto p-5">
+        {loading && !data ? (
+          <div className="flex h-full items-center justify-center text-sm text-[var(--color-text-muted)]">正在扫描素材…</div>
+        ) : !error && (data?.assets.length ?? 0) === 0 ? (
+          <EmptyState source={source} filtered={Boolean(keyword || batchId || filterMode !== 'all')} />
+        ) : (
+          <div className={`space-y-6 transition-opacity ${loading ? 'opacity-60' : 'opacity-100'}`}>
+            {groupedAssets.map((group) => (
+              <section key={group.id}>
+                {source === 'import_batch' && (
+                  <div className="mb-2 flex items-center justify-between">
+                    <div>
+                      <h2 className="text-sm font-semibold text-[var(--color-text)]">批次 {shortBatchId(group.id)}</h2>
+                      <p className="text-[11px] text-[var(--color-text-muted)]">本页显示 {group.assets.length} 张</p>
+                    </div>
+                    <button type="button" className="text-xs text-[var(--color-accent)] hover:underline" onClick={() => { setBatchId(group.id); setPage(1); }}>
+                      仅看此批次
+                    </button>
                   </div>
-                  <div className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                    {formatSize(asset.size_bytes)}
-                    {asset.is_referenced ? (
-                      <span className="ml-1" style={{ color: 'var(--color-green)' }}>· 已引用</span>
-                    ) : (
-                      <span className="ml-1" style={{ color: 'var(--color-red)' }}>· 无引用</span>
-                    )}
-                  </div>
+                )}
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3">
+                  {group.assets.map((asset) => {
+                    const status = statusDisplay(asset);
+                    return (
+                      <article key={asset.relative_path} className="group overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-card)] shadow-[var(--shadow-sm)] transition hover:-translate-y-0.5 hover:border-[var(--color-border-strong)] hover:shadow-[var(--shadow-card)]">
+                        <button type="button" className="block h-36 w-full border-b border-[var(--color-border)]" onClick={() => setPreviewAsset(asset)} aria-label={`预览 ${asset.filename}`}>
+                          <AssetThumbnail asset={asset} className="h-full w-full" />
+                        </button>
+                        <div className="space-y-2 p-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-semibold text-[var(--color-text)]" title={asset.filename}>{asset.filename}</p>
+                            <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">{formatSize(asset.size_bytes)} · {formatDate(asset.modified_at)}</p>
+                          </div>
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${status.className}`}>{status.label}</span>
+                          <div className="flex items-center gap-1 border-t border-[var(--color-border)] pt-2">
+                            <Button variant="ghost" size="sm" className="flex-1" onClick={() => setPreviewAsset(asset)}>详情</Button>
+                            <Button variant="ghost" size="sm" icon={<Clipboard size={13} />} onClick={() => void copyPath(asset.relative_path)}>复制</Button>
+                            {asset.source !== 'import_batch' && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                icon={<Trash2 size={13} />}
+                                className="text-[var(--color-red)]"
+                                disabled={asset.is_referenced || asset.lifecycle_status === 'unknown'}
+                                onClick={() => setDeleteAsset(asset)}
+                              >删除</Button>
+                            )}
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  })}
                 </div>
-
-                {/* Actions */}
-                <div className="px-2 pb-2">
-                  <button
-                    onClick={() => handleDeleteSingle(asset)}
-                    disabled={asset.is_referenced || deletingFile === asset.filename}
-                    className="w-full cursor-pointer rounded border px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-30"
-                    style={{
-                      borderColor: 'var(--color-red)',
-                      color: 'var(--color-red)',
-                      background: 'transparent',
-                    }}
-                    title={asset.is_referenced ? '仅可删除未被引用的素材' : '删除此素材'}
-                  >
-                    {deletingFile === asset.filename ? '删除中...' : '删除'}
-                  </button>
-                </div>
-              </div>
+              </section>
             ))}
           </div>
+        )}
+      </main>
+
+      {pagination && pagination.total_items > 0 && (
+        <footer className="flex flex-shrink-0 items-center justify-between border-t border-[var(--color-border)] bg-[var(--color-bg-card)] px-5 py-2 text-xs text-[var(--color-text-muted)]">
+          <span>共 {pagination.total_items} 项 · 每页 {pagination.page_size} 项</span>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" icon={<ChevronLeft size={14} />} disabled={page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</Button>
+            <span className="min-w-16 text-center">{page} / {Math.max(1, pagination.total_pages)}</span>
+            <Button variant="outline" size="sm" icon={<ChevronRight size={14} />} disabled={page >= pagination.total_pages || loading} onClick={() => setPage((value) => value + 1)}>下一页</Button>
+          </div>
+        </footer>
+      )}
+
+      {previewAsset && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/35" onClick={() => setPreviewAsset(null)}>
+          <aside className="flex h-full w-full max-w-lg flex-col bg-[var(--color-bg-card)] shadow-[var(--shadow-xl)]" onClick={(event) => event.stopPropagation()} aria-label="素材详情">
+            <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-[var(--color-text)]">{previewAsset.filename}</p>
+                <p className="text-[11px] text-[var(--color-text-muted)]">{formatSize(previewAsset.size_bytes)} · {previewAsset.mime_type}</p>
+              </div>
+              <button type="button" aria-label="关闭详情" className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)]" onClick={() => setPreviewAsset(null)}><X size={19} /></button>
+            </div>
+            <AssetThumbnail asset={previewAsset} className="min-h-0 flex-1" />
+            <div className="space-y-3 border-t border-[var(--color-border)] p-4 text-xs">
+              <DetailRow label="状态" value={statusDisplay(previewAsset).label} />
+              <DetailRow label="来源" value={previewAsset.source === 'import_batch' ? '导入缓存' : '题库素材'} />
+              {previewAsset.batch_id && <DetailRow label="导入批次" value={shortBatchId(previewAsset.batch_id)} />}
+              <DetailRow label="更新时间" value={formatDate(previewAsset.modified_at)} />
+              <div>
+                <p className="text-[var(--color-text-muted)]">路径</p>
+                <div className="mt-1 flex items-start gap-2 rounded bg-[var(--color-bg-code)] p-2 font-mono text-[11px] text-[var(--color-text-secondary)]">
+                  <span className="min-w-0 flex-1 break-all">{previewAsset.relative_path}</span>
+                  <button type="button" aria-label="复制路径" onClick={() => void copyPath(previewAsset.relative_path)}><Clipboard size={14} /></button>
+                </div>
+              </div>
+              {(previewAsset.reference_question_ids ?? []).length > 0 && (
+                <div>
+                  <p className="text-[var(--color-text-muted)]">引用题目</p>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {(previewAsset.reference_question_ids ?? []).map((id) => <span key={id} className="rounded bg-[var(--color-green-light)] px-2 py-1 text-[10px] text-[var(--color-green)]">{id}</span>)}
+                  </div>
+                </div>
+              )}
+            </div>
+          </aside>
         </div>
       )}
 
-      {/* Preview modal */}
-      {previewAsset && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center"
-          style={{ background: 'rgba(0,0,0,0.7)' }}
-          onClick={() => setPreviewAsset(null)}
-        >
-          <div
-            className="rounded-xl overflow-hidden"
-            style={{ maxWidth: '90vw', maxHeight: '90vh' }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between px-4 py-2" style={{ background: 'var(--color-bg-card)' }}>
-              <span className="text-sm font-medium truncate" style={{ color: 'var(--color-text)' }}>
-                {previewAsset.filename}
-              </span>
-              <span className="text-xs ml-4" style={{ color: 'var(--color-text-muted)' }}>
-                {formatSize(previewAsset.size_bytes)}
-              </span>
-              <button
-                onClick={() => setPreviewAsset(null)}
-                className="ml-4 cursor-pointer rounded px-2 py-1 text-lg leading-none"
-                style={{ color: 'var(--color-text-muted)', background: 'none', border: 'none' }}
-              >
-                ×
-              </button>
-            </div>
-            <img
-              src={`/files/data/assets/questions/${previewAsset.relative_path}`}
-              alt={previewAsset.filename}
-              style={{ maxWidth: '90vw', maxHeight: '80vh', display: 'block' }}
-            />
+      {cleanupPreview && (
+        <ConfirmDialog title="清理题库孤立素材" icon={<Trash2 size={20} />} onClose={() => setCleanupPreview(null)}>
+          <p>本次只处理题库正式素材，不会删除导入批次缓存。</p>
+          <div className="my-4 grid grid-cols-2 gap-2">
+            <StatCard label="可清理文件" value={`${cleanupPreview.candidate_count} 个`} tone="warning" />
+            <StatCard label="预计释放" value={formatSize(cleanupPreview.reclaimable_bytes)} />
           </div>
-        </div>
+          <p className="text-xs text-[var(--color-text-muted)]">仍被题目引用的 {cleanupPreview.protected_count} 个文件将受到保护。删除操作当前不可撤销。</p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setCleanupPreview(null)}>取消</Button>
+            <Button variant="danger" loading={cleaning} disabled={cleanupPreview.candidate_count === 0} onClick={() => void confirmCleanup()}>确认清理</Button>
+          </div>
+        </ConfirmDialog>
       )}
+
+      {cacheCleanupPreview && (
+        <ConfirmDialog title={cacheCleanupPreview.batch_id ? '清除当前批次缓存' : '清除导入缓存'} icon={<Trash2 size={20} />} onClose={() => setCacheCleanupPreview(null)}>
+          <p>
+            {cacheCleanupPreview.batch_id
+              ? `将清除批次 ${shortBatchId(cacheCleanupPreview.batch_id)} 中可安全删除的图片缓存。`
+              : '将清除所有非活动批次中未被题目引用的图片缓存。'}
+          </p>
+          <div className="my-4 grid grid-cols-2 gap-2">
+            <StatCard label="涉及批次" value={`${cacheCleanupPreview.batch_count} 个`} />
+            <StatCard label="可清除文件" value={`${cacheCleanupPreview.candidate_count} 个`} tone="warning" />
+            <StatCard label="预计释放" value={formatSize(cacheCleanupPreview.reclaimable_bytes)} tone="warning" />
+            <StatCard label="受保护文件" value={`${cacheCleanupPreview.protected_count} 个`} />
+          </div>
+          {cacheCleanupPreview.active_batches.length > 0 && (
+            <p className="rounded bg-[var(--color-orange-light)] p-2 text-xs text-[var(--color-orange)]">
+              {cacheCleanupPreview.active_batches.length} 个正在处理或校对的批次已自动跳过。
+            </p>
+          )}
+          <p className="mt-3 text-xs text-[var(--color-text-muted)]">仅删除批次内的图片缓存，批次状态、识别文本和原始文档会保留。此操作不可撤销。</p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setCacheCleanupPreview(null)}>取消</Button>
+            <Button variant="danger" loading={clearingCache} disabled={cacheCleanupPreview.candidate_count === 0} onClick={() => void confirmCacheCleanup()}>确认清除</Button>
+          </div>
+        </ConfirmDialog>
+      )}
+
+      {storageAnalysis && (
+        <ConfirmDialog title="素材存储分析" icon={<HardDrive size={20} />} onClose={() => setStorageAnalysis(null)}>
+          <p>已检查当前分类中的 {storageAnalysis.scanned_files} 个文件。本分析只读取文件，不会自动删除或修改素材。</p>
+          <div className="my-4 grid grid-cols-2 gap-2">
+            <StatCard label="重复副本" value={`${storageAnalysis.duplicate_files} 个`} tone={storageAnalysis.duplicate_files ? 'warning' : 'neutral'} />
+            <StatCard label="可节省空间" value={formatSize(storageAnalysis.reclaimable_bytes)} tone={storageAnalysis.reclaimable_bytes ? 'warning' : 'neutral'} />
+            <StatCard label="损坏文件" value={`${storageAnalysis.corrupt_files.length} 个`} tone={storageAnalysis.corrupt_files.length ? 'warning' : 'neutral'} />
+            <StatCard label="异常大小" value={`${storageAnalysis.tiny_files.length + storageAnalysis.oversized_files.length} 个`} />
+          </div>
+          {storageAnalysis.groups.length > 0 && (
+            <div className="max-h-48 space-y-2 overflow-y-auto">
+              {storageAnalysis.groups.slice(0, 8).map((group) => (
+                <div key={group.content_hash} className="rounded border border-[var(--color-border)] bg-[var(--color-bg)] p-2 text-xs">
+                  <div className="flex justify-between font-medium text-[var(--color-text)]">
+                    <span>{group.copies} 个相同文件</span><span>可节省 {formatSize(group.reclaimable_bytes)}</span>
+                  </div>
+                  <p className="mt-1 truncate font-mono text-[10px] text-[var(--color-text-muted)]" title={group.paths[0]}>{group.paths[0]}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mt-5 flex justify-end">
+            <Button variant="primary" onClick={() => setStorageAnalysis(null)}>完成</Button>
+          </div>
+        </ConfirmDialog>
+      )}
+
+      {deleteAsset && (
+        <ConfirmDialog title="删除素材" icon={<AlertTriangle size={20} />} onClose={() => setDeleteAsset(null)}>
+          <p>确定删除“{deleteAsset.filename}”吗？</p>
+          <p className="mt-2 break-all rounded bg-[var(--color-bg-code)] p-2 text-xs text-[var(--color-text-muted)]">{deleteAsset.relative_path}</p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setDeleteAsset(null)}>取消</Button>
+            <Button variant="danger" loading={deleting} onClick={() => void confirmDelete()}>确认删除</Button>
+          </div>
+        </ConfirmDialog>
+      )}
+    </div>
+  );
+}
+
+function SourceTab({ active, icon, label, count, onClick }: { active: boolean; icon: React.ReactNode; label: string; count: number; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className={`relative flex items-center gap-2 px-4 py-2 text-sm font-medium transition ${active ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)]'}`}>
+      {icon}<span>{label}</span><span className="rounded-full bg-[var(--color-bg-hover)] px-1.5 py-0.5 text-[10px]">{count}</span>
+      {active && <span className="absolute inset-x-2 bottom-[-1px] h-0.5 rounded bg-[var(--color-accent)]" />}
+    </button>
+  );
+}
+
+function StatCard({ icon, label, value, tone = 'neutral' }: { icon?: React.ReactNode; label: string; value: string; tone?: 'neutral' | 'success' | 'warning' }) {
+  const toneClass = tone === 'success' ? 'text-[var(--color-green)]' : tone === 'warning' ? 'text-[var(--color-orange)]' : 'text-[var(--color-text)]';
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2">
+      <div className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-muted)]">{icon}{label}</div>
+      <p className={`mt-0.5 text-sm font-bold ${toneClass}`}>{value}</p>
+    </div>
+  );
+}
+
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return <div className="flex items-center justify-between gap-4"><span className="text-[var(--color-text-muted)]">{label}</span><span className="text-right font-medium text-[var(--color-text)]">{value}</span></div>;
+}
+
+function EmptyState({ source, filtered }: { source: 'question_bank' | 'import_batch'; filtered: boolean }) {
+  return (
+    <div className="flex h-full min-h-64 items-center justify-center">
+      <div className="max-w-sm text-center">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-bg-hover)] text-[var(--color-text-muted)]">
+          {source === 'import_batch' ? <FolderArchive size={24} /> : <Database size={24} />}
+        </div>
+        <p className="mt-3 text-sm font-semibold text-[var(--color-text)]">{filtered ? '没有符合条件的素材' : source === 'import_batch' ? '暂无导入缓存' : '暂无题库素材'}</p>
+        <p className="mt-1 text-xs text-[var(--color-text-muted)]">{filtered ? '尝试清除筛选条件或更换关键词' : '导入文档或为题目添加图片后，素材会显示在这里'}</p>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDialog({ title, icon, onClose, children }: { title: string; icon: React.ReactNode; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label={title} className="w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-card)] p-5 shadow-[var(--shadow-xl)]" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-4 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-base font-bold text-[var(--color-text)]">{icon}{title}</div>
+          <button type="button" aria-label="关闭" className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-hover)]" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="text-sm text-[var(--color-text-secondary)]">{children}</div>
+      </div>
     </div>
   );
 }

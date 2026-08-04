@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { Question, QuestionImageDetail } from '../../types';
+import { imageFileUrl } from '../../utils/imageUrl';
+import ImportStemRenderer from '../import/ImportStemRenderer';
 import LatexRenderer from '../render/LatexRenderer';
 
 const SIZE_PRESETS = [
@@ -131,7 +133,7 @@ export default function QuestionContentCard({
             />
           ) : (
             <div className="text-[19px] leading-[2.05]" style={{ color: '#0f172a' }}>
-              <LatexRenderer text={data.title || '（暂无题干）'} />
+              <ImportStemRenderer title={String(data.title || '（暂无题干）')} figures={question.figures || []} maxImageHeight={360} questionId={question.question_id} />
             </div>
           )}
         </div>
@@ -286,7 +288,7 @@ function FigureThumbnail({ img, index, questionId }: { img: QuestionImageDetail;
     saveImgScale(questionId, index, newScale);
   }, [questionId, index]);
 
-  const src = img.file_path ? `/files/${img.file_path}` : null;
+  const src = imageFileUrl(img.file_path || img.filename);
 
   return (
     <div

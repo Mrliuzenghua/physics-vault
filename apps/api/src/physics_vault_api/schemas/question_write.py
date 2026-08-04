@@ -27,11 +27,14 @@ class QuestionRecord(BaseModel):
     analysis: str = Field(default="")
     sub_questions: list[dict[str, Any]] = Field(default_factory=list)
     figures: list[dict[str, Any]] = Field(default_factory=list)
-    difficulty: int | None = Field(default=None, ge=1, le=5)
+    difficulty: int | None = Field(default=None, ge=0, le=5)
     knowledge_point: str = Field(default="")
     tags: list[str] = Field(default_factory=list)
     source: str = Field(default="")
     import_batch_id: str | None = None
+    source_page: int | None = None
+    source_region_id: str | None = None
+    raw_text: str | None = None
     review_status: str = Field(default="confirmed")
 
 

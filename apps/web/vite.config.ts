@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
-const apiTarget = process.env.PHYSICS_API_TARGET || 'http://localhost:8000'
+const apiTarget = process.env.PHYSICS_API_TARGET || 'http://127.0.0.1:8000'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -27,9 +27,12 @@ export default defineConfig({
     },
   },
   server: {
+    host: '127.0.0.1',
+    port: 5173,
+    strictPort: true,
     proxy: {
       '/api': apiTarget,
-      '/assets': apiTarget,
+      '^/assets(?:/|$)': apiTarget,
       '/health': apiTarget,
       '/search': apiTarget,
       '/questions': apiTarget,
@@ -41,6 +44,7 @@ export default defineConfig({
       '/processing-runs': apiTarget,
       '/embeddings': apiTarget,
       '/files': apiTarget,
+      '/thumbs': apiTarget,
     },
   },
 })

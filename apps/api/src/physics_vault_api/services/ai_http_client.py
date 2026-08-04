@@ -149,6 +149,8 @@ class AiHttpClient:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
                 return parsed
+            if isinstance(parsed, list):
+                return {"items": parsed}
             return {"text": text}
         except json.JSONDecodeError:
             # Last resort: extract the outermost {...} JSON object from the text
@@ -158,6 +160,14 @@ class AiHttpClient:
                     parsed = json.loads(match.group(0))
                     if isinstance(parsed, dict):
                         return parsed
+                except json.JSONDecodeError:
+                    pass
+            array_match = _re.search(r"\[[\s\S]*\]", text)
+            if array_match:
+                try:
+                    parsed = json.loads(array_match.group(0))
+                    if isinstance(parsed, list):
+                        return {"items": parsed}
                 except json.JSONDecodeError:
                     pass
             return {"text": content.strip()}
@@ -367,155 +377,6 @@ class AiHttpClient:
             time_budget_seconds=time_budget_seconds,
         )
 
-        import time
-
-        refined: list[dict[str, Any]] = []
-        refined_count = 0
-        started_at = time.monotonic()
-
-        system_prompt = """你是高中物理题库结构化清洗助手。下面是机器从试卷 Markdown 切分出的题目 JSON 数组。
-你的任务是在“已经切片完成”的前提下，逐题清洗题干、选项、答案、解析，并返回可直接入库的 JSON。
-
-必须返回 JSON 对象（与输入一一对应，顺序、数量不变）：
-
-{
-  "questions": [
-    {
-      "question_id": "原样保留",
-      "question_type": "single_choice | multi_choice | fill | experiment | calculation",
-      "title": "纯净题干（含公式 $...$，保留 ![fig:xxx] 图片占位符原样不动）",
-      "options": [{"opt": "A", "content": "..."}],
-      "answer": "...",
-      "analysis": "..."
-    }
-  ]
-}
-
-严格要求：
-1. question_id 必须原样保留；不要新增、删除、合并、拆分题目。
-2. ![fig:xxx] 占位符必须原样保留在原题对应位置，不得删除、改名或挪到其他题。
-3. title 只放题干和必要图片占位符；把误混入 title 的选项、答案、解析移到对应字段。
-4. options 中的 content 不要带 "A."、"B."、"（A）" 等前缀；保留选项本身的公式和单位。
-5. answer 只写选项字母或简洁答案；多选题写成 "BD" 这种连续大写字母。
-6. analysis 若原文没有解析可为空，不要编造长解析；若能从原文判断，可做简洁整理。
-7. 公式统一为 LaTeX 行内 $...$；不要把普通中文放进 \\text{}；不要破坏指数和单位。
-8. 明显不是完整题目（页眉、页脚、目录、残段）时，title 置为空字符串 ""，其它字段尽量置空。
-9. 只输出 JSON，不要 markdown 代码块，不要任何解释。
-
-清洗样例：
-输入：
-[
-  {
-    "question_id": "q_1",
-    "question_type": "calculation",
-    "title": "1. 核钟是基于原子核能级跃迁来建立高精度时间标准的装置，能级差约为1.3×10^-18 J，h=6.6×10^-34 J·s，c=3.0×10^8 m/s。关于该激光，下列说法正确的是（ ） A. 光强倍增，此能级跃迁不能发生 B. 光强减半，此能级跃迁不能发生 C. 频率约为2.0×10^16 Hz D. 波长约为1.5×10^-7 m 【答案】D",
-    "options": [],
-    "answer": "",
-    "analysis": ""
-  }
-]
-输出：
-{
-  "questions": [
-    {
-      "question_id": "q_1",
-      "question_type": "single_choice",
-      "title": "核钟是基于原子核能级跃迁来建立高精度时间标准的装置，能级差约为 $1.3\\times10^{-18}\\,\\mathrm{J}$，$h=6.6\\times10^{-34}\\,\\mathrm{J\\cdot s}$，$c=3.0\\times10^8\\,\\mathrm{m/s}$。关于该激光，下列说法正确的是（ ）",
-      "options": [
-        {"opt": "A", "content": "光强倍增，此能级跃迁不能发生"},
-        {"opt": "B", "content": "光强减半，此能级跃迁不能发生"},
-        {"opt": "C", "content": "频率约为 $2.0\\times10^{16}\\,\\mathrm{Hz}$"},
-        {"opt": "D", "content": "波长约为 $1.5\\times10^{-7}\\,\\mathrm{m}$"}
-      ],
-      "answer": "D",
-      "analysis": ""
-    }
-  ]
-}"""
-
-        for start in range(0, len(questions), batch_size):
-            # Time budget: stop calling the AI once exceeded — remaining
-            # questions keep their local parse results.
-            elapsed = time.monotonic() - started_at
-            if elapsed > time_budget_seconds:
-                logger.warning(
-                    "AI refine time budget (%.0fs) exceeded after %d/%d questions — using local results for the rest",
-                    time_budget_seconds, start, len(questions),
-                )
-                refined.extend(questions[start:])
-                break
-
-            batch = questions[start : start + batch_size]
-            payload = [
-                {
-                    "question_id": q.get("question_id", ""),
-                    "question_type": q.get("question_type", "calculation"),
-                    "title": q.get("title", ""),
-                    "options": q.get("options", []),
-                    "answer": q.get("answer", ""),
-                    "analysis": q.get("analysis", ""),
-                }
-                for q in batch
-            ]
-            batch_started = time.monotonic()
-            try:
-                result = self._call(
-                    [
-                        {"role": "system", "content": system_prompt},
-                        {
-                            "role": "user",
-                            "content": json.dumps(payload, ensure_ascii=False),
-                        },
-                    ],
-                    temperature=0.1,
-                    max_tokens=12000,
-                    response_format={"type": "json_object"},
-                    timeout_seconds=90,
-                )
-                logger.info(
-                    "AI refine batch %d-%d done in %.1fs",
-                    start + 1, start + len(batch), time.monotonic() - batch_started,
-                )
-                items = result.get("questions")
-                if not isinstance(items, list):
-                    raise ValueError("AI response missing 'questions' array")
-
-                by_id = {
-                    str(item.get("question_id", "")): item
-                    for item in items
-                    if isinstance(item, dict)
-                }
-                for local_q in batch:
-                    ai_q = by_id.get(str(local_q.get("question_id", "")))
-                    if ai_q is None:
-                        refined.append(local_q)
-                        continue
-                    merged = dict(local_q)
-                    title = str(ai_q.get("title", "")).strip()
-                    merged["title"] = title if title else local_q.get("title", "")
-                    q_type = str(ai_q.get("question_type", "")).strip()
-                    if q_type in ("single_choice", "multi_choice", "fill", "experiment", "calculation"):
-                        merged["question_type"] = q_type
-                    ai_opts = ai_q.get("options")
-                    if isinstance(ai_opts, list) and ai_opts:
-                        merged["options"] = [
-                            {"opt": str(o.get("opt", "")).strip(), "content": str(o.get("content", "")).strip()}
-                            for o in ai_opts
-                            if isinstance(o, dict) and str(o.get("opt", "")).strip()
-                        ]
-                    for field in ("answer", "analysis"):
-                        value = str(ai_q.get(field, "")).strip()
-                        if value:
-                            merged[field] = value
-                    merged["_ai_refined"] = True
-                    refined_count += 1
-                    refined.append(merged)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("AI refine failed for batch starting at %d: %s", start, exc)
-                refined.extend(batch)
-
-        return {"questions": refined, "refined_count": refined_count}
-
     def parse_document(
         self,
         file_path: str,
@@ -579,22 +440,26 @@ class AiHttpClient:
                 items.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/{ext};base64,{img_b64}"},
+                    "min_pixels": 32 * 32 * 3,
+                    "max_pixels": 32 * 32 * 8192,
                 })
             return items
 
         # If it's an image type, read and attach as vision input.
         image_types = {"jpg", "jpeg", "png", "webp"}
         if file_type.lower() in image_types:
+            path = pathlib.Path(file_path)
+            if not path.is_file():
+                raise RuntimeError(f"图片文件不存在：{file_path}")
             try:
-                path = pathlib.Path(file_path)
-                if path.is_file():
-                    messages.append({
-                        "role": "user",
-                        "content": image_message_items([path]),
-                    })
-                    return self._call(messages, temperature=0.1, max_tokens=8192)
-            except Exception as exc:
-                logger.warning("Failed to read image for vision API: %s", exc)
+                content = image_message_items([path])
+            except OSError as exc:
+                raise RuntimeError(f"读取图片失败，无法进入 OCR：{exc}") from exc
+            messages.append({
+                "role": "user",
+                "content": content,
+            })
+            return self._call(messages, temperature=0.1, max_tokens=8192)
 
         if file_type.lower() == "pdf":
             path = pathlib.Path(file_path)
@@ -664,3 +529,161 @@ class AiHttpClient:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": q_json},
         ], temperature=0.7, max_tokens=8192)
+
+
+class DashScopeNativeOcrClient:
+    """Calls DashScope native MultiModalConversation for Qwen OCR models."""
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model_name: str = "qwen-vl-ocr",
+        timeout_seconds: int = 120,
+        max_retries: int = 2,
+    ) -> None:
+        self._base_url = _normalize_dashscope_native_base_url(base_url)
+        self._api_key = api_key
+        self._model = model_name or "qwen-vl-ocr"
+        self._timeout = timeout_seconds
+        self._max_retries = max(1, max_retries)
+
+    def test_connection(self) -> None:
+        self._call_native([
+            {
+                "image": "https://help-static-aliyun-doc.aliyuncs.com/file-manage-files/zh-CN/20241108/ctdzex/biaozhun.jpg",
+            },
+            {"text": "请仅输出图像中的文本内容。"},
+        ])
+
+    def parse_document(
+        self,
+        file_path: str,
+        file_type: str,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        import pathlib
+
+        path = pathlib.Path(file_path)
+        if not path.is_file():
+            raise RuntimeError(f"图片文件不存在：{file_path}")
+        if file_type.lower() not in {"jpg", "jpeg", "png", "webp"}:
+            raise RuntimeError(f"DashScope OCR 仅接收已渲染图片，当前文件类型：{file_type}")
+
+        prompt = """请识别这张高中物理试卷页面中的所有题目，并返回严格 JSON。
+
+返回格式：
+{
+  "document_type": "image",
+  "page_count": 1,
+  "questions": [
+    {
+      "question_id": "",
+      "question_type": "single_choice|multi_choice|fill|experiment|calculation",
+      "title": "题干文本，公式用 LaTeX",
+      "options": [{"opt": "A", "content": "选项内容"}],
+      "answer": "",
+      "analysis": "",
+      "figures": [],
+      "difficulty": null,
+      "knowledge_point": "",
+      "tags": [],
+      "source_page": 1,
+      "raw_text": "本页原始 OCR 文本"
+    }
+  ]
+}
+
+要求：
+1. 一题一个对象，不要合并多题。
+2. 只输出 JSON，不要 markdown 代码块，不要解释。
+3. 若答案或解析不可见，置为空字符串。
+4. 公式尽量转成 LaTeX；看不清的单个字符用 ? 代替。"""
+
+        content = [
+            {"image": str(path.resolve())},
+            {"text": prompt},
+        ]
+        raw_text = self._call_native(content)
+        parsed = AiHttpClient._parse_content(raw_text)
+        if "questions" in parsed:
+            parsed.setdefault("document_type", "image")
+            parsed.setdefault("page_count", 1)
+            return parsed
+        return {
+            "document_type": "image",
+            "page_count": 1,
+            "question_count": 0,
+            "questions": [],
+            "raw_text": str(parsed.get("text") or raw_text or ""),
+            "warnings": ["DashScope OCR 返回了文本，但未返回题目 JSON"],
+        }
+
+    def _call_native(self, content: list[dict[str, Any]]) -> str:
+        import dashscope
+        from dashscope import MultiModalConversation
+
+        dashscope.base_http_api_url = self._base_url
+        messages = [{"role": "user", "content": content}]
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries):
+            try:
+                response = MultiModalConversation.call(
+                    api_key=self._api_key,
+                    model=self._model,
+                    messages=messages,
+                )
+                status_code = getattr(response, "status_code", 200)
+                if status_code and int(status_code) >= 400:
+                    message = getattr(response, "message", "") or getattr(response, "code", "") or str(response)
+                    raise RuntimeError(f"DashScope OCR 调用失败：HTTP {status_code}，{message}")
+                return _extract_dashscope_text(response)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning(
+                    "DashScope OCR call attempt %d/%d failed: %s",
+                    attempt + 1,
+                    self._max_retries,
+                    exc,
+                )
+        raise RuntimeError(
+            f"DashScope OCR 调用失败（已重试 {self._max_retries} 次）\n"
+            f"目标 URL: {self._base_url}\n模型: {self._model}\n最后错误: {last_error}"
+        )
+
+
+def _extract_dashscope_text(response: Any) -> str:
+    output = getattr(response, "output", None)
+    choices = getattr(output, "choices", None)
+    if not choices and isinstance(output, dict):
+        choices = output.get("choices")
+    if not choices:
+        return str(response)
+
+    message = choices[0].get("message") if isinstance(choices[0], dict) else getattr(choices[0], "message", None)
+    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if "text" in item:
+                    parts.append(str(item["text"]))
+                elif "content" in item:
+                    parts.append(str(item["content"]))
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part.strip())
+    if isinstance(content, str):
+        return content
+    return str(content or "")
+
+
+def _normalize_dashscope_native_base_url(base_url: str) -> str:
+    raw = (base_url or "").strip().rstrip("/")
+    if not raw:
+        return "https://dashscope.aliyuncs.com/api/v1"
+    if "dashscope.aliyuncs.com/compatible-mode" in raw:
+        return "https://dashscope.aliyuncs.com/api/v1"
+    if raw.endswith("/api/v1"):
+        return raw
+    return raw

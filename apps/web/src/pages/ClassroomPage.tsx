@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SlideViewer from '../components/slides/SlideViewer';
 import TeachingSlidePage from '../components/teaching/TeachingSlidePage';
 import { EmptyState } from '../components/ui/EmptyState';
-import { buildSlideDeckFromLessonPackage, loadCurrentLessonPackage } from '../services/lessonPackage';
+import { loadCurrentLessonPackage } from '../services/lessonPackage';
+import { layoutModelToSlideDeck, lessonPackageToLayoutModel } from '../services/lessonLayoutModel';
 import type { LessonPackage, Question, SlidesDisplayMode } from '../types';
 import type { SlidePage } from '../types/slides';
 
@@ -14,7 +15,7 @@ interface MixedPage {
 }
 
 function buildMixedPages(lessonPackage: LessonPackage): MixedPage[] {
-  const deck = buildSlideDeckFromLessonPackage(lessonPackage);
+  const deck = layoutModelToSlideDeck(lessonPackageToLayoutModel(lessonPackage));
   const questionMap = new Map(lessonPackage.questions.map((question) => [question.question_id, question]));
 
   return deck.pages.map((slide) => {
@@ -33,17 +34,40 @@ export default function ClassroomPage() {
   const stageRef = useRef<HTMLDivElement>(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [displayMode, setDisplayMode] = useState<SlidesDisplayMode>('stem_only');
+  const [revealStep, setRevealStep] = useState(0);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const currentPage = pages[currentIndex];
   const questionCount = pages.filter((page) => page.kind === 'question').length;
+  const maxRevealStep = currentPage?.kind === 'question'
+    ? (displayMode === 'full' ? 2 : displayMode === 'stem_answer' ? 1 : 0)
+    : 0;
 
-  const goPrev = useCallback(() => setCurrentIndex((prev) => Math.max(0, prev - 1)), []);
+  const goPrev = useCallback(() => {
+    if (revealStep > 0) {
+      setRevealStep((step) => step - 1);
+      return;
+    }
+    setCurrentIndex((prev) => Math.max(0, prev - 1));
+    setRevealStep(maxRevealStep);
+  }, [maxRevealStep, revealStep]);
   const goNext = useCallback(
-    () => setCurrentIndex((prev) => Math.min(pages.length - 1, prev + 1)),
-    [pages.length],
+    () => {
+      if (revealStep < maxRevealStep) {
+        setRevealStep((step) => step + 1);
+        return;
+      }
+      setCurrentIndex((prev) => Math.min(pages.length - 1, prev + 1));
+      setRevealStep(0);
+    },
+    [maxRevealStep, pages.length, revealStep],
   );
+
+  const setTeachingMode = useCallback((mode: SlidesDisplayMode) => {
+    setDisplayMode(mode);
+    setRevealStep(0);
+  }, []);
 
   const toggleFullscreen = useCallback(() => {
     const node = stageRef.current;
@@ -93,7 +117,7 @@ export default function ClassroomPage() {
   }
 
   return (
-    <div className="flex h-full bg-[#0f172a] text-white">
+    <div className="flex h-full bg-[#eaf3ff] text-[#173a6a]">
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="border-b border-white/10 bg-[#111c35] px-5 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -104,9 +128,9 @@ export default function ClassroomPage() {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              <ControlChip label="仅题干" active={displayMode === 'stem_only'} onClick={() => setDisplayMode('stem_only')} />
-              <ControlChip label="题干 + 答案" active={displayMode === 'stem_answer'} onClick={() => setDisplayMode('stem_answer')} />
-              <ControlChip label="完整解析" active={displayMode === 'full'} onClick={() => setDisplayMode('full')} />
+              <ControlChip label="仅题干" active={displayMode === 'stem_only'} onClick={() => setTeachingMode('stem_only')} />
+              <ControlChip label="题干 + 答案" active={displayMode === 'stem_answer'} onClick={() => setTeachingMode('stem_answer')} />
+              <ControlChip label="完整解析" active={displayMode === 'full'} onClick={() => setTeachingMode('full')} />
               <ControlChip label={isFullscreen ? '退出全屏' : '全屏'} active={isFullscreen} onClick={toggleFullscreen} />
             </div>
           </div>
@@ -126,6 +150,7 @@ export default function ClassroomPage() {
               displayMode={displayMode}
               zoomLevel={zoomLevel}
               fitToViewport={isFullscreen}
+              revealStep={revealStep}
             />
           )}
         </div>
@@ -159,7 +184,7 @@ export default function ClassroomPage() {
             <button
               type="button"
               onClick={goPrev}
-              disabled={currentIndex === 0}
+              disabled={currentIndex === 0 && revealStep === 0}
               className="rounded-md border border-white/10 px-4 py-2 text-sm text-white transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-40"
             >
               上一页
@@ -167,7 +192,7 @@ export default function ClassroomPage() {
             <button
               type="button"
               onClick={goNext}
-              disabled={currentIndex === pages.length - 1}
+              disabled={currentIndex === pages.length - 1 && revealStep >= maxRevealStep}
               className="rounded-md bg-[#2563eb] px-4 py-2 text-sm text-white transition hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-40"
             >
               下一页

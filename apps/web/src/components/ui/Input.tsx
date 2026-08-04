@@ -65,11 +65,11 @@ export function Input({
         <input
           id={inputId}
           className={`
-            w-full rounded-lg border bg-[var(--color-bg-card)] text-[var(--color-text)]
+            w-full rounded-md border bg-[var(--color-bg-card)] text-[var(--color-text)]
             placeholder:text-[var(--color-text-muted)]
-            outline-none transition-all duration-200
+            outline-none transition-colors duration-150
             hover:border-[var(--color-border-strong)]
-            focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/15
+            focus:border-[var(--color-accent)] focus:ring-1 focus:ring-[var(--color-accent)]/20
             ${hasError ? 'border-[var(--color-red)] focus:border-[var(--color-red)] focus:ring-[var(--color-red)]/15' : 'border-[var(--color-border)]'}
             ${sizeStyles[size]}
             ${leftIcon ? iconSizeStyles[size] : ''}

@@ -1,17 +1,19 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import ImportQuestionEditor, { type EditableQuestion } from '../components/import/ImportQuestionEditor';
+import DocumentPreviewModal from '../components/import/DocumentPreviewModal';
+import StructuredTextEditor from '../components/editor/StructuredTextEditor';
+import { analyzeQuestionQuality, findDuplicateQuestionIds, type QuestionQualityCode } from '../services/questionQuality';
 import { normalizeShortInlineDisplayMath } from '../utils/mathText';
 import {
   confirmImportBatch,
   createImportBatch,
   extractBatchImages,
-  runImportBatchAiRefine,
+  fetchImportBatchOverview,
   runImportBatchRecognize,
-  uploadBatchImage,
+  type PersistedImportBatchSummary,
 } from '../services/api';
-import type { ImportMediaAsset, Option, QuestionType } from '../types';
+import type { Figure, ImportMediaAsset, Option, QuestionType } from '../types';
 
 type ImportStrategy = 'auto' | 'document' | 'vision' | 'extract_images';
 type JobStatus = 'queued' | 'running' | 'ready' | 'failed';
@@ -29,6 +31,19 @@ interface RawQuestion {
   _ai_refined?: boolean;
 }
 
+interface EditableQuestion {
+  question_id: string;
+  question_no?: number;
+  question_type: QuestionType;
+  title: string;
+  options: Option[];
+  answer: string;
+  analysis: string;
+  figures: Figure[];
+  _key: string;
+  _aiRefined?: boolean;
+}
+
 interface ImportJob {
   id: string;
   file: File;
@@ -36,11 +51,13 @@ interface ImportJob {
   status: JobStatus;
   step: JobStep;
   batchId?: string;
+  contentVersion?: number;
   questionCount: number;
   imageCount: number;
   questions: EditableQuestion[];
   mediaAssets: ImportMediaAsset[];
   notes: string[];
+  reviewTaskId?: string;
   error?: string;
   startedAt?: number;
   finishedAt?: number;
@@ -84,6 +101,14 @@ function formatSize(size: number): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function formatDuration(startedAt?: number, finishedAt?: number): string {
+  if (!startedAt) return '未开始';
+  const seconds = Math.max(1, Math.round(((finishedAt ?? Date.now()) - startedAt) / 1000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes} 分 ${seconds % 60} 秒`;
+}
+
 function toEditable(raw: RawQuestion): EditableQuestion {
   return {
     question_id: raw.question_id ?? '',
@@ -107,17 +132,27 @@ function normalizeOptionsMath(options: Option[]): Option[] {
 }
 
 function detectRisks(questions: EditableQuestion[]): string[] {
-  const risks: string[] = [];
-  const emptyStem = questions.filter((q) => !q.title.trim()).length;
-  const choiceWithoutOptions = questions.filter(
-    (q) => (q.question_type === 'single_choice' || q.question_type === 'multi_choice') && q.options.length === 0,
-  ).length;
-  const noAnswer = questions.filter((q) => !q.answer.trim()).length;
-
-  if (emptyStem > 0) risks.push(`${emptyStem} 道题题干为空`);
-  if (choiceWithoutOptions > 0) risks.push(`${choiceWithoutOptions} 道选择题缺少选项`);
-  if (noAnswer > 0) risks.push(`${noAnswer} 道题缺少答案`);
-  return risks;
+  const duplicateIds = findDuplicateQuestionIds(questions, (question) => question._key);
+  const affected = new Map<QuestionQualityCode, Set<string>>();
+  questions.forEach((question) => {
+    analyzeQuestionQuality(question, { questionId: question._key, duplicateIds }).forEach((issue) => {
+      const ids = affected.get(issue.code) ?? new Set<string>();
+      ids.add(question._key);
+      affected.set(issue.code, ids);
+    });
+  });
+  const count = (code: QuestionQualityCode) => affected.get(code)?.size ?? 0;
+  return [
+    count('empty_title') ? `${count('empty_title')} 道题题干为空` : '',
+    count('missing_options') ? `${count('missing_options')} 道选择题缺少选项` : '',
+    count('missing_answer') ? `${count('missing_answer')} 道题缺少答案` : '',
+    count('image_issue') ? `${count('image_issue')} 道题图片引用异常` : '',
+    count('duplicate_question') ? `${count('duplicate_question')} 道题疑似重复` : '',
+    count('duplicate_options') ? `${count('duplicate_options')} 道题存在重复选项` : '',
+    count('answer_option_mismatch') ? `${count('answer_option_mismatch')} 道题答案与选项不一致` : '',
+    count('latex_delimiter') ? `${count('latex_delimiter')} 道题 LaTeX 分隔符未闭合` : '',
+    count('ocr_artifact') ? `${count('ocr_artifact')} 道题含异常 OCR 字符` : '',
+  ].filter(Boolean);
 }
 
 function guessPipeline(fileName: string): 'document' | 'vision' | 'unknown' {
@@ -138,21 +173,110 @@ async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T
   await Promise.all(workers);
 }
 
+interface ImportWorkspaceState {
+  files: File[];
+  directText: string;
+  strategy: ImportStrategy;
+  jobs: ImportJob[];
+  importMessage: string | null;
+}
+
+const initialImportWorkspaceState: ImportWorkspaceState = {
+  files: [],
+  directText: '',
+  strategy: 'auto',
+  jobs: [],
+  importMessage: null,
+};
+
+let importWorkspaceState = initialImportWorkspaceState;
+const importWorkspaceListeners = new Set<() => void>();
+
+function getImportWorkspaceState(): ImportWorkspaceState {
+  return importWorkspaceState;
+}
+
+function setImportWorkspaceState(
+  updater: SetStateAction<ImportWorkspaceState>,
+): void {
+  importWorkspaceState =
+    typeof updater === 'function'
+      ? (updater as (prev: ImportWorkspaceState) => ImportWorkspaceState)(importWorkspaceState)
+      : updater;
+  importWorkspaceListeners.forEach((listener) => listener());
+}
+
+function subscribeImportWorkspace(listener: () => void): () => void {
+  importWorkspaceListeners.add(listener);
+  return () => importWorkspaceListeners.delete(listener);
+}
+
 export default function ImportWorkbenchPage() {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [files, setFiles] = useState<File[]>([]);
-  const [directText, setDirectText] = useState('');
-  const [strategy, setStrategy] = useState<ImportStrategy>('auto');
-  const [jobs, setJobs] = useState<ImportJob[]>([]);
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useState(getImportWorkspaceState);
   const [dragOver, setDragOver] = useState(false);
-  const [refining, setRefining] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  const [submittingJobId, setSubmittingJobId] = useState<string | null>(null);
+  const [persistedBatches, setPersistedBatches] = useState<PersistedImportBatchSummary[]>([]);
+  const [previewFile, setPreviewFile] = useState<File | null>(null);
 
-  const activeJob = jobs.find((job) => job.id === activeJobId) ?? null;
+  useEffect(
+    () => subscribeImportWorkspace(() => setWorkspace(getImportWorkspaceState())),
+    [],
+  );
+
+  useEffect(() => {
+    void fetchImportBatchOverview(8).then(setPersistedBatches).catch(() => setPersistedBatches([]));
+  }, []);
+
+  const setFiles = useCallback((updater: SetStateAction<File[]>) => {
+    setImportWorkspaceState((prev) => ({
+      ...prev,
+      files: typeof updater === 'function' ? (updater as (value: File[]) => File[])(prev.files) : updater,
+    }));
+  }, []);
+
+  const setDirectText = useCallback((updater: SetStateAction<string>) => {
+    setImportWorkspaceState((prev) => ({
+      ...prev,
+      directText:
+        typeof updater === 'function' ? (updater as (value: string) => string)(prev.directText) : updater,
+    }));
+  }, []);
+
+  const setStrategy = useCallback((updater: SetStateAction<ImportStrategy>) => {
+    setImportWorkspaceState((prev) => ({
+      ...prev,
+      strategy:
+        typeof updater === 'function' ? (updater as (value: ImportStrategy) => ImportStrategy)(prev.strategy) : updater,
+    }));
+  }, []);
+
+  const setJobs = useCallback((updater: SetStateAction<ImportJob[]>) => {
+    setImportWorkspaceState((prev) => ({
+      ...prev,
+      jobs: typeof updater === 'function' ? (updater as (value: ImportJob[]) => ImportJob[])(prev.jobs) : updater,
+    }));
+  }, []);
+
+  const setImportMessage = useCallback((updater: SetStateAction<string | null>) => {
+    setImportWorkspaceState((prev) => ({
+      ...prev,
+      importMessage:
+        typeof updater === 'function'
+          ? (updater as (value: string | null) => string | null)(prev.importMessage)
+          : updater,
+    }));
+  }, []);
+
+  const {
+    files,
+    directText,
+    strategy,
+    jobs,
+    importMessage,
+  } = workspace;
   const hasRunningJobs = jobs.some((job) => job.status === 'running' || job.status === 'queued');
   const canStart = !hasRunningJobs && (files.length > 0 || directText.trim().length > 0);
 
@@ -161,25 +285,52 @@ export default function ImportWorkbenchPage() {
     return `${files.length} 个文件 / ${formatSize(totalSize)}`;
   }, [files]);
 
+  const jobSummary = useMemo(() => ({
+    total: jobs.length,
+    running: jobs.filter((job) => job.status === 'running' || job.status === 'queued').length,
+    ready: jobs.filter((job) => job.status === 'ready').length,
+    failed: jobs.filter((job) => job.status === 'failed').length,
+    questions: jobs.reduce((sum, job) => sum + job.questionCount, 0),
+    risks: jobs.reduce((sum, job) => sum + detectRisks(job.questions).length, 0),
+  }), [jobs]);
+
   const updateJob = useCallback((jobId: string, patch: Partial<ImportJob>) => {
     setJobs((prev) => prev.map((job) => (job.id === jobId ? { ...job, ...patch } : job)));
-  }, []);
+  }, [setJobs]);
 
   const appendJobNote = useCallback((jobId: string, note: string) => {
     setJobs((prev) =>
       prev.map((job) => (job.id === jobId ? { ...job, notes: [...job.notes, note] } : job)),
     );
-  }, []);
+  }, [setJobs]);
 
   const addFiles = useCallback((incoming: FileList | File[]) => {
-    const next = Array.from(incoming).filter((file) => ACCEPTED_EXTS.includes(getExtension(file.name)));
-    if (next.length === 0) {
+    const incomingFiles = Array.from(incoming);
+    const accepted = incomingFiles.filter((file) => ACCEPTED_EXTS.includes(getExtension(file.name)));
+    const unsupportedCount = incomingFiles.length - accepted.length;
+    if (accepted.length === 0) {
       alert('请选择 Word、PDF、图片、Markdown 或纯文本文件。');
       return;
     }
-    setFiles((prev) => [...prev, ...next]);
-    setDirectText('');
-  }, []);
+    setFiles((prev) => {
+      const seen = new Set(prev.map((file) => `${file.name}:${file.size}:${file.lastModified}`));
+      const deduped = accepted.filter((file) => {
+        const key = `${file.name}:${file.size}:${file.lastModified}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      const duplicateCount = accepted.length - deduped.length;
+      const messages = [
+        deduped.length > 0 ? `已加入 ${deduped.length} 个文件` : '',
+        duplicateCount > 0 ? `跳过 ${duplicateCount} 个重复文件` : '',
+        unsupportedCount > 0 ? `跳过 ${unsupportedCount} 个不支持的文件` : '',
+      ].filter(Boolean);
+      setImportMessage(messages.join('，'));
+      if (deduped.length > 0) setDirectText('');
+      return [...prev, ...deduped];
+    });
+  }, [setDirectText, setFiles, setImportMessage]);
 
   const buildRunnableFiles = useCallback((): File[] => {
     if (directText.trim()) {
@@ -202,7 +353,11 @@ export default function ImportWorkbenchPage() {
         }
 
         const batch = await createImportBatch(job.file);
-        updateJob(job.id, { batchId: batch.batch_id, step: 'preprocess' });
+        updateJob(job.id, {
+          batchId: batch.batch_id,
+          contentVersion: batch.content_version,
+          step: 'preprocess',
+        });
         appendJobNote(job.id, `批次已创建：${batch.batch_id}`);
 
         if (strategy === 'extract_images') {
@@ -225,6 +380,12 @@ export default function ImportWorkbenchPage() {
         const recognized = await runImportBatchRecognize(batch.batch_id);
         const editable = ((recognized.questions ?? []) as RawQuestion[]).map(toEditable);
         const mediaAssets = recognized.media_assets || [];
+        if (recognized.warnings?.length) {
+          recognized.warnings.slice(0, 3).forEach((warning) => appendJobNote(job.id, `提示：${warning}`));
+        }
+        if (recognized.ai_refined_count) {
+          appendJobNote(job.id, `AI 初校已调整 ${recognized.ai_refined_count} 道题。`);
+        }
 
         updateJob(job.id, {
           step: 'risk_check',
@@ -276,126 +437,20 @@ export default function ImportWorkbenchPage() {
     }));
 
     setJobs(nextJobs);
-    setActiveJobId(null);
-    setSelectedKey(null);
 
     await runWithConcurrency(nextJobs, IMPORT_CONCURRENCY, processJob);
-  }, [buildRunnableFiles, processJob]);
+  }, [buildRunnableFiles, processJob, setJobs]);
 
-  const openJobForReview = useCallback((job: ImportJob) => {
-    setActiveJobId(job.id);
-    setSelectedKey(job.questions[0]?._key ?? null);
-  }, []);
-
-  const handleChangeQuestion = useCallback((key: string, patch: Partial<EditableQuestion>) => {
-    if (!activeJob) return;
-    setJobs((prev) =>
-      prev.map((job) =>
-        job.id === activeJob.id
-          ? { ...job, questions: job.questions.map((q) => (q._key === key ? { ...q, ...patch } : q)) }
-          : job,
-      ),
-    );
-  }, [activeJob]);
-
-  const handleDeleteQuestion = useCallback((key: string) => {
-    if (!activeJob) return;
-    setJobs((prev) =>
-      prev.map((job) => {
-        if (job.id !== activeJob.id) return job;
-        const idx = job.questions.findIndex((q) => q._key === key);
-        const nextQuestions = job.questions.filter((q) => q._key !== key);
-        setSelectedKey((current) => {
-          if (current !== key) return current;
-          return nextQuestions[Math.min(idx, nextQuestions.length - 1)]?._key ?? null;
-        });
-        return { ...job, questions: nextQuestions, questionCount: nextQuestions.length };
-      }),
-    );
-  }, [activeJob]);
-
-  const handleMergeWithNext = useCallback((key: string) => {
-    if (!activeJob) return;
-    setJobs((prev) =>
-      prev.map((job) => {
-        if (job.id !== activeJob.id) return job;
-        const idx = job.questions.findIndex((q) => q._key === key);
-        if (idx < 0 || idx >= job.questions.length - 1) return job;
-        const current = job.questions[idx];
-        const next = job.questions[idx + 1];
-        const merged: EditableQuestion = {
-          ...current,
-          title: `${current.title.trimEnd()}\n${next.title.trim()}`,
-          options: current.options.length > 0 ? current.options : next.options,
-          answer: [current.answer, next.answer].filter((item) => item.trim()).join('\n'),
-          analysis: [current.analysis, next.analysis].filter((item) => item.trim()).join('\n'),
-          figures: [...current.figures, ...next.figures],
-        };
-        const nextQuestions = [...job.questions];
-        nextQuestions.splice(idx, 2, merged);
-        return { ...job, questions: nextQuestions, questionCount: nextQuestions.length };
-      }),
-    );
-  }, [activeJob]);
-
-  const handleUploadImage = useCallback(async (imageFile: File): Promise<ImportMediaAsset> => {
-    if (!activeJob?.batchId) throw new Error('当前批次尚未创建，不能上传图片。');
-    const asset = await uploadBatchImage(activeJob.batchId, imageFile);
-    setJobs((prev) =>
-      prev.map((job) =>
-        job.id === activeJob.id
-          ? { ...job, mediaAssets: [...job.mediaAssets, asset], imageCount: job.imageCount + 1 }
-          : job,
-      ),
-    );
-    return asset;
-  }, [activeJob]);
-
-  const handleAiRefine = useCallback(async () => {
-    if (!activeJob?.batchId || activeJob.questions.length === 0) return;
-    setRefining(true);
-    try {
-      const payload = activeJob.questions.map((q) => ({
-        question_id: q.question_id,
-        question_type: q.question_type,
-        title: q.title,
-        options: q.options,
-        answer: q.answer,
-        analysis: q.analysis,
-      }));
-      const result = await runImportBatchAiRefine(activeJob.batchId, payload);
-      const refined = (result.questions ?? []) as RawQuestion[];
-      if (refined.length === activeJob.questions.length) {
-        setJobs((prev) =>
-          prev.map((job) =>
-            job.id === activeJob.id
-              ? {
-                  ...job,
-                  questions: refined.map((raw, index) => ({
-                    ...toEditable(raw),
-                    _key: job.questions[index]._key,
-                    figures: job.questions[index].figures,
-                    _aiRefined: true,
-                  })),
-                  notes: [...job.notes, `AI 初校完成：${result.refined_count} 道题被调整。`],
-                }
-              : job,
-          ),
-        );
-      }
-    } catch (err) {
-      alert(`AI 初校失败：${err instanceof Error ? err.message : '未知错误'}`);
-    } finally {
-      setRefining(false);
+  const openInReviewCenter = useCallback(async (job: ImportJob) => {
+    if (job.reviewTaskId) {
+      navigate(`/review/${job.reviewTaskId}`);
+      return;
     }
-  }, [activeJob]);
-
-  const handleSendToReview = useCallback(async () => {
-    if (!activeJob?.batchId || activeJob.questions.length === 0) return;
-    setConfirming(true);
+    if (!job.batchId || job.questions.length === 0) return;
+    setSubmittingJobId(job.id);
     try {
-      const payload = activeJob.questions.map((q, index) => ({
-        question_id: q.question_id || `${activeJob.batchId}_q${String(index + 1).padStart(4, '0')}`,
+      const payload = job.questions.map((q, index) => ({
+        question_id: q.question_id || `${job.batchId}_q${String(index + 1).padStart(4, '0')}`,
         question_type: q.question_type,
         title: q.title,
         options: q.options,
@@ -403,79 +458,36 @@ export default function ImportWorkbenchPage() {
         analysis: q.analysis,
         sub_questions: [],
         figures: q.figures,
-        difficulty: 0,
+        difficulty: null,
         knowledge_point: '',
         tags: [],
-        source: activeJob.fileName,
-        import_batch_id: activeJob.batchId,
+        source: job.fileName,
+        import_batch_id: job.batchId,
       }));
-      const result = await confirmImportBatch(activeJob.batchId, payload);
+      const result = await confirmImportBatch(job.batchId, payload, job.contentVersion, job.mediaAssets);
+      setJobs((current) => current.map((item) => item.id === job.id ? { ...item, reviewTaskId: result.task_id } : item));
       navigate(`/review/${result.task_id}`);
     } catch (err) {
-      alert(`送入校对中心失败：${err instanceof Error ? err.message : '未知错误'}`);
+      alert(`进入校对中心失败：${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
-      setConfirming(false);
+      setSubmittingJobId(null);
     }
-  }, [activeJob, navigate]);
-
-  if (activeJob) {
-    return (
-      <div className="flex h-full flex-col bg-[var(--color-bg)]">
-        <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-bg-card)] px-5 py-3">
-          <button
-            onClick={() => setActiveJobId(null)}
-            className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-1.5 text-sm text-[var(--color-text-secondary)]"
-          >
-            返回任务列表
-          </button>
-          <div>
-            <h1 className="text-base font-bold text-[var(--color-text)]">{activeJob.fileName}</h1>
-            <p className="text-xs text-[var(--color-text-muted)]">
-              {activeJob.questionCount} 道题 / {activeJob.imageCount} 张素材图 / 批次 {activeJob.batchId}
-            </p>
-          </div>
-          <div className="flex-1" />
-          <button
-            onClick={handleAiRefine}
-            disabled={refining || activeJob.questions.length === 0}
-            className="rounded-md border border-[var(--color-purple)] bg-[var(--color-purple-light)] px-3 py-1.5 text-sm font-semibold text-[var(--color-purple)] disabled:opacity-50"
-          >
-            {refining ? 'AI 初校中...' : '重跑 AI 初校'}
-          </button>
-          <button
-            onClick={handleSendToReview}
-            disabled={confirming || activeJob.questions.length === 0}
-            className="rounded-md bg-[var(--color-accent)] px-4 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
-          >
-            {confirming ? '提交中...' : '送入校对中心'}
-          </button>
-        </div>
-
-        <div className="min-h-0 flex-1">
-          <ImportQuestionEditor
-            questions={activeJob.questions}
-            selectedKey={selectedKey}
-            onSelect={setSelectedKey}
-            onChange={handleChangeQuestion}
-            onDelete={handleDeleteQuestion}
-            onMergeWithNext={handleMergeWithNext}
-            mediaAssets={activeJob.mediaAssets}
-            onUploadImage={handleUploadImage}
-          />
-        </div>
-      </div>
-    );
-  }
+  }, [navigate, setJobs]);
 
   return (
-    <div className="h-full overflow-y-auto bg-[var(--color-bg)] px-6 py-5">
-      <div className="mx-auto grid max-w-7xl gap-5 xl:grid-cols-[1.1fr_0.9fr]">
-        <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-5 shadow-sm">
-          <div className="mb-4">
-            <h1 className="text-xl font-bold text-[var(--color-text)]">导入识别</h1>
-            <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">
-              把导入拆成多个可恢复的小任务。每个文件独立处理，并发推进；某个文件失败不会拖住整批材料。
-            </p>
+    <div className="h-full overflow-y-auto bg-[#f3f6fa] px-3 py-3 sm:px-5 sm:py-4">
+      <div className="mx-auto grid max-w-[1280px] gap-4 xl:grid-cols-[1.25fr_0.75fr]">
+        <section className="rounded-lg border border-[var(--color-border)] bg-white p-4 shadow-sm">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h1 className="text-base font-bold text-[var(--color-text)]">添加材料</h1>
+              <p className="mt-1 text-xs text-[var(--color-text-muted)]">Word、PDF、图片、Markdown 或纯文本</p>
+            </div>
+            {persistedBatches.length > 0 && (
+              <div className="rounded-md bg-[var(--color-bg-hover)] px-2.5 py-1.5 text-xs text-[var(--color-text-secondary)]">
+                历史批次 {persistedBatches.length} · 最近 {persistedBatches[0].question_count} 题
+              </div>
+            )}
           </div>
 
           <input
@@ -501,17 +513,21 @@ export default function ImportWorkbenchPage() {
               addFiles(event.dataTransfer.files);
             }}
             onClick={() => fileInputRef.current?.click()}
-            className="cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition"
+            className="cursor-pointer rounded-md border-2 border-dashed p-5 text-center transition"
             style={{
               borderColor: dragOver ? 'var(--color-accent)' : 'var(--color-border-strong)',
               background: dragOver ? 'var(--color-accent-light)' : 'var(--color-bg-hover)',
             }}
           >
-            <div className="text-base font-semibold text-[var(--color-text)]">拖入文件，或点击选择</div>
-            <div className="mt-2 text-sm text-[var(--color-text-muted)]">
-              支持 Word、PDF、图片、Markdown、纯文本。可以一次选择多个文件。
-            </div>
+            <div className="text-sm font-semibold text-[var(--color-text)]">拖入文件，或点击选择</div>
+            <div className="mt-1 text-xs text-[var(--color-text-muted)]">支持多选</div>
           </div>
+
+          {importMessage && (
+            <div className="mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-hover)] px-3 py-2 text-xs text-[var(--color-text-secondary)]">
+              {importMessage}
+            </div>
+          )}
 
           {files.length > 0 && (
             <div className="mt-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
@@ -525,6 +541,17 @@ export default function ImportWorkbenchPage() {
                     <span className="min-w-0 flex-1 truncate text-sm text-[var(--color-text-secondary)]">{file.name}</span>
                     <span className="text-xs text-[var(--color-text-muted)]">{formatSize(file.size)}</span>
                     <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setPreviewFile(file);
+                      }}
+                      className="text-xs font-semibold text-[var(--color-accent)]"
+                    >
+                      检查
+                    </button>
+                    <button
+                      type="button"
                       onClick={(event) => {
                         event.stopPropagation();
                         setFiles((prev) => prev.filter((_, itemIndex) => itemIndex !== index));
@@ -539,64 +566,46 @@ export default function ImportWorkbenchPage() {
             </div>
           )}
 
-          <div className="my-5 flex items-center gap-3">
+          <div className="my-4 flex items-center gap-3">
             <div className="h-px flex-1 bg-[var(--color-border)]" />
             <span className="text-xs text-[var(--color-text-muted)]">或直接粘贴文本</span>
             <div className="h-px flex-1 bg-[var(--color-border)]" />
           </div>
 
-          <textarea
+          <StructuredTextEditor
             value={directText}
-            onChange={(event) => {
-              setDirectText(event.target.value);
-              if (event.target.value.trim()) setFiles([]);
+            onChange={(value) => {
+              setDirectText(value);
+              if (value.trim()) setFiles([]);
             }}
-            rows={8}
-            placeholder="粘贴题目原文。粘贴文本会作为一个独立导入任务处理。"
-            className="w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 text-sm leading-7 text-[var(--color-text)] outline-none"
+            placeholder="粘贴题目文本；输入 / 可插入标题、列表、公式、表格和图片"
+            minHeight={176}
           />
         </section>
 
-        <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-5 shadow-sm">
-          <h2 className="text-base font-bold text-[var(--color-text)]">识别策略</h2>
-          <div className="mt-4 grid gap-3">
+        <section className="rounded-lg border border-[var(--color-border)] bg-white p-4 shadow-sm">
+          <h2 className="text-base font-bold text-[var(--color-text)]">处理设置</h2>
+          <div className="mt-3 grid gap-2">
             {STRATEGIES.map((item) => {
               const active = strategy === item.value;
               return (
                 <button
                   key={item.value}
                   onClick={() => setStrategy(item.value)}
-                  className="rounded-lg border p-4 text-left transition"
+                  className="rounded-md border px-3 py-2.5 text-left transition"
                   style={{
                     borderColor: active ? 'var(--color-accent)' : 'var(--color-border)',
                     background: active ? 'var(--color-accent-light)' : 'var(--color-bg-card)',
                   }}
                 >
                   <div className="font-semibold text-[var(--color-text)]">{item.title}</div>
-                  <div className="mt-1 text-sm leading-6 text-[var(--color-text-muted)]">{item.desc}</div>
+                  <div className="mt-0.5 line-clamp-1 text-xs text-[var(--color-text-muted)]">{item.desc}</div>
                 </button>
               );
             })}
           </div>
 
-          <div className="mt-5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-hover)] p-4">
-            <h3 className="text-sm font-bold text-[var(--color-text)]">执行阶段</h3>
-            <div className="mt-3 space-y-3">
-              {STEPS.map((step, index) => (
-                <div key={step.key} className="flex gap-3">
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--color-bg-card)] text-xs font-bold text-[var(--color-accent)]">
-                    {index + 1}
-                  </span>
-                  <div>
-                    <div className="text-sm font-semibold text-[var(--color-text)]">{step.label}</div>
-                    <div className="text-xs text-[var(--color-text-muted)]">{step.desc}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="mt-5 flex gap-2">
+          <div className="mt-4 flex gap-2 border-t border-[var(--color-border)] pt-4">
             <button
               onClick={() => void handleStart()}
               disabled={!canStart}
@@ -609,7 +618,6 @@ export default function ImportWorkbenchPage() {
                 setFiles([]);
                 setDirectText('');
                 setJobs([]);
-                setActiveJobId(null);
               }}
               disabled={hasRunningJobs}
               className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] px-4 py-2 text-sm font-semibold text-[var(--color-text-secondary)] disabled:opacity-40"
@@ -619,22 +627,30 @@ export default function ImportWorkbenchPage() {
           </div>
         </section>
 
-        <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-5 shadow-sm xl:col-span-2">
-          <div className="mb-4 flex items-center justify-between">
+        <section className="rounded-lg border border-[var(--color-border)] bg-white p-4 shadow-sm xl:col-span-2">
+          <div className="mb-3 flex items-center justify-between">
             <div>
-              <h2 className="text-base font-bold text-[var(--color-text)]">任务进度与最近结果</h2>
-              <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-                每个文件独立推进，最多同时处理 2 个任务。失败项可以单独重试，已完成项可以直接进入校对。
-              </p>
+              <h2 className="text-base font-bold text-[var(--color-text)]">处理记录</h2>
             </div>
             <span className="text-xs text-[var(--color-text-muted)]">
               {jobs.length > 0 ? `${jobs.length} 个任务` : '暂无任务'}
             </span>
           </div>
 
+          {jobs.length > 0 && (
+            <div className="mb-4 grid gap-2 text-xs sm:grid-cols-3 lg:grid-cols-6">
+              <SummaryStat label="任务" value={jobSummary.total} />
+              <SummaryStat label="处理中" value={jobSummary.running} />
+              <SummaryStat label="待校对" value={jobSummary.ready} tone="success" />
+              <SummaryStat label="失败" value={jobSummary.failed} tone="danger" />
+              <SummaryStat label="题目" value={jobSummary.questions} />
+              <SummaryStat label="风险类" value={jobSummary.risks} tone={jobSummary.risks > 0 ? 'danger' : undefined} />
+            </div>
+          )}
+
           {jobs.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-[var(--color-border)] py-10 text-center text-sm text-[var(--color-text-muted)]">
-              选择材料并点击“开始处理”后，这里会显示每个文件的阶段状态。
+            <div className="rounded-md border border-dashed border-[var(--color-border)] py-8 text-center text-sm text-[var(--color-text-muted)]">
+              暂无处理任务
             </div>
           ) : (
             <div className="grid gap-3 lg:grid-cols-2">
@@ -650,6 +666,9 @@ export default function ImportWorkbenchPage() {
                             ? '处理失败'
                             : `正在处理：${STEPS.find((step) => step.key === job.step)?.label}`}
                       </p>
+                      {job.startedAt && (
+                        <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">用时 {formatDuration(job.startedAt, job.finishedAt)}</p>
+                      )}
                     </div>
                     <StatusPill status={job.status} />
                   </div>
@@ -696,10 +715,11 @@ export default function ImportWorkbenchPage() {
                   <div className="mt-4 flex gap-2">
                     {job.status === 'ready' && job.questions.length > 0 && (
                       <button
-                        onClick={() => openJobForReview(job)}
-                        className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-white"
+                        onClick={() => void openInReviewCenter(job)}
+                        disabled={submittingJobId === job.id}
+                        className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
                       >
-                        校对本批
+                        {submittingJobId === job.id ? '正在进入...' : '进入校对中心'}
                       </button>
                     )}
                     {job.status === 'failed' && (
@@ -717,6 +737,17 @@ export default function ImportWorkbenchPage() {
           )}
         </section>
       </div>
+      {previewFile && <DocumentPreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />}
+    </div>
+  );
+}
+
+function SummaryStat({ label, value, tone }: { label: string; value: number; tone?: 'danger' | 'success' }) {
+  const color = tone === 'danger' ? 'text-[var(--color-danger)]' : tone === 'success' ? 'text-[var(--color-success)]' : 'text-[var(--color-text)]';
+  return (
+    <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-hover)] px-3 py-2">
+      <div className="text-[11px] text-[var(--color-text-muted)]">{label}</div>
+      <div className={`mt-1 text-base font-bold ${color}`}>{value}</div>
     </div>
   );
 }

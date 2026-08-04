@@ -14,6 +14,7 @@ class QuestionImageDetail(BaseModel):
     role: str = "stem"
     sort_order: int = 0
     placeholder_key: str | None = None
+    display_scale: float = Field(default=60, ge=25, le=100)
     is_primary: bool = False
     is_verified: bool = False
     mime_type: str | None = None
@@ -45,6 +46,7 @@ class UpdateImageRequest(BaseModel):
     role: str | None = None
     sort_order: int | None = None
     placeholder_key: str | None = None
+    display_scale: float | None = Field(default=None, ge=25, le=100)
     is_primary: bool | None = None
     description: str | None = None
 

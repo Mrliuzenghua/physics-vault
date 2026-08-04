@@ -1,4 +1,6 @@
 import type { Question, SlidesDisplayMode } from '../../types';
+import { imageFileUrl } from '../../utils/imageUrl';
+import LatexRenderer from '../render/LatexRenderer';
 
 const TYPE_LABELS: Record<string, string> = {
   single_choice: '单选题',
@@ -15,6 +17,7 @@ interface SlideViewerProps {
   displayMode: SlidesDisplayMode;
   zoomLevel: number;
   fitToViewport?: boolean;
+  revealStep?: number;
 }
 
 export default function SlideViewer({
@@ -24,15 +27,30 @@ export default function SlideViewer({
   displayMode,
   zoomLevel,
   fitToViewport = false,
+  revealStep,
 }: SlideViewerProps) {
-  const showAnswer = displayMode === 'stem_answer' || displayMode === 'full';
-  const showAnalysis = displayMode === 'full';
+  const maxRevealStep = displayMode === 'full' ? 2 : displayMode === 'stem_answer' ? 1 : 0;
+  const activeRevealStep = Math.max(0, Math.min(revealStep ?? maxRevealStep, maxRevealStep));
+  const showOptions = true;
+  const showAnswer = activeRevealStep >= 1 && displayMode !== 'stem_only';
+  const showAnalysis = activeRevealStep >= 2 && displayMode === 'full';
 
   const typeLabel = TYPE_LABELS[question.question_type] || question.question_type;
   const scale = Math.max(0.5, Math.min(2.0, zoomLevel));
-  const baseFontSize = `${Math.round(20 * scale)}px`;
-  const largeFontSize = `${Math.round(24 * scale)}px`;
-  const smallFontSize = `${Math.round(15 * scale)}px`;
+  const baseFontSize = fitToViewport ? 'clamp(28px, 2.15vw, 44px)' : `${Math.round(20 * scale)}px`;
+  const largeFontSize = fitToViewport ? 'clamp(32px, 2.55vw, 52px)' : `${Math.round(24 * scale)}px`;
+  const smallFontSize = fitToViewport ? 'clamp(18px, 1.3vw, 24px)' : `${Math.round(15 * scale)}px`;
+  const figureMap = new Map(question.figures.map((figure) => [figure.fig_uuid, figure]));
+  const optionFigureIds = new Set(question.options.flatMap((option) => extractFigureIds(option.content)));
+  const stemFigureIds = extractFigureIds(question.title || question.stem_text);
+  const figures = Array.from(new Map((stemFigureIds.length > 0
+    ? stemFigureIds.map((id) => figureMap.get(id)).filter(Boolean)
+    : question.figures.filter((figure) => !optionFigureIds.has(figure.fig_uuid)))
+    .filter((figure) => Boolean(imageFileUrl(figure!.local_path)))
+    .map((figure) => [figure!.local_path || figure!.fig_uuid, figure!])).values()).slice(0, 2);
+  const hasFigures = figures.length > 0;
+  const optionsHaveFigures = optionFigureIds.size > 0;
+  const cleanAnalysis = stripFigurePlaceholders(question.analysis || '');
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -40,7 +58,7 @@ export default function SlideViewer({
         style={{
           width: fitToViewport ? '100vw' : '100%',
           height: fitToViewport ? '100vh' : undefined,
-          maxWidth: fitToViewport ? 'none' : 1280,
+          maxWidth: fitToViewport ? 'none' : 1600,
           margin: '0 auto',
           padding: fitToViewport ? 0 : '24px 16px',
           display: fitToViewport ? 'flex' : undefined,
@@ -57,7 +75,7 @@ export default function SlideViewer({
             maxHeight: fitToViewport ? 'none' : 'calc(100vh - 96px)',
             display: 'flex',
             flexDirection: 'column',
-            background: 'linear-gradient(135deg, #f8fafc 0%, #ffffff 50%, #f1f5f9 100%)',
+            background: '#f8fafc',
             borderRadius: fitToViewport ? 0 : 16,
             boxShadow: fitToViewport ? 'none' : '0 4px 24px rgba(15, 23, 42, 0.10), 0 1px 4px rgba(15, 23, 42, 0.06)',
             border: '1px solid #e2e8f0',
@@ -72,8 +90,17 @@ export default function SlideViewer({
             }}
           >
             <div
-              className="mx-auto px-8 py-6"
-              style={{ maxWidth: 960 }}
+              className="mx-auto"
+              style={{
+                maxWidth: fitToViewport
+                  ? (hasFigures ? 'min(96vw, 1840px)' : 'min(88vw, 1540px)')
+                  : (hasFigures ? 'min(100%, 1440px)' : 1120),
+                padding: fitToViewport ? 'clamp(24px, 2.25vw, 44px)' : '24px 32px',
+                minHeight: '100%',
+                boxSizing: 'border-box',
+                display: 'flex',
+                flexDirection: 'column',
+              }}
             >
         {/* ── Header: question number + type ── */}
         <div
@@ -123,33 +150,43 @@ export default function SlideViewer({
 
         {/* ── Stem ── */}
         <div
-          className="mb-5 rounded-xl p-6"
+          className="mb-5"
           style={{
-            background: 'var(--color-bg-card)',
-            boxShadow: 'var(--shadow-card)',
-            fontSize: largeFontSize,
-            fontWeight: 500,
-            lineHeight: 2,
+            display: hasFigures ? 'grid' : 'block',
+            gridTemplateColumns: hasFigures ? 'minmax(0, 1.15fr) minmax(420px, 0.95fr)' : undefined,
+            gap: hasFigures ? 'clamp(20px, 2.2vw, 40px)' : undefined,
+            alignItems: 'center',
           }}
         >
           <div
-            className="whitespace-pre-wrap"
-            style={{ color: 'var(--color-text)' }}
+            style={{
+              display: hasFigures ? 'flex' : undefined,
+              alignItems: hasFigures ? 'center' : undefined,
+              background: fitToViewport ? 'transparent' : 'var(--color-bg-card)',
+              boxShadow: fitToViewport ? 'none' : 'var(--shadow-card)',
+              borderRadius: fitToViewport ? 0 : 12,
+              padding: fitToViewport ? 0 : 24,
+              fontSize: largeFontSize,
+              fontWeight: 500,
+              lineHeight: 2,
+            }}
           >
-            {question.title || '(无题干)'}
-          </div>
+          <LatexRenderer
+            className="slide-question-content"
+            text={stripFigurePlaceholders(question.title || question.stem_text || '(无题干)')}
+          />
 
           {/* Inline figure placeholders */}
-          {renderFigurePlaceholders(question)}
+          </div>
+          {hasFigures && <QuestionFigurePanel figures={figures} />}
         </div>
 
         {/* ── Options ── */}
-        {question.options.length > 0 && (
+        {showOptions && question.options.length > 0 && (
           <div
             className="mb-5 grid gap-3"
             style={{
-              gridTemplateColumns:
-                question.options.length <= 2 ? '1fr 1fr' : '1fr',
+              gridTemplateColumns: question.options.length > 1 ? 'repeat(2, minmax(0, 1fr))' : '1fr',
             }}
           >
             {question.options.map((opt) => (
@@ -170,12 +207,30 @@ export default function SlideViewer({
                 >
                   {opt.opt}
                 </span>
-                <span
-                  className="flex-1 whitespace-pre-wrap"
-                  style={{ color: 'var(--color-text)' }}
-                >
-                  {opt.content}
-                </span>
+                <div className="min-w-0 flex-1">
+                  {stripFigurePlaceholders(opt.content) && (
+                    <LatexRenderer inline className="slide-question-content" text={stripFigurePlaceholders(opt.content)} />
+                  )}
+                  {extractFigureIds(opt.content).map((figureId) => {
+                    const figure = figureMap.get(figureId);
+                    const src = imageFileUrl(figure?.local_path);
+                    return src ? (
+                      <img
+                        key={figureId}
+                        src={src}
+                        alt={`${opt.opt} 选项图`}
+                        style={{
+                          display: 'block',
+                          width: 'auto',
+                          maxWidth: '100%',
+                          maxHeight: optionsHaveFigures ? 'min(24vh, 240px)' : 'min(32vh, 320px)',
+                          objectFit: 'contain',
+                          marginTop: 8,
+                        }}
+                      />
+                    ) : null;
+                  })}
+                </div>
               </div>
             ))}
           </div>
@@ -200,12 +255,10 @@ export default function SlideViewer({
                 >
                   {sq.sub_id || `(${i + 1})`}
                 </div>
-                <div
-                  className="mb-2 whitespace-pre-wrap"
-                  style={{ color: 'var(--color-text)' }}
-                >
-                  {sq.title}
-                </div>
+                <LatexRenderer
+                  className="mb-2 slide-question-content"
+                  text={sq.title}
+                />
                 {showAnswer && sq.answer && (
                   <div
                     className="mt-2 rounded p-3"
@@ -216,7 +269,7 @@ export default function SlideViewer({
                     }}
                   >
                     <span className="font-bold">答案：</span>
-                    {sq.answer}
+                    <LatexRenderer inline text={sq.answer} />
                   </div>
                 )}
                 {showAnalysis && sq.analysis && (
@@ -229,7 +282,7 @@ export default function SlideViewer({
                     }}
                   >
                     <span className="font-bold">解析：</span>
-                    {sq.analysis}
+                    <LatexRenderer inline text={stripFigurePlaceholders(sq.analysis)} />
                   </div>
                 )}
               </div>
@@ -252,17 +305,16 @@ export default function SlideViewer({
             >
               答案
             </div>
-            <div
-              className="whitespace-pre-wrap font-medium"
+            <LatexRenderer
+              className="font-medium slide-question-content"
+              text={question.answer}
               style={{ color: 'var(--color-text)', fontSize: largeFontSize }}
-            >
-              {question.answer}
-            </div>
+            />
           </div>
         )}
 
         {/* ── Analysis ── */}
-        {showAnalysis && question.analysis && (
+        {showAnalysis && cleanAnalysis && (
           <div
             className="mb-5 rounded-xl p-6"
             style={{
@@ -276,12 +328,11 @@ export default function SlideViewer({
             >
               解析
             </div>
-            <div
-              className="whitespace-pre-wrap leading-relaxed"
+            <LatexRenderer
+              className="leading-relaxed slide-question-content"
+              text={cleanAnalysis}
               style={{ color: 'var(--color-text-secondary)' }}
-            >
-              {question.analysis}
-            </div>
+            />
           </div>
         )}
 
@@ -325,29 +376,51 @@ export default function SlideViewer({
   );
 }
 
-/** Show figure references found in the question title. */
-function renderFigurePlaceholders(question: Question) {
-  const refs = question.title.match(/!\[fig:([^\]]+)\]/g);
-  if (!refs || refs.length === 0) return null;
+function stripFigurePlaceholders(text: string): string {
+  return text.replace(/!\[fig:[^\]]+\]/g, '').replace(/\n{3,}/g, '\n\n').trim();
+}
 
+function extractFigureIds(text?: string | null): string[] {
+  return Array.from(String(text || '').matchAll(/!\[fig:([^\]]+)\]/g), (match) => match[1]);
+}
+
+function QuestionFigurePanel({ figures }: { figures: Question['figures'] }) {
   return (
-    <div className="mt-3 flex flex-wrap gap-2" style={{ fontSize: '0.75em' }}>
-      {refs.map((ref, i) => {
-        const uuid = ref.match(/!\[fig:([^\]]+)\]/)?.[1] || ref;
-        const fig = question.figures.find((f) => f.fig_uuid === uuid);
-        return (
-          <span
-            key={i}
-            className="inline-flex items-center gap-1 rounded px-2 py-1"
+    <div
+      style={{
+        height: '100%',
+        display: 'grid',
+        gridTemplateColumns: figures.length > 1 ? 'repeat(2, minmax(0, 1fr))' : '1fr',
+        gap: 16,
+        alignItems: 'center',
+        alignContent: 'center',
+      }}
+    >
+      {figures.map((figure, index) => (
+        <figure
+          key={figure.fig_uuid}
+          style={{
+            margin: 0,
+            minWidth: 0,
+            border: '1px solid #d7e0eb',
+            background: '#ffffff',
+            padding: 12,
+          }}
+        >
+          <img
+            src={imageFileUrl(figure.local_path) || ''}
+            alt={`题图 ${index + 1}`}
             style={{
-              background: 'var(--color-orange-light)',
-              color: 'var(--color-orange)',
+              display: 'block',
+              width: `${Math.min(100, Math.max(25, figure.display_scale ?? 100))}%`,
+              maxWidth: '100%',
+              maxHeight: `min(${Math.round(42 * ((figure.display_scale ?? 100) / 100))}vh, 460px)`,
+              objectFit: 'contain',
+              margin: '0 auto',
             }}
-          >
-            📷 {fig?.local_path || uuid}
-          </span>
-        );
-      })}
+          />
+        </figure>
+      ))}
     </div>
   );
 }

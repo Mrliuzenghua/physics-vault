@@ -6,14 +6,17 @@ validation, JSON serialisation and text assembly lives in the service layer.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
+import uuid
 from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 from ..database import connect_db
 from ..paths import default_db_path
+from .review_queue import ReviewQueueRepository
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +99,7 @@ class QuestionWriteRepository:
             try:
                 for q in questions:
                     qid = q["question_id"]
+                    _ensure_import_batch(conn, q.get("import_batch_id"), q.get("source_text"))
 
                     # — questions table —
                     row = conn.execute(
@@ -110,9 +114,10 @@ class QuestionWriteRepository:
                                 question_id, canonical_title, vault_markdown_path,
                                 module, topic2, topic3, difficulty, question_type,
                                 status, has_media, primary_paper_id, primary_question_no,
+                                import_batch_id, origin_page, source,
                                 content_hash, schema_version,
                                 created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                             """,
                             (
@@ -126,8 +131,11 @@ class QuestionWriteRepository:
                                 q["question_type"],
                                 q.get("status") or "已审核",
                                 1 if (q.get("image_count") or 0) > 0 else 0,
-                                q.get("import_batch_id") or "IMPORT",
+                                q.get("primary_paper_id"),
                                 q.get("primary_question_no"),
+                                q.get("import_batch_id"),
+                                q.get("source_page"),
+                                q.get("source_text"),
                                 q.get("content_hash"),
                                 q.get("schema_version") or "v2",
                             ),
@@ -151,6 +159,9 @@ class QuestionWriteRepository:
                                 has_media = ?,
                                 primary_paper_id = ?,
                                 primary_question_no = ?,
+                                import_batch_id = ?,
+                                origin_page = ?,
+                                source = ?,
                                 content_hash = ?,
                                 schema_version = ?,
                                 updated_at = CURRENT_TIMESTAMP
@@ -166,8 +177,11 @@ class QuestionWriteRepository:
                                 q["question_type"],
                                 q.get("status") or "已审核",
                                 1 if (q.get("image_count") or 0) > 0 else 0,
-                                q.get("import_batch_id") or "IMPORT",
+                                q.get("primary_paper_id"),
                                 q.get("primary_question_no"),
+                                q.get("import_batch_id"),
+                                q.get("source_page"),
+                                q.get("source_text"),
                                 q.get("content_hash"),
                                 q.get("schema_version") or "v2",
                                 qid,
@@ -186,28 +200,34 @@ class QuestionWriteRepository:
                             """
                             INSERT INTO question_text_index (
                                 question_id, paper_id, source_id, question_no,
-                                markdown_path, stem_text, answer_text, analysis_text,
+                                markdown_path, title_text, stem_text, stem_clean_text,
+                                answer_text, analysis_text,
                                 options_json, sub_questions_json,
-                                image_asset_ids_json, image_filenames_json,
-                                image_count,
+                                figures_json, image_asset_ids_json, image_filenames_json,
+                                image_count, tags_json, source_text,
                                 created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                             """,
                             (
                                 qid,
-                                q.get("import_batch_id") or "IMPORT",
-                                q.get("source_id"),
+                                q.get("primary_paper_id"),
+                                q.get("source_region_id") or q.get("source_id"),
                                 q.get("primary_question_no"),
                                 q.get("vault_markdown_path") or f"import/{qid}.md",
+                                q.get("title_text") or "",
                                 q.get("stem_text") or "",
+                                q.get("stem_clean_text"),
                                 q.get("answer_text") or None,
                                 q.get("analysis_text") or None,
                                 q.get("options_json"),
                                 q.get("sub_questions_json"),
+                                q.get("figures_json"),
                                 q.get("image_asset_ids_json"),
                                 q.get("image_filenames_json"),
                                 q.get("image_count") or 0,
+                                q.get("tags_json"),
+                                q.get("source_text"),
                             ),
                         )
                     else:
@@ -218,30 +238,40 @@ class QuestionWriteRepository:
                                 source_id = ?,
                                 question_no = ?,
                                 markdown_path = ?,
+                                title_text = ?,
                                 stem_text = ?,
+                                stem_clean_text = ?,
                                 answer_text = ?,
                                 analysis_text = ?,
                                 options_json = ?,
                                 sub_questions_json = ?,
+                                figures_json = ?,
                                 image_asset_ids_json = ?,
                                 image_filenames_json = ?,
                                 image_count = ?,
+                                tags_json = ?,
+                                source_text = ?,
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE question_id = ?
                             """,
                             (
-                                q.get("import_batch_id") or "IMPORT",
-                                q.get("source_id"),
+                                q.get("primary_paper_id"),
+                                q.get("source_region_id") or q.get("source_id"),
                                 q.get("primary_question_no"),
                                 q.get("vault_markdown_path") or f"import/{qid}.md",
+                                q.get("title_text") or "",
                                 q.get("stem_text") or "",
+                                q.get("stem_clean_text"),
                                 q.get("answer_text") or None,
                                 q.get("analysis_text") or None,
                                 q.get("options_json"),
                                 q.get("sub_questions_json"),
+                                q.get("figures_json"),
                                 q.get("image_asset_ids_json"),
                                 q.get("image_filenames_json"),
                                 q.get("image_count") or 0,
+                                q.get("tags_json"),
+                                q.get("source_text"),
                                 qid,
                             ),
                         )
@@ -257,6 +287,173 @@ class QuestionWriteRepository:
             "inserted": inserted,
             "updated": updated,
         }
+
+    # ------------------------------------------------------------------
+    # Batch delete
+    # ------------------------------------------------------------------
+
+    def delete_many(self, question_ids: list[str]) -> dict[str, Any]:
+        """Delete questions by id.
+
+        Child rows are removed by SQLite foreign-key cascades where the
+        schema defines them. Image asset files are not deleted here; this
+        only removes question records and their database bindings.
+        """
+
+        ordered_ids = list(dict.fromkeys(str(qid).strip() for qid in question_ids if str(qid).strip()))
+        if not ordered_ids:
+            return {"requested": 0, "deleted": 0, "missing_ids": []}
+
+        placeholders = ",".join("?" for _ in ordered_ids)
+        with closing(self._get_connection()) as conn:
+            existing_rows = conn.execute(
+                f"SELECT question_id FROM questions WHERE question_id IN ({placeholders})",
+                ordered_ids,
+            ).fetchall()
+            existing = {row["question_id"] for row in existing_rows}
+            missing = [qid for qid in ordered_ids if qid not in existing]
+
+            if not existing:
+                return {"requested": len(ordered_ids), "deleted": 0, "missing_ids": missing}
+
+            existing_ids = [qid for qid in ordered_ids if qid in existing]
+            delete_placeholders = ",".join("?" for _ in existing_ids)
+            try:
+                self._delete_question_bindings(conn, delete_placeholders, existing_ids)
+                cursor = conn.execute(
+                    f"DELETE FROM questions WHERE question_id IN ({delete_placeholders})",
+                    existing_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM question_search_fts WHERE question_id IN ({delete_placeholders})",
+                    existing_ids,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        return {
+            "requested": len(ordered_ids),
+            "deleted": cursor.rowcount if cursor.rowcount >= 0 else len(existing_ids),
+            "missing_ids": missing,
+        }
+
+    def return_to_review(
+        self,
+        question_id: str,
+        reason: str | None = None,
+        reviewer: str | None = None,
+    ) -> dict[str, Any]:
+        """Move a live question back into the review queue for rework."""
+
+        if not self._db_available():
+            raise FileNotFoundError(f"Database file does not exist: {self._db_path}")
+
+        review_id = f"REV-{uuid.uuid4().hex[:12]}"
+        cleaned_reason = (reason or "题目需要回炉重造").strip() or "题目需要回炉重造"
+        with closing(self._get_connection()) as conn:
+            row = conn.execute(
+                "SELECT question_id FROM questions WHERE question_id = ?",
+                (question_id,),
+            ).fetchone()
+            if row is None:
+                return {
+                    "question_id": question_id,
+                    "review_id": None,
+                    "status": "missing",
+                }
+
+            set_parts = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+            params: list[Any] = ["待校对"]
+            if _table_has_column(conn, "questions", "review_status"):
+                set_parts.insert(1, "review_status = ?")
+                params.append("reviewing")
+            if _table_has_column(conn, "questions", "review_comment"):
+                set_parts.insert(-1, "review_comment = ?")
+                params.append(cleaned_reason)
+            params.append(question_id)
+            conn.execute(
+                f"UPDATE questions SET {', '.join(set_parts)} WHERE question_id = ?",
+                params,
+            )
+
+            conn.commit()
+
+        ReviewQueueRepository(migrate_legacy=False).enqueue_rework(
+            review_id=review_id,
+            question_id=question_id,
+            reason=cleaned_reason,
+            reviewer=reviewer,
+        )
+
+        return {
+            "question_id": question_id,
+            "review_id": review_id,
+            "status": "queued",
+        }
+
+    @staticmethod
+    def _delete_question_bindings(
+        conn: sqlite3.Connection,
+        placeholders: str,
+        question_ids: list[str],
+    ) -> None:
+        """Remove rows that can keep deleted questions visible or blocked.
+
+        Most current tables declare ON DELETE CASCADE / SET NULL, but some
+        local databases have evolved through migrations. Explicit cleanup keeps
+        deletion reliable across those older files too.
+        """
+
+        delete_tables = [
+            "collection_questions",
+            "favorite_items",
+            "question_annotations",
+            "question_assets",
+            "question_knowledge_points",
+            "question_sources",
+            "question_text_index",
+            "question_versions",
+            "question_search_fts",
+        ]
+        null_tables = [
+            "image_assets",
+            "paper_draft_items",
+            "processing_runs",
+        ]
+
+        for table in delete_tables:
+            if _table_exists(conn, table):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE question_id IN ({placeholders})",
+                    question_ids,
+                )
+
+        for table in null_tables:
+            if _table_exists(conn, table) and _table_has_column(conn, table, "question_id"):
+                conn.execute(
+                    f"UPDATE {table} SET question_id = NULL WHERE question_id IN ({placeholders})",
+                    question_ids,
+                )
+
+        if _table_exists(conn, "review_queue"):
+            conn.execute(
+                f"""
+                DELETE FROM review_queue
+                WHERE entity_type = 'question' AND entity_id IN ({placeholders})
+                """,
+                question_ids,
+            )
+
+        if _table_exists(conn, "embeddings"):
+            conn.execute(
+                f"""
+                DELETE FROM embeddings
+                WHERE owner_type = 'question' AND owner_id IN ({placeholders})
+                """,
+                question_ids,
+            )
 
     # ------------------------------------------------------------------
     # Metadata partial update
@@ -493,6 +690,52 @@ class QuestionWriteRepository:
 
 
 # ── Module-level helper ──────────────────────────────────────────────
+
+def _ensure_import_batch(
+    conn: sqlite3.Connection,
+    import_batch_id: str | None,
+    source_text: str | None = None,
+) -> None:
+    """Ensure imported questions can keep their batch FK without requiring
+    the separate persistent-batch flow to have inserted a row first.
+    """
+    batch_id = str(import_batch_id or "").strip()
+    if not batch_id or batch_id == "IMPORT":
+        return
+    conn.execute(
+        """
+        INSERT INTO import_batches (
+            import_batch_id, batch_name, source_type, source_path,
+            pipeline_mode, status, total_files, total_questions, note
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?)
+        ON CONFLICT(import_batch_id) DO UPDATE SET
+            source_path = COALESCE(import_batches.source_path, excluded.source_path),
+            updated_at = datetime('now')
+        """,
+        (
+            batch_id,
+            batch_id,
+            "review_import",
+            source_text,
+            "review_save",
+            "confirmed",
+            "Created by review save",
+        ),
+    )
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(row["name"] == column_name for row in rows)
+
 
 def _capture_version_snapshot(
     conn: sqlite3.Connection,

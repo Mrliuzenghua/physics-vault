@@ -9,6 +9,7 @@ import type {
   Question,
 } from '../types';
 import type { SlideDeck, SlideDeckTemplate, SlidePage } from '../types/slides';
+import { parseLessonPackage, parseLessonPackageList } from './lessonPackageSchema';
 
 const LESSON_PACKAGE_KEY = 'physics-vault.current-lesson-package';
 const LESSON_PACKAGE_LIBRARY_KEY = 'physics-vault.lesson-package-library';
@@ -17,25 +18,89 @@ function makeId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function safeParse<T>(value: string | null, fallback: T): T {
-  if (!value) return fallback;
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return fallback;
+function teachingPointsForKnowledge(name: string): string[] {
+  return [
+    `概念与条件：明确“${name}”对应的研究对象、物理过程、适用条件和核心物理量。`,
+    '规律与表达：写出关键关系式，结合图像、实验现象或能量变化解释物理意义。',
+    '解题路径：先识别模型，再列关系式与边界条件，最后检查方向、单位与数量级。',
+    '常见误区：警惕条件变化、正负号、临界状态，以及过程量与状态量的混淆。',
+  ];
+}
+
+function stableKnowledgeId(name: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < name.length; index += 1) {
+    hash ^= name.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
   }
+  return `kp-${(hash >>> 0).toString(36)}`;
+}
+
+function cleanQuestionText(value?: string | null): string {
+  return String(value || '')
+    .replace(/!\[fig:[^\]]+\]/g, '')
+    .replace(/\$\$?/g, '')
+    .replace(/\\(?:text|mathrm)\{([^{}]*)\}/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractFormulaCues(questions: Question[]): string[] {
+  const formulas: string[] = [];
+  const seen = new Set<string>();
+  for (const question of questions) {
+    const source = `${question.title || question.stem_text || ''}\n${question.analysis || ''}`
+      .replace(/!\[fig:[^\]]+\]/g, ' ');
+    for (const match of source.matchAll(/\$\$?([^$]{2,80})\$\$?/g)) {
+      const formula = match[1].trim();
+      if (!formula || /[\u4e00-\u9fff]{4,}/.test(formula) || seen.has(formula)) continue;
+      seen.add(formula);
+      formulas.push(`$${formula}$`);
+      if (formulas.length >= 3) return formulas;
+    }
+  }
+  return formulas;
+}
+
+function enrichedTeachingPoints(name: string, questions: Question[]): string[] {
+  const baselinePoints = teachingPointsForKnowledge(name);
+  const formulaCues = extractFormulaCues(questions);
+  const hasFigure = questions.some((question) => (question.figures || []).length > 0);
+  const sampleStem = cleanQuestionText(questions[0]?.title || questions[0]?.stem_text);
+  const context = sampleStem
+    ? `典型情境可从“${sampleStem.slice(0, 72)}${sampleStem.length > 72 ? '…' : ''}”切入。`
+    : '从题目关键词、装置状态和过程阶段识别模型。';
+
+  return [
+    baselinePoints[0] || `概念定位：说明“${name}”研究的对象、过程与核心物理量，区分已知量、待求量和约束条件。`,
+    `规律表达：${formulaCues.length > 0 ? `关联式包括 ${formulaCues.join('、')}，使用时逐一核对成立条件。` : '从定义式、决定式和过程规律三个层次整理关系式，并说明各物理量的方向与单位。'}`,
+    `情境识别：${context}`,
+    hasFigure
+      ? '图像与实验：先读坐标、斜率、面积、截距和装置连接关系，再把图像信息翻译成物理量与方程。'
+      : '模型建构：画出过程草图或受力图，统一正方向和参考系，再建立分阶段关系。',
+    '解题流程：审题标注条件 → 建立模型 → 列出关系式 → 联立求解 → 检查单位、方向、数量级和特殊值。',
+    baselinePoints[3] || '易错提醒：不要忽略适用条件、初末状态、正负号、矢量方向，以及平均量与瞬时量的区别。',
+    `课堂自检：能否用一句话解释“${name}”的核心规律，并说明条件改变后结论如何变化。`,
+  ];
+}
+
+export function buildKnowledgeCardContent(title: string, questions: Question[] = []) {
+  return {
+    summary: `围绕“${title}”组织概念、规律、模型、图像与易错点，形成“讲解—示例—训练—复盘”的完整学习链。`,
+    points: enrichedTeachingPoints(title, questions),
+  };
 }
 
 export function buildKnowledgeCards(questions: Question[]): LessonKnowledgeCard[] {
   const map = new Map<string, LessonKnowledgeCard>();
 
   for (const question of questions) {
-    const names = [
-      ...(question.knowledge_points || [])
-        .map((point) => point.topic3_name || point.topic2_name || point.topic1_name)
-        .filter(Boolean),
-      ...(question.knowledge_point?.trim() ? [question.knowledge_point.trim()] : []),
-    ];
+    const structuredNames = (question.knowledge_points || [])
+      .map((point) => point.topic3_name || point.topic2_name || point.topic1_name)
+      .filter(Boolean);
+    const names = structuredNames.length > 0
+      ? structuredNames
+      : question.knowledge_point?.split(/[\n,，;；/]+/).map((item) => item.trim()).filter(Boolean) || [];
 
     for (const rawName of names) {
       const name = rawName.trim();
@@ -50,20 +115,33 @@ export function buildKnowledgeCards(questions: Question[]): LessonKnowledgeCard[
       }
 
       map.set(name, {
-        id: makeId('kp'),
+        id: stableKnowledgeId(name),
         title: name,
-        summary: `围绕“${name}”组织课堂引入、题目训练与方法归纳。`,
+        summary: `围绕知识目录“${name}”组织课堂引入、题目训练与方法归纳。`,
         points: [
-          `先识别这一知识点对应的物理情境和核心变量。`,
+          `先定位这一目录节点对应的物理情境和核心变量。`,
           `再提炼图像、公式和常见设问，形成稳定的解题入口。`,
-          `最后把相关题目串联成“知识点 + 例题 + 训练”的流式学案。`,
+          `最后把相关题目串联成“目录节点 + 例题 + 训练”的流式学案。`,
         ],
         relatedQuestionIds: [question.question_id],
       });
     }
   }
 
-  return Array.from(map.values());
+  const questionMap = new Map(questions.map((question) => [question.question_id, question]));
+  return Array.from(map.values()).map((card) => {
+    const relatedQuestions = card.relatedQuestionIds
+      .map((questionId) => questionMap.get(questionId))
+      .filter((question): question is Question => Boolean(question));
+    const content = buildKnowledgeCardContent(card.title, relatedQuestions);
+    return {
+      ...card,
+      summary: relatedQuestions.length > 0
+        ? `${content.summary.replace('，形成', `，关联 ${relatedQuestions.length} 道题形成`)}`
+        : content.summary,
+      points: content.points,
+    };
+  });
 }
 
 export function createLessonPackage(params: {
@@ -108,14 +186,18 @@ export function createLessonPackage(params: {
       continue;
     }
     if (item.type === 'knowledge') {
-      const card =
-        knowledgeCardMap.get(item.knowledgeId) || {
-          id: item.knowledgeId,
-          title: item.title,
-          summary: item.summary,
-          points: item.points,
-          relatedQuestionIds: [],
-        };
+      // A compose knowledge item is an editable teaching object.  The generated
+      // card only contributes its relation metadata; title, rich summary and
+      // points must always come from the workbench, otherwise the preview would
+      // silently replace an editor change with the automatically generated copy.
+      const generatedCard = knowledgeCardMap.get(item.knowledgeId);
+      const card: LessonKnowledgeCard = {
+        id: item.knowledgeId,
+        title: item.title,
+        summary: item.summary,
+        points: item.points,
+        relatedQuestionIds: generatedCard?.relatedQuestionIds || [],
+      };
       selectedKnowledgeCards.set(card.id, card);
       nodes.push({ type: 'knowledge', id: item.id, knowledgeId: card.id });
       continue;
@@ -124,6 +206,7 @@ export function createLessonPackage(params: {
       id: item.id,
       title: item.title,
       content: item.content,
+      document: item.document,
       blockKind: item.blockKind,
       style: item.style,
     });
@@ -154,7 +237,13 @@ export function saveCurrentLessonPackage(pkg: LessonPackage): void {
 }
 
 export function loadCurrentLessonPackage(): LessonPackage | null {
-  return safeParse<LessonPackage | null>(localStorage.getItem(LESSON_PACKAGE_KEY), null);
+  const raw = localStorage.getItem(LESSON_PACKAGE_KEY);
+  if (!raw) return null;
+  try {
+    return parseLessonPackage(JSON.parse(raw));
+  } catch {
+    return null;
+  }
 }
 
 function saveLessonPackageLibrary(packages: LessonPackage[]): void {
@@ -162,7 +251,7 @@ function saveLessonPackageLibrary(packages: LessonPackage[]): void {
 }
 
 export function listSavedLessonPackages(): SavedLessonPackageSummary[] {
-  const packages = safeParse<LessonPackage[]>(localStorage.getItem(LESSON_PACKAGE_LIBRARY_KEY), []);
+  const packages = parseLessonPackageLibrary();
   return packages
     .slice()
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -178,12 +267,12 @@ export function listSavedLessonPackages(): SavedLessonPackageSummary[] {
 }
 
 export function loadSavedLessonPackage(id: string): LessonPackage | null {
-  const packages = safeParse<LessonPackage[]>(localStorage.getItem(LESSON_PACKAGE_LIBRARY_KEY), []);
+  const packages = parseLessonPackageLibrary();
   return packages.find((pkg) => pkg.id === id) || null;
 }
 
 export function saveLessonPackageToLibrary(pkg: LessonPackage): void {
-  const packages = safeParse<LessonPackage[]>(localStorage.getItem(LESSON_PACKAGE_LIBRARY_KEY), []);
+  const packages = parseLessonPackageLibrary();
   const nextPkg = { ...pkg, updatedAt: new Date().toISOString() };
   const existingIndex = packages.findIndex((item) => item.id === pkg.id);
   if (existingIndex >= 0) {
@@ -196,8 +285,18 @@ export function saveLessonPackageToLibrary(pkg: LessonPackage): void {
 }
 
 export function deleteSavedLessonPackage(id: string): void {
-  const packages = safeParse<LessonPackage[]>(localStorage.getItem(LESSON_PACKAGE_LIBRARY_KEY), []);
+  const packages = parseLessonPackageLibrary();
   saveLessonPackageLibrary(packages.filter((pkg) => pkg.id !== id));
+}
+
+function parseLessonPackageLibrary(): LessonPackage[] {
+  const raw = localStorage.getItem(LESSON_PACKAGE_LIBRARY_KEY);
+  if (!raw) return [];
+  try {
+    return parseLessonPackageList(JSON.parse(raw));
+  } catch {
+    return [];
+  }
 }
 
 export function buildHandoutItemsFromLessonPackage(pkg: LessonPackage): HandoutItem[] {
@@ -207,13 +306,14 @@ export function buildHandoutItemsFromLessonPackage(pkg: LessonPackage): HandoutI
 
   return pkg.nodes.reduce<HandoutItem[]>((items, node) => {
     if (node.type === 'page_break') {
-      items.push({ type: 'page_break', title: node.title });
+      items.push({ id: node.id, type: 'page_break', title: node.title });
       return items;
     }
     if (node.type === 'knowledge') {
       const card = knowledgeMap.get(node.knowledgeId);
       if (card) {
         items.push({
+          id: node.id,
           type: 'knowledge',
           title: card.title,
           summary: card.summary,
@@ -226,6 +326,7 @@ export function buildHandoutItemsFromLessonPackage(pkg: LessonPackage): HandoutI
       const textBlock = textMap.get(node.textBlockId);
       if (textBlock) {
         items.push({
+          id: node.id,
           type: 'text',
           title: textBlock.title,
           content: textBlock.content,
@@ -237,7 +338,7 @@ export function buildHandoutItemsFromLessonPackage(pkg: LessonPackage): HandoutI
     }
     const question = questionMap.get(node.questionId);
     if (question) {
-      items.push({ type: 'question', question });
+      items.push({ id: node.id, type: 'question', question });
     }
     return items;
   }, []);
@@ -249,7 +350,7 @@ export function buildKnowledgeSlides(cards: LessonKnowledgeCard[]): SlidePage[] 
     pageType: 'knowledge_summary',
     title: card.title,
     subtitle: `关联题目 ${card.relatedQuestionIds.length} 道`,
-    badge: index === 0 ? '知识点引入' : '关联知识点',
+    badge: index === 0 ? '知识目录' : '关联目录',
     layout: card.points.length > 4 ? 'two_column' : 'single_column',
     sections: [
       {
@@ -295,7 +396,7 @@ export function buildSlideDeckFromLessonPackage(pkg: LessonPackage): SlideDeck {
           pageType: 'method_summary',
           title: block.title,
           subtitle: pkg.subtitle,
-          badge: '文本卡片',
+          badge: '文本节点',
           layout: 'single_column',
           sections: [
             {

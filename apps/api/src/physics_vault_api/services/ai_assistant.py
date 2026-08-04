@@ -78,12 +78,13 @@ class AiAssistantService:
 
     def _search_context(self, query: str, limit: int) -> list[AiAssistantQuestionContext]:
         rows = self._search_rows(query, limit)
-        if not rows and query:
-            for token in _candidate_query_tokens(query):
+        tokens = _candidate_query_tokens(query) if query else []
+        if not rows and tokens:
+            for token in tokens:
                 rows = self._search_rows(token, limit)
                 if rows:
                     break
-        if not rows:
+        if not rows and not tokens:
             rows = self._browse_rows(limit)
         return [_row_to_context(row) for row in rows[:limit]]
 
@@ -146,10 +147,13 @@ def _latest_user_text(request: AiAssistantChatRequest) -> str:
 
 
 def _candidate_query_tokens(text: str) -> list[str]:
+    source = _strip_search_intent_words(text)
+    terms = _domain_search_terms(source)
+
     separators = "，。！？、；：,.!?;:\n\t "
     tokens: list[str] = []
     current = ""
-    for char in text:
+    for char in source:
         if char in separators:
             if len(current.strip()) >= 2:
                 tokens.append(current.strip())
@@ -162,9 +166,85 @@ def _candidate_query_tokens(text: str) -> list[str]:
     preferred = [
         token
         for token in tokens
-        if any(keyword in token for keyword in ["力", "电", "磁", "运动", "能量", "动量", "电路", "光", "实验", "加速度"])
+        if any(keyword in token for keyword in ["力", "电", "磁", "运动", "能量", "动量", "电路", "光", "实验", "加速度", "原子", "能级"])
     ]
-    return preferred + [token for token in tokens if token not in preferred]
+    ordered = terms + preferred + [token for token in tokens if token not in preferred]
+    result: list[str] = []
+    for token in ordered:
+        clean = token.strip()
+        if len(clean) >= 2 and clean not in result:
+            result.append(clean)
+    return result
+
+
+def _domain_search_terms(source: str) -> list[str]:
+    term_map: list[tuple[str, list[str]]] = [
+        ("氢原子能级", ["氢原子能级", "氢原子", "能级跃迁", "玻尔模型", "光谱", "能级"]),
+        ("氢原子", ["氢原子", "氢原子能级", "玻尔模型", "能级"]),
+        ("原子能级", ["原子能级", "能级跃迁", "光谱", "能级"]),
+        ("能级跃迁", ["能级跃迁", "能级", "光子", "光谱"]),
+        ("万有引力", ["万有引力", "引力", "天体运动", "卫星", "开普勒"]),
+        ("开普勒第三定律", ["开普勒第三定律", "开普勒", "周期", "轨道半径", "天体运动"]),
+        ("牛顿第二定律", ["牛顿第二定律", "合力", "加速度", "动力学"]),
+        ("闭合电路欧姆定律", ["闭合电路欧姆定律", "闭合电路", "电动势", "内阻", "路端电压"]),
+        ("机械能守恒", ["机械能守恒", "动能", "势能", "能量守恒"]),
+        ("动量守恒", ["动量守恒", "碰撞", "冲量", "动量"]),
+        ("电磁感应", ["电磁感应", "法拉第", "楞次定律", "感应电流", "感应电动势"]),
+        ("简谐振动", ["简谐振动", "振幅", "周期", "回复力"]),
+        ("圆周运动", ["圆周运动", "向心力", "向心加速度"]),
+        ("平抛运动", ["平抛运动", "抛体运动", "水平位移"]),
+        ("带电粒子", ["带电粒子", "电场偏转", "磁场偏转", "洛伦兹力"]),
+        ("交流电", ["交流电", "变压器", "有效值", "峰值"]),
+        ("静电场", ["静电场", "电场强度", "电势", "电势能"]),
+        ("磁场", ["磁场", "洛伦兹力", "安培力"]),
+        ("光电效应", ["光电效应", "逸出功", "截止频率", "光电子"]),
+    ]
+    terms: list[str] = []
+    for key, values in term_map:
+        if key in source:
+            terms.extend(values)
+    if "能级" in source:
+        terms.append("能级")
+    if "原子" in source:
+        terms.append("原子")
+    result: list[str] = []
+    for term in terms:
+        if term not in result:
+            result.append(term)
+    return result
+
+
+def _strip_search_intent_words(text: str) -> str:
+    source = text.strip()
+    replacements = [
+        "帮我",
+        "请",
+        "找一个",
+        "找一份",
+        "找一道",
+        "找几道",
+        "找",
+        "检索",
+        "搜索",
+        "有没有",
+        "一个",
+        "一道",
+        "几道",
+        "相关",
+        "关于",
+        "考查",
+        "考",
+        "的题目",
+        "的题",
+        "题目",
+        "试题",
+        "例题",
+        "课堂",
+        "给我",
+    ]
+    for word in replacements:
+        source = source.replace(word, " ")
+    return " ".join(source.split())
 
 
 def _row_to_context(row: dict[str, Any]) -> AiAssistantQuestionContext:

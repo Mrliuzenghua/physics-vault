@@ -49,9 +49,10 @@ export function Select({
           id={selectId}
           value={value}
           className={`
-            w-full appearance-none rounded-lg border bg-[var(--color-bg-card)]
-            text-[var(--color-text)] outline-none transition-all duration-150 cursor-pointer
-            focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/15
+            w-full appearance-none rounded-md border bg-[var(--color-bg-card)]
+            text-[var(--color-text)] outline-none transition-colors duration-150 cursor-pointer
+            hover:border-[var(--color-border-strong)]
+            focus:border-[var(--color-accent)] focus:ring-1 focus:ring-[var(--color-accent)]/20
             ${hasError ? 'border-[var(--color-red)]' : 'border-[var(--color-border)]'}
             ${sizeStyles[size]}
             ${className}

@@ -1,5 +1,6 @@
 import type React from 'react';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { Search, SlidersHorizontal, X } from 'lucide-react';
 
 import type { SearchFilters } from '../../types';
 
@@ -38,6 +39,11 @@ const SEARCH_MODES = [
 
 export default function FilterBar({ filters, onChange, facets }: Props) {
   const [keyword, setKeyword] = useState(filters.query || '');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  useEffect(() => {
+    setKeyword(filters.query || '');
+  }, [filters.query]);
 
   const update = useCallback(
     (patch: Partial<SearchFilters>) => {
@@ -57,69 +63,94 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
     onChange({ limit: filters.limit || 20, offset: 0, search_mode: 'browse' });
   };
 
-  const activeFilters = [
-    filters.query && `关键词: ${filters.query}`,
-    filters.year && `年份: ${filters.year}`,
-    filters.module && `模块: ${filters.module}`,
-    filters.question_type && `题型: ${filters.question_type}`,
-    filters.difficulty && `难度: ${'★'.repeat(Number(filters.difficulty))}`,
-    filters.topic1_id && `考点: ${filters.topic1_id}`,
-    filters.status && `状态: ${filters.status}`,
-  ].filter(Boolean);
+  const hasAdvancedFilters = Boolean(
+    filters.year || filters.module || filters.question_type || filters.difficulty || filters.status,
+  );
+  const activeFilterCount = [
+    filters.query,
+    filters.year,
+    filters.module,
+    filters.question_type,
+    filters.difficulty,
+    filters.status,
+    filters.topic1_id,
+    filters.topic2_id,
+    filters.topic3_id,
+  ].filter(Boolean).length;
+  const showAdvanced = advancedOpen || hasAdvancedFilters;
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="flex overflow-hidden rounded-lg border" style={{ borderColor: 'var(--color-border)' }}>
+      <div className="flex min-w-0 flex-wrap items-center gap-2 lg:flex-nowrap">
+        <div className="flex shrink-0 overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)]">
           {SEARCH_MODES.map((mode) => (
             <button
+              type="button"
               key={mode.value}
               onClick={() => update({ search_mode: mode.value as SearchFilters['search_mode'] })}
-              className="cursor-pointer border-none px-2.5 py-1.5 text-xs font-medium transition-colors"
-              style={{
-                background:
-                  (filters.search_mode || 'browse') === mode.value ? 'var(--color-accent)' : 'var(--color-bg-card)',
-                color: (filters.search_mode || 'browse') === mode.value ? '#fff' : 'var(--color-text-secondary)',
-              }}
+              className={`h-9 cursor-pointer border-none px-3 text-xs font-bold transition-colors ${
+                (filters.search_mode || 'browse') === mode.value
+                  ? 'bg-[var(--color-accent)] text-white'
+                  : 'bg-[var(--color-bg-card)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+              }`}
             >
               {mode.label}
             </button>
           ))}
         </div>
 
-        <input
-          type="text"
-          value={keyword}
-          onChange={(event) => setKeyword(event.target.value)}
-          onKeyDown={handleSearch}
-          placeholder="输入关键词后回车或点击搜索"
-          className="min-w-40 flex-1 rounded-lg border px-3 py-1.5 text-sm outline-none"
-          style={{
-            borderColor: 'var(--color-border)',
-            background: 'var(--color-bg-card)',
-            color: 'var(--color-text)',
-          }}
-        />
+        <div className="flex min-w-[260px] flex-1 overflow-hidden rounded-md border border-[var(--color-border)] bg-white focus-within:border-[var(--color-accent)] focus-within:ring-2 focus-within:ring-[var(--color-accent-light)]">
+          <Search size={16} className="ml-3 mt-2.5 shrink-0 text-[var(--color-text-muted)]" />
+          <input
+            type="text"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+            onKeyDown={handleSearch}
+            placeholder="搜索题干、题号、来源或知识点"
+            className="h-9 min-w-0 flex-1 border-0 bg-transparent px-2 text-sm text-[var(--color-text-main)] outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => update({ query: keyword || undefined })}
+            className="h-9 shrink-0 border-l border-[var(--color-border)] px-4 text-xs font-bold text-[var(--color-accent)] hover:bg-[var(--color-accent-light)]"
+          >
+            搜索
+          </button>
+        </div>
 
         <button
-          onClick={() => update({ query: keyword || undefined })}
-          className="cursor-pointer rounded-lg border-none px-3 py-1.5 text-xs font-medium text-white"
-          style={{ background: 'var(--color-accent)' }}
+          type="button"
+          onClick={() => setAdvancedOpen((value) => !value)}
+          aria-expanded={showAdvanced}
+          className={`flex h-9 shrink-0 items-center gap-1.5 rounded-md border px-3 text-xs font-semibold transition-colors ${
+            showAdvanced
+              ? 'border-[var(--color-accent)] bg-[var(--color-accent-light)] text-[var(--color-accent)]'
+              : 'border-[var(--color-border)] bg-white text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+          }`}
         >
-          搜索
+          <SlidersHorizontal size={15} />
+          筛选{activeFilterCount > 0 ? ` ${activeFilterCount}` : ''}
         </button>
+
+        {activeFilterCount > 0 && (
+          <button
+            type="button"
+            onClick={clearAll}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-[var(--color-text-muted)] hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]"
+            aria-label="清空筛选"
+            title="清空筛选"
+          >
+            <X size={16} />
+          </button>
+        )}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
+      {showAdvanced && <div className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-hover)] px-3 py-2">
+        <span className="mr-1 text-xs font-semibold text-[var(--color-text-muted)]">高级筛选</span>
         <select
           value={filters.year || ''}
           onChange={(event) => update({ year: event.target.value ? Number(event.target.value) : undefined })}
-          className="rounded border px-2 py-1.5 text-xs outline-none"
-          style={{
-            borderColor: 'var(--color-border)',
-            background: 'var(--color-bg-card)',
-            color: 'var(--color-text)',
-          }}
+          className="h-8 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs text-[var(--color-text-main)] outline-none focus:border-[var(--color-accent)]"
         >
           <option value="">年份</option>
           {(facets?.years || [2025, 2024, 2023, 2022, 2021, 2020]).map((year) => (
@@ -132,12 +163,7 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
         <select
           value={filters.module || ''}
           onChange={(event) => update({ module: event.target.value || undefined })}
-          className="rounded border px-2 py-1.5 text-xs outline-none"
-          style={{
-            borderColor: 'var(--color-border)',
-            background: 'var(--color-bg-card)',
-            color: 'var(--color-text)',
-          }}
+          className="h-8 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs text-[var(--color-text-main)] outline-none focus:border-[var(--color-accent)]"
         >
           <option value="">模块</option>
           {MODULES.map((module) => (
@@ -150,12 +176,7 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
         <select
           value={filters.question_type || ''}
           onChange={(event) => update({ question_type: event.target.value || undefined })}
-          className="rounded border px-2 py-1.5 text-xs outline-none"
-          style={{
-            borderColor: 'var(--color-border)',
-            background: 'var(--color-bg-card)',
-            color: 'var(--color-text)',
-          }}
+          className="h-8 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs text-[var(--color-text-main)] outline-none focus:border-[var(--color-accent)]"
         >
           <option value="">题型</option>
           {TYPES.map((type) => (
@@ -168,12 +189,7 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
         <select
           value={filters.difficulty || ''}
           onChange={(event) => update({ difficulty: event.target.value || undefined })}
-          className="rounded border px-2 py-1.5 text-xs outline-none"
-          style={{
-            borderColor: 'var(--color-border)',
-            background: 'var(--color-bg-card)',
-            color: 'var(--color-text)',
-          }}
+          className="h-8 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs text-[var(--color-text-main)] outline-none focus:border-[var(--color-accent)]"
         >
           <option value="">难度</option>
           {DIFFICULTIES.map((difficulty) => (
@@ -186,12 +202,7 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
         <select
           value={filters.status || ''}
           onChange={(event) => update({ status: event.target.value || undefined })}
-          className="rounded border px-2 py-1.5 text-xs outline-none"
-          style={{
-            borderColor: 'var(--color-border)',
-            background: 'var(--color-bg-card)',
-            color: 'var(--color-text)',
-          }}
+          className="h-8 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs text-[var(--color-text-main)] outline-none focus:border-[var(--color-accent)]"
         >
           <option value="">状态</option>
           <option value="已审核">已审核</option>
@@ -200,37 +211,16 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
           <option value="待校验">待校验</option>
         </select>
 
-        {activeFilters.length > 0 && (
+        {hasAdvancedFilters && (
           <button
+            type="button"
             onClick={clearAll}
-            className="cursor-pointer rounded border px-2 py-1.5 text-xs"
-            style={{
-              borderColor: 'var(--color-border)',
-              color: 'var(--color-red)',
-              background: 'var(--color-bg-card)',
-            }}
+            className="h-8 cursor-pointer rounded-md px-2 text-xs font-bold text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
           >
-            清空筛选
+            重置高级筛选
           </button>
         )}
-      </div>
-
-      {activeFilters.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1">
-          {activeFilters.map((item, index) => (
-            <span
-              key={`${item}-${index}`}
-              className="rounded-full px-2 py-0.5 text-xs"
-              style={{ background: 'var(--color-accent-light)', color: 'var(--color-accent-dark)' }}
-            >
-              {item}
-            </span>
-          ))}
-          <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-            ({activeFilters.length} 项筛选)
-          </span>
-        </div>
-      )}
+      </div>}
     </div>
   );
 }

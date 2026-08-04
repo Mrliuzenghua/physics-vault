@@ -45,7 +45,7 @@ class McpGatewayService:
 
     def notify_config_updated(self, runtime_config: Any) -> None:
         """Called when the frontend pushes new AI config via POST /api/mcp/config."""
-        from .ai_http_client import AiHttpClient
+        from .ai_http_client import AiHttpClient, DashScopeNativeOcrClient
 
         # Use LLM config for text tasks, VL config for vision tasks
         llm = runtime_config.llm
@@ -71,6 +71,14 @@ class McpGatewayService:
                 and vl.api_key == llm.api_key
             ):
                 self._vl_client = self._http_client
+            elif _should_use_dashscope_native_ocr(vl.base_url, vl.model_name):
+                self._vl_client = DashScopeNativeOcrClient(
+                    base_url=vl.base_url,
+                    api_key=vl.api_key,
+                    model_name=vl.model_name,
+                    timeout_seconds=vl.timeout_seconds,
+                    max_retries=vl.max_retries,
+                )
             else:
                 self._vl_client = AiHttpClient(
                     base_url=vl.base_url,
@@ -189,6 +197,14 @@ class McpGatewayService:
             if client is None:
                 return {"ok": True, "target": target, "mode": mode, "reachable": False,
                         "message": "HTTP client not configured for this target"}
+            if target == "vl" and client.__class__.__name__ == "DashScopeNativeOcrClient":
+                try:
+                    await asyncio.to_thread(client.test_connection)
+                    return {"ok": True, "target": target, "mode": mode, "reachable": True,
+                            "message": f"DashScope OCR reachable: {client._base_url} / {client._model}"}
+                except Exception as exc:  # noqa: BLE001
+                    return {"ok": True, "target": target, "mode": mode, "reachable": False,
+                            "message": f"DashScope OCR unreachable: {exc}"}
             import urllib.request, json
 
             def _check_http() -> dict[str, Any]:
@@ -295,12 +311,19 @@ class McpGatewayService:
     async def generate_analysis(self, payload: GenerateAnalysisInput | dict[str, Any]) -> dict[str, Any]:
         if self._has_http:
             d = payload if isinstance(payload, dict) else asdict(payload)
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 self._http_client.generate_analysis,
                 question=d.get("question", {}),
                 style=d.get("style", "classroom_brief"),
                 include_extension=d.get("include_extension", True),
             )
+            question = d.get("question", {})
+            if isinstance(question, dict):
+                result.setdefault("question_id", question.get("question_id", ""))
+            if "analysis_text" not in result and "analysis" in result:
+                result["analysis_text"] = str(result.get("analysis") or "")
+            result.setdefault("warnings", [])
+            return result
         if isinstance(payload, dict):
             payload = GenerateAnalysisInput(
                 question=build_standard_question(payload["question"]),
@@ -314,7 +337,7 @@ class McpGatewayService:
     async def generate_knowledge(self, payload: GenerateKnowledgeInput | dict[str, Any]) -> dict[str, Any]:
         if self._has_http:
             d = payload if isinstance(payload, dict) else asdict(payload)
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 self._http_client.generate_knowledge,
                 knowledge_points=d.get("knowledge_points", []),
                 style=d.get("style", ""),
@@ -322,6 +345,12 @@ class McpGatewayService:
                 include_formula=d.get("include_formula", True),
                 include_common_mistakes=d.get("include_common_mistakes", True),
             )
+            result.setdefault("knowledge_key", _knowledge_key(d.get("knowledge_points", []), d.get("style", ""), d.get("length", "medium")))
+            result.setdefault("title", "")
+            result.setdefault("content", str(result.get("text") or ""))
+            result.setdefault("outline", [])
+            result.setdefault("warnings", [])
+            return result
         if isinstance(payload, dict):
             payload = GenerateKnowledgeInput(**payload)
         result = await self._container.knowledge_generator.generate_knowledge(payload)
@@ -330,17 +359,18 @@ class McpGatewayService:
     async def generate_metadata(self, payload: GenerateMetadataInput | dict[str, Any]) -> dict[str, Any]:
         if self._has_http:
             d = payload if isinstance(payload, dict) else asdict(payload)
-            items = d.get("items", [])
+            items = [item for item in d.get("items", []) if isinstance(item, dict)]
             questions = [
-                {"question_id": item.get("question_id", ""), **(item.get("question", {}))}
+                {"question_id": item.get("id") or item.get("question_id", ""), **_metadata_question_dict(item)}
                 for item in items
             ]
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 self._http_client.generate_metadata,
                 questions=questions,
                 fields=d.get("fields", ["knowledge_points", "tags"]),
                 only_fill_empty=d.get("only_fill_empty", True),
             )
+            return _normalize_http_metadata_result(items, result)
         if isinstance(payload, dict):
             payload = build_metadata_input(payload)
         result = await self._container.metadata_generator.generate_metadata(payload)
@@ -377,6 +407,11 @@ class McpGatewayService:
         return asdict(result)
 
 
+def _should_use_dashscope_native_ocr(base_url: str, model_name: str) -> bool:
+    lower_model = (model_name or "").lower()
+    return lower_model in {"qwen-vl-ocr", "qwen-vl-ocr-latest"}
+
+
 def build_standard_question(payload: dict[str, Any]) -> StandardQuestion:
     return StandardQuestion(
         question_id=payload["question_id"],
@@ -404,6 +439,47 @@ def build_metadata_input(payload: dict[str, Any]) -> GenerateMetadataInput:
         strict_enum_match=payload.get("strict_enum_match", True),
         prompt_append=payload.get("prompt_append"),
     )
+
+
+def _knowledge_key(knowledge_points: Any, style: Any, length: Any) -> str:
+    import hashlib
+
+    points = [str(item).strip() for item in knowledge_points if str(item).strip()] if isinstance(knowledge_points, list) else []
+    payload = "|".join(sorted(points)) + f"||{style or ''}||{length or ''}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _metadata_question_dict(item: dict[str, Any]) -> dict[str, Any]:
+    question = item.get("question", {})
+    if isinstance(question, dict):
+        return dict(question)
+    return {"title": str(question or "")}
+
+
+def _normalize_http_metadata_result(source_items: list[dict[str, Any]], result: dict[str, Any]) -> dict[str, Any]:
+    raw_items = result.get("items")
+    if not isinstance(raw_items, list):
+        raw_items = result.get("questions") if isinstance(result.get("questions"), list) else []
+
+    source_ids = [str(item.get("id") or item.get("question_id") or "") for item in source_items]
+    normalized: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_items):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        item_id = str(item.get("id") or item.get("question_id") or "")
+        if not item_id and index < len(source_ids):
+            item_id = source_ids[index]
+        item["id"] = item_id
+        item.pop("question_id", None)
+        normalized.append(item)
+
+    by_id = {str(item.get("id") or ""): item for item in normalized if str(item.get("id") or "")}
+    ordered = [by_id[item_id] for item_id in source_ids if item_id in by_id]
+    return {
+        "items": ordered if len(ordered) == len(source_ids) else normalized,
+        "warnings": result.get("warnings") if isinstance(result.get("warnings"), list) else [],
+    }
 
 
 __all__ = ["AppError", "McpGatewayService", "build_metadata_input", "build_standard_question"]

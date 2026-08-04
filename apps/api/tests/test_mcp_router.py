@@ -4,6 +4,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from physics_vault_api.app import create_app
+from physics_vault_api.config import McpSettings
+from physics_vault_api.services.mcp_gateway import McpGatewayService
 
 
 def _make_client(**env_overrides: str) -> TestClient:
@@ -154,3 +156,37 @@ def test_generate_analysis_mock_endpoint() -> None:
     payload = response.json()
     assert payload["ok"] is True
     assert payload["data"]["question_id"] == "q_001"
+
+
+def test_http_metadata_result_maps_question_id_to_item_id() -> None:
+    class FakeHttpClient:
+        def generate_metadata(self, **_kwargs):
+            return {
+                "items": [
+                    {"question_id": "q_001", "tags": ["力学"]},
+                    {"question_id": "q_002", "source": "月考"},
+                ]
+            }
+
+    service = McpGatewayService(McpSettings(mode="mock"))
+    service._http_client = FakeHttpClient()
+
+    import asyncio
+
+    result = asyncio.run(
+        service.generate_metadata(
+            {
+                "items": [
+                    {"id": "q_001", "question": {"title": "题目一"}},
+                    {"id": "q_002", "question": {"title": "题目二"}},
+                ],
+                "fields": ["tags", "source"],
+                "constraints": {},
+            }
+        )
+    )
+
+    assert result["items"] == [
+        {"id": "q_001", "tags": ["力学"]},
+        {"id": "q_002", "source": "月考"},
+    ]

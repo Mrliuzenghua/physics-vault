@@ -1,4 +1,5 @@
 import type { HandoutConfig, Question } from '../../types';
+import { imageFileUrl } from '../../utils/imageUrl';
 import LatexRenderer from '../render/LatexRenderer';
 
 const TYPE_LABELS: Record<string, string> = {
@@ -23,6 +24,14 @@ function formatQuestionNumber(index: number, style: string): string {
   }
 }
 
+function stripFigurePlaceholders(text?: string | null): string {
+  return String(text || '').replace(/!\[fig:[^\]]+\]/g, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function extractFigureIds(text?: string | null): string[] {
+  return Array.from(String(text || '').matchAll(/!\[fig:([^\]]+)\]/g), (match) => match[1]);
+}
+
 interface Props {
   question: Question;
   index: number;
@@ -34,6 +43,20 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
   const sc = config.styleConfig;
   const fs = sc.fontSize;
   const lh = sc.lineHeight;
+  const cleanStem = stripFigurePlaceholders(question.title || question.stem_text || '');
+  const cleanAnalysis = stripFigurePlaceholders(question.analysis);
+  const figureMap = new Map((question.figures || []).map((figure) => [figure.fig_uuid, figure]));
+  const optionFigureIds = new Set((question.options || []).flatMap((option) => extractFigureIds(option.content)));
+  const stemFigureIds = extractFigureIds(question.title || question.stem_text);
+  const visibleFigures = Array.from(new Map((stemFigureIds.length > 0
+    ? stemFigureIds.map((id) => figureMap.get(id)).filter(Boolean)
+    : (question.figures || []).filter((figure) => !optionFigureIds.has(figure.fig_uuid)))
+    .filter((figure) => Boolean(imageFileUrl(figure!.local_path)))
+    .map((figure) => [figure!.local_path || figure!.fig_uuid, figure!])).values());
+  const optionsHaveFigures = optionFigureIds.size > 0;
+  const longestOptionLength = Math.max(0, ...(question.options || []).map((option) => stripFigurePlaceholders(option.content).length));
+  const useOptionColumns = sc.optionLayout === 'double'
+    || (sc.optionLayout !== 'single' && (optionsHaveFigures || ((question.options || []).length === 4 && longestOptionLength <= 26)));
 
   return (
     <div
@@ -74,48 +97,55 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
         </span>
       </div>
 
-      {/* Stem */}
-      <div
-        style={{
-          fontSize: fs,
-          lineHeight: lh,
-          color: 'var(--color-text, #1f2333)',
-          marginBottom: sc.paragraphSpacing,
-        }}
-      >
-        <LatexRenderer text={question.title || question.stem_text || ''} />
-      </div>
-
-      {/* Figures — placed between stem and options, matching QuestionCard / QuestionContentCard */}
-      {question.figures && question.figures.length > 0 && (
+      <div className="pv-question-stem-figure">
+        {/* Stem */}
         <div
           style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: 10,
+            fontSize: fs,
+            lineHeight: lh,
+            color: 'var(--color-text, #1f2333)',
             marginBottom: sc.paragraphSpacing,
           }}
         >
-          {question.figures.map((fig) => (
+          <LatexRenderer text={cleanStem} />
+        </div>
+
+      {/* Figures — placed between stem and options, matching QuestionCard / QuestionContentCard */}
+      {visibleFigures.length > 0 && (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: visibleFigures.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)',
+            gap: 10,
+            marginBottom: sc.paragraphSpacing,
+            justifyItems: visibleFigures.length > 1 ? 'center' : visibleFigures[0]?.display_align === 'left' ? 'start' : visibleFigures[0]?.display_align === 'right' ? 'end' : 'center',
+            alignItems: 'center',
+          }}
+        >
+          {visibleFigures.slice(0, 3).map((fig) => (
             <div
               key={fig.fig_uuid}
               style={{
-                maxWidth: `${48 * sc.figureScale}%`,
+                width: visibleFigures.length > 1 ? `${Math.min(100, Math.round(100 * sc.figureScale * ((fig.display_scale || 60) / 60)))}%` : `${Math.min(100, Math.round(72 * sc.figureScale * ((fig.display_scale || 60) / 60)))}%`,
+                maxWidth: visibleFigures.length > 1 ? '76mm' : '128mm',
                 borderRadius: 0,
                 border: '1px solid var(--color-border, #e3e7ee)',
                 overflow: 'hidden',
                 background: '#fff',
+                padding: 4,
               }}
             >
               {fig.local_path ? (
                 <img
-                  src={`/files/${fig.local_path}`}
+                  src={imageFileUrl(fig.local_path) || ''}
                   alt={fig.fig_uuid}
                   style={{
-                    width: '100%',
-                    maxHeight: '90mm',
+                    width: 'auto',
+                    maxWidth: '100%',
+                    maxHeight: `${Math.round((visibleFigures.length > 1 ? 48 : 62) * ((fig.display_scale || 60) / 60))}mm`,
                     objectFit: 'contain',
                     display: 'block',
+                    margin: '0 auto',
                   }}
                   onError={(e) => {
                     const el = e.currentTarget;
@@ -125,6 +155,7 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
                   }}
                 />
               ) : null}
+              {fig.caption && <div style={{ marginTop: 4, textAlign: 'center', color: 'var(--color-text-muted, #64748b)', fontSize: Math.max(10, fs - 2), lineHeight: 1.5 }}>{fig.caption}</div>}
               <div
                 style={{
                   display: fig.local_path ? 'none' : 'flex',
@@ -142,10 +173,17 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
           ))}
         </div>
       )}
+      </div>
 
       {/* Options */}
       {question.options && question.options.length > 0 && (
-        <div style={{ marginBottom: sc.paragraphSpacing, paddingLeft: 16 }}>
+        <div style={{
+          marginBottom: sc.paragraphSpacing,
+          paddingLeft: 16,
+          display: useOptionColumns ? 'grid' : 'block',
+          gridTemplateColumns: useOptionColumns ? 'repeat(2, minmax(0, 1fr))' : undefined,
+          gap: useOptionColumns ? '8px 12px' : undefined,
+        }}>
           {question.options.map((opt, i) => (
             <div
               key={opt.opt ?? i}
@@ -160,7 +198,21 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
               }}
             >
               <span style={{ fontWeight: 600, flexShrink: 0 }}>{opt.opt}.</span>
-              <LatexRenderer text={opt.content} inline />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {stripFigurePlaceholders(opt.content) && <LatexRenderer text={stripFigurePlaceholders(opt.content)} inline />}
+                {extractFigureIds(opt.content).map((figureId) => {
+                  const figure = figureMap.get(figureId);
+                  const src = imageFileUrl(figure?.local_path);
+                  return src ? (
+                    <img
+                      key={figureId}
+                      src={src}
+                      alt={`${opt.opt} 选项图`}
+                      style={{ display: 'block', width: 'auto', maxWidth: '100%', maxHeight: '34mm', objectFit: 'contain', marginTop: 4 }}
+                    />
+                  ) : null;
+                })}
+              </div>
             </div>
           ))}
         </div>
@@ -206,7 +258,7 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
                     marginTop: 2,
                   }}
                 >
-                  解析：<LatexRenderer text={sub.analysis} inline />
+                  解析：<LatexRenderer text={stripFigurePlaceholders(sub.analysis)} inline />
                 </div>
               )}
             </div>
@@ -231,7 +283,7 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
       )}
 
       {/* Analysis (teacher version) */}
-      {config.showAnalysis && question.analysis && (
+      {config.showAnalysis && cleanAnalysis && (
         <div
           style={{
             fontSize: fs - 2,
@@ -243,7 +295,7 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
           }}
         >
           <span style={{ fontWeight: 600 }}>解析：</span>
-          <LatexRenderer text={question.analysis} inline />
+          <LatexRenderer text={cleanAnalysis} inline />
         </div>
       )}
     </div>

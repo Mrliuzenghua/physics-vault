@@ -1,28 +1,61 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+﻿import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { CheckCircle2, ChevronLeft, ChevronRight, Cloud, Eye, ExternalLink, FileSearch, History, ImagePlus, PanelRightClose, PanelRightOpen, PencilLine, RotateCcw, Search, Send, Sparkles, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-react';
 
+import QuestionLiveEditor from '../components/editor/QuestionLiveEditor';
+import type { FigureInsertRequest } from '../components/editor/StructuredTextEditor';
 import ImportStemRenderer from '../components/import/ImportStemRenderer';
+import LatexRenderer from '../components/render/LatexRenderer';
+import {
+  analyzeQuestionQuality,
+  buildSafeQuestionPatch,
+  findDuplicateQuestionIds,
+  QUESTION_QUALITY_RULE_LABELS,
+  scoreQuestionQuality,
+  type QuestionQualityCode,
+  type QuestionQualityRuleConfig,
+  type QuestionQualitySeverity,
+} from '../services/questionQuality';
 import {
   batchGenerateAnalysis,
   completeImportDraftMetadata,
+  deleteReviewDraft,
+  deleteReviewTask,
+  fetchBatchImages,
   fetchImportTask,
+  fetchReviewDraft,
+  fetchReviewDraftVersions,
+  fetchReviewTasks,
+  fastCleanReviewLatex,
   generateSingleAnalysis,
+  restoreReviewDraftVersion,
+  ReviewDraftConflictError,
+  saveReviewDraft,
+  saveReviewedKnowledge,
   saveReviewedQuestions,
+  uploadBatchImage,
 } from '../services/api';
 import type {
   Figure,
   FigureReferenceIssue,
   ImportMediaAsset,
   ImportPipelineTaskResponse,
+  KnowledgeReviewDraft,
   Option,
+  Question,
   ReviewQuestionDraft,
+  ReviewDraftResponse,
+  ReviewDraftStatePayload,
+  ReviewTaskListItem,
+  SaveReviewedKnowledgeResponse,
   SaveReviewedQuestionsResponse,
   SubQuestion,
 } from '../types';
 import { normalizeShortInlineDisplayMath } from '../utils/mathText';
 
 type QueueKey = 'risk' | 'missing_answer' | 'missing_options' | 'image_issue' | 'ai_failed_page' | 'pending' | 'modified' | 'confirmed' | 'discarded' | 'all';
-type RiskKind = 'empty_title' | 'missing_answer' | 'missing_options' | 'missing_knowledge' | 'image_issue';
+type ReviewWorkspaceView = 'edit' | 'preview' | 'source';
+type RiskKind = QuestionQualityCode;
 
 interface RiskItem {
   kind: RiskKind;
@@ -36,9 +69,17 @@ interface PageResult {
   page_image_path?: string;
   error?: string;
   question_count?: number;
+  image_width?: number | null;
+  image_height?: number | null;
+  regions?: Array<{
+    region_id?: string | null;
+    question_id?: string | null;
+    bbox?: [number, number, number, number] | null;
+  }>;
 }
 
 interface ReviewTaskMeta {
+  batchId?: string;
   warnings: string[];
   pageResults: PageResult[];
   mediaAssets: ImportMediaAsset[];
@@ -49,6 +90,7 @@ interface CachedReviewState {
   taskId: string;
   savedAt: string;
   drafts: ReviewQuestionDraft[];
+  knowledgeDrafts?: KnowledgeReviewDraft[];
   taskMeta: ReviewTaskMeta;
   currentIndex: number;
   queue: QueueKey;
@@ -56,6 +98,7 @@ interface CachedReviewState {
 
 const REVIEW_CACHE_PREFIX = 'physics_vault_review_cache.';
 const REVIEW_CACHE_VERSION = 1;
+const REVIEW_QUALITY_CONFIG_KEY = 'physics_vault_review_quality_config.v1';
 
 const TYPE_OPTIONS = [
   { value: 'single_choice', label: '单选题' },
@@ -66,10 +109,24 @@ const TYPE_OPTIONS = [
 ];
 
 const TYPE_LABELS = Object.fromEntries(TYPE_OPTIONS.map((item) => [item.value, item.label]));
-const INPUT_CLASS = 'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]';
-const TEXTAREA_CLASS = 'w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2 text-sm leading-7 text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]';
-const SOFT_BUTTON_CLASS = 'rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2 text-sm font-semibold text-[var(--color-text-secondary)] disabled:cursor-not-allowed disabled:opacity-45';
-const PRIMARY_BUTTON_CLASS = 'rounded-md bg-[var(--color-accent)] px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-45';
+const INPUT_CLASS = 'w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] px-2.5 py-1.5 text-xs text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]';
+const TEXTAREA_CLASS = 'w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] px-2.5 py-1.5 text-[13px] leading-6 text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]';
+const SOFT_BUTTON_CLASS = 'rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] px-2.5 py-1.5 text-xs font-semibold text-[var(--color-text-secondary)] disabled:cursor-not-allowed disabled:opacity-45';
+const PRIMARY_BUTTON_CLASS = 'rounded-md bg-[var(--color-accent)] px-2.5 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-45';
+const TABLE_TEMPLATE = '\n\n| 项目 | 内容 |\n| --- | --- |\n|  |  |';
+const REVIEW_FIELD_LABELS: Partial<Record<keyof ReviewQuestionDraft, string>> = {
+  question_type: '题型',
+  title: '题干',
+  options: '选项',
+  answer: '答案',
+  analysis: '解析',
+  difficulty: '难度',
+  knowledge_point: '知识点',
+  tags: '标签',
+  source: '来源',
+  figures: '配图',
+};
+const REVIEW_DIFF_FIELDS = Object.keys(REVIEW_FIELD_LABELS) as (keyof ReviewQuestionDraft)[];
 
 function reviewCacheKey(taskId: string): string {
   return `${REVIEW_CACHE_PREFIX}${taskId}`;
@@ -108,6 +165,63 @@ function clearReviewCache(taskId: string): void {
   }
 }
 
+function mergeMediaAssets(...groups: ImportMediaAsset[][]): ImportMediaAsset[] {
+  const merged = new Map<string, ImportMediaAsset>();
+  groups.flat().forEach((asset) => {
+    const key = asset.relative_path || asset.image_id || asset.filename;
+    if (key && !merged.has(key)) merged.set(key, asset);
+  });
+  return [...merged.values()];
+}
+
+function mediaAssetsFromDrafts(drafts: ReviewQuestionDraft[]): ImportMediaAsset[] {
+  return mergeMediaAssets(drafts.flatMap((draft) => draft.figures.map((figure) => ({
+    image_id: figure.fig_uuid,
+    filename: figure.local_path.split(/[\\/]/).pop() || figure.fig_uuid,
+    relative_path: figure.local_path,
+    absolute_path: '',
+    size: 0,
+  }))));
+}
+
+function mergeTaskMeta(
+  preferred: ReviewTaskMeta | null | undefined,
+  fallback: ReviewTaskMeta,
+  drafts: ReviewQuestionDraft[],
+): ReviewTaskMeta {
+  return {
+    batchId: preferred?.batchId || fallback.batchId,
+    warnings: Array.isArray(preferred?.warnings) ? preferred.warnings : fallback.warnings,
+    pageResults: Array.isArray(preferred?.pageResults) ? preferred.pageResults : fallback.pageResults,
+    mediaAssets: mergeMediaAssets(
+      preferred?.mediaAssets ?? [],
+      fallback.mediaAssets,
+      mediaAssetsFromDrafts(drafts),
+    ),
+  };
+}
+
+function readQualityConfig(): QuestionQualityRuleConfig {
+  try {
+    const raw = window.localStorage.getItem(REVIEW_QUALITY_CONFIG_KEY);
+    return raw ? JSON.parse(raw) as QuestionQualityRuleConfig : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeQualityConfig(config: QuestionQualityRuleConfig): void {
+  try {
+    window.localStorage.setItem(REVIEW_QUALITY_CONFIG_KEY, JSON.stringify(config));
+  } catch {
+    // Keep the in-memory configuration when browser storage is unavailable.
+  }
+}
+
+function appendTableTemplate(value: string): string {
+  return `${value.trimEnd()}${TABLE_TEMPLATE}`.trimStart();
+}
+
 function fileUrl(path?: string | null): string | null {
   const trimmed = String(path || '').trim();
   if (!trimmed) return null;
@@ -144,6 +258,10 @@ function normalizeOptions(options: unknown): Option[] {
 function normalizeDraft(raw: Record<string, unknown>, index: number): ReviewQuestionDraft {
   const title = normalizeShortInlineDisplayMath(String(raw.title ?? raw.stem ?? ''));
   const figures = Array.isArray(raw.figures) ? (raw.figures as Figure[]) : [];
+  const rawStatus = String(raw.status ?? raw.review_status ?? 'pending');
+  const status: ReviewQuestionDraft['status'] = ['pending', 'modified', 'confirmed', 'discarded'].includes(rawStatus)
+    ? rawStatus as ReviewQuestionDraft['status']
+    : 'pending';
   return {
     question_id: String(raw.question_id ?? `draft-${index + 1}`),
     question_type: String(raw.question_type || 'calculation'),
@@ -160,24 +278,87 @@ function normalizeDraft(raw: Record<string, unknown>, index: number): ReviewQues
     import_batch_id: raw.import_batch_id ? String(raw.import_batch_id) : undefined,
     source_page: raw.source_page !== null && raw.source_page !== undefined ? Number(raw.source_page) : null,
     source_region_id: raw.source_region_id ? String(raw.source_region_id) : null,
+    source_bbox: normalizeSourceBBox(raw.source_bbox),
     raw_text: raw.raw_text ? normalizeShortInlineDisplayMath(String(raw.raw_text)) : null,
-    status: 'pending',
+    status,
     figureIssues: computeFigureIssues(title, figures),
   };
+}
+
+function normalizeSourceBBox(value: unknown): [number, number, number, number] | null {
+  if (!Array.isArray(value) || value.length !== 4) return null;
+  const numbers = value.map(Number);
+  if (numbers.some((item) => !Number.isFinite(item))) return null;
+  return numbers as [number, number, number, number];
+}
+
+function normalizeKnowledgeDraft(raw: Record<string, unknown>, index: number): KnowledgeReviewDraft {
+  const draftId = String(raw.draft_id ?? raw.topic3_id ?? `knowledge-draft-${index + 1}`);
+  return {
+    draft_id: draftId,
+    topic3_id: String(raw.topic3_id ?? draftId),
+    topic3_name: String(raw.topic3_name ?? raw.title ?? raw.name ?? ''),
+    topic2_id: String(raw.topic2_id ?? ''),
+    topic2_name: String(raw.topic2_name ?? raw.module ?? ''),
+    topic1_id: String(raw.topic1_id ?? ''),
+    topic1_name: String(raw.topic1_name ?? ''),
+    source_chapter: String(raw.source_chapter ?? ''),
+    definition: normalizeShortInlineDisplayMath(String(raw.definition ?? raw.content ?? '')),
+    formula: normalizeShortInlineDisplayMath(String(raw.formula ?? '')),
+    key_summary: normalizeShortInlineDisplayMath(String(raw.key_summary ?? raw.summary ?? '')),
+    error_prone: normalizeShortInlineDisplayMath(String(raw.error_prone ?? raw.common_mistakes ?? '')),
+    example_analysis: normalizeShortInlineDisplayMath(String(raw.example_analysis ?? raw.example ?? '')),
+    tags: Array.isArray(raw.tags) ? raw.tags.map(String) : [],
+    raw_text: String(raw.raw_text ?? ''),
+    status: ['pending', 'modified', 'confirmed', 'discarded'].includes(String(raw.status))
+      ? (String(raw.status) as KnowledgeReviewDraft['status'])
+      : 'pending',
+  };
+}
+
+function getKnowledgeRisks(draft: KnowledgeReviewDraft): string[] {
+  return [
+    !draft.topic3_name.trim() ? '缺少知识点名称' : '',
+    !draft.topic3_id.trim() ? '缺少知识点 ID' : '',
+    !draft.definition.trim() ? '缺少标准定义或核心表述' : '',
+    !draft.topic2_name.trim() && !draft.topic2_id.trim() ? '缺少所属二级章节' : '',
+  ].filter(Boolean);
 }
 
 function cloneDraft(draft: ReviewQuestionDraft): ReviewQuestionDraft {
   return JSON.parse(JSON.stringify(draft)) as ReviewQuestionDraft;
 }
 
-function getRiskItems(draft: ReviewQuestionDraft): RiskItem[] {
-  const risks: RiskItem[] = [];
-  if (!draft.title.trim()) risks.push({ kind: 'empty_title', severity: 'danger', message: '题干为空' });
-  if (!draft.answer.trim()) risks.push({ kind: 'missing_answer', severity: 'warning', message: '缺少答案' });
-  if ((draft.question_type === 'single_choice' || draft.question_type === 'multi_choice') && draft.options.length === 0) risks.push({ kind: 'missing_options', severity: 'danger', message: '选择题缺少选项' });
-  if (!draft.knowledge_point.trim()) risks.push({ kind: 'missing_knowledge', severity: 'warning', message: '未标知识点' });
-  for (const issue of draft.figureIssues) risks.push({ kind: 'image_issue', severity: 'danger', message: issue.message });
-  return risks;
+function getRiskItems(draft: ReviewQuestionDraft, duplicateIds: ReadonlySet<string> = new Set(), config: QuestionQualityRuleConfig = {}): RiskItem[] {
+  return analyzeQuestionQuality(draft, {
+    questionId: draft.question_id,
+    duplicateIds,
+    requireKnowledge: true,
+    requireSource: true,
+    config,
+  }).map((issue) => ({
+    kind: issue.code,
+    severity: issue.severity === 'danger' ? 'danger' : 'warning',
+    message: issue.message,
+  }));
+}
+
+function getChangedReviewFields(original: ReviewQuestionDraft | null, draft: ReviewQuestionDraft | null): (keyof ReviewQuestionDraft)[] {
+  if (!original || !draft) return [];
+  return REVIEW_DIFF_FIELDS.filter((field) => JSON.stringify(original[field] ?? null) !== JSON.stringify(draft[field] ?? null));
+}
+
+function displayReviewValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '（空）';
+    if (value.every((item) => typeof item === 'string')) return value.join('、');
+    if (value.every((item) => typeof item === 'object' && item !== null && 'content' in item)) {
+      return value.map((item) => `${String((item as Option).opt || '')}. ${String((item as Option).content || '')}`).join('\n');
+    }
+    return value.map((item) => typeof item === 'object' && item !== null && 'fig_uuid' in item ? String((item as Figure).fig_uuid) : String(item)).join('、');
+  }
+  const text = String(value ?? '').trim();
+  return text || '（空）';
 }
 
 function applyAiPatch(text: string): Partial<ReviewQuestionDraft> {
@@ -203,10 +384,10 @@ function applyAiPatch(text: string): Partial<ReviewQuestionDraft> {
   return { analysis: normalizeShortInlineDisplayMath(text) };
 }
 
-function matchesQueue(draft: ReviewQuestionDraft, queue: QueueKey): boolean {
+function matchesQueue(draft: ReviewQuestionDraft, queue: QueueKey, duplicateIds: ReadonlySet<string> = new Set(), config: QuestionQualityRuleConfig = {}): boolean {
   if (queue === 'all') return true;
   if (queue === 'pending' || queue === 'modified' || queue === 'confirmed' || queue === 'discarded') return draft.status === queue;
-  const risks = getRiskItems(draft);
+  const risks = getRiskItems(draft, duplicateIds, config);
   if (queue === 'risk') return risks.length > 0;
   if (queue === 'missing_answer') return risks.some((risk) => risk.kind === 'missing_answer');
   if (queue === 'missing_options') return risks.some((risk) => risk.kind === 'missing_options');
@@ -218,11 +399,20 @@ export default function ReviewWorkbenchPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
   const originalsRef = useRef<Map<string, ReviewQuestionDraft>>(new Map());
+  const serverVersionRef = useRef(0);
+  const serverSavingRef = useRef(false);
+  const pendingServerSaveRef = useRef<ReviewDraftStatePayload | null>(null);
+  const serverAutosaveReadyRef = useRef(false);
+  const serverConflictRef = useRef(false);
 
   const [drafts, setDrafts] = useState<ReviewQuestionDraft[]>([]);
+  const [knowledgeDrafts, setKnowledgeDrafts] = useState<KnowledgeReviewDraft[]>([]);
   const [taskMeta, setTaskMeta] = useState<ReviewTaskMeta>({ warnings: [], pageResults: [], mediaAssets: [] });
   const [currentIndex, setCurrentIndex] = useState(0);
   const [queue, setQueue] = useState<QueueKey>('risk');
+  const [questionQuery, setQuestionQuery] = useState('');
+  const [workspaceView, setWorkspaceView] = useState<ReviewWorkspaceView>('edit');
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [aiProcessing, setAiProcessing] = useState(false);
@@ -230,74 +420,279 @@ export default function ReviewWorkbenchPage() {
   const [aiSuggestion, setAiSuggestion] = useState<Partial<ReviewQuestionDraft> | null>(null);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
+  const [, setCacheSavedAt] = useState<Date | null>(null);
+  const [serverDraftVersion, setServerDraftVersion] = useState(0);
+  const [serverDraftUpdatedAt, setServerDraftUpdatedAt] = useState<Date | null>(null);
+  const [serverDraftStatus, setServerDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'offline' | 'conflict'>('idle');
+  const [serverConflict, setServerConflict] = useState<ReviewDraftResponse | null>(null);
+  const [draftVersions, setDraftVersions] = useState<ReviewDraftResponse[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [qualityConfig, setQualityConfig] = useState<QuestionQualityRuleConfig>(() => readQualityConfig());
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveResult, setSaveResult] = useState<SaveReviewedQuestionsResponse | null>(null);
+  const [knowledgeSaveResult, setKnowledgeSaveResult] = useState<SaveReviewedKnowledgeResponse | null>(null);
+  const [reviewTasks, setReviewTasks] = useState<ReviewTaskListItem[]>([]);
+  const [reviewTasksLoading, setReviewTasksLoading] = useState(false);
+  const [reviewTasksError, setReviewTasksError] = useState<string | null>(null);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [imageUploading, setImageUploading] = useState(false);
+  const [imagePickerOpen, setImagePickerOpen] = useState(false);
+  const [figureInsertRequest, setFigureInsertRequest] = useState<FigureInsertRequest | null>(null);
+
+  const loadReviewTasks = useCallback(async () => {
+    setReviewTasksLoading(true);
+    setReviewTasksError(null);
+    try {
+      const result = await fetchReviewTasks();
+      setReviewTasks(result.items || []);
+    } catch (err) {
+      setReviewTasksError(err instanceof Error ? err.message : '加载审核任务失败');
+    } finally {
+      setReviewTasksLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (taskId) return;
+    void loadReviewTasks();
+  }, [loadReviewTasks, taskId]);
+
+  const handleDeleteReviewTask = useCallback(async (id: string) => {
+    const confirmed = window.confirm('删除这个审核任务？只会移出校对中心队列，不会删除正式题库或知识点库。');
+    if (!confirmed) return;
+    setDeletingTaskId(id);
+    setReviewTasksError(null);
+    try {
+      await deleteReviewTask(id);
+      setReviewTasks((prev) => prev.filter((task) => task.task_id !== id));
+      clearReviewCache(id);
+    } catch (err) {
+      setReviewTasksError(err instanceof Error ? err.message : '删除审核任务失败');
+    } finally {
+      setDeletingTaskId(null);
+    }
+  }, []);
 
   useEffect(() => {
     if (!taskId) return;
     setLoading(true);
     setError(null);
-    fetchImportTask(taskId)
-      .then((task: ImportPipelineTaskResponse) => {
+    serverAutosaveReadyRef.current = false;
+    serverConflictRef.current = false;
+    pendingServerSaveRef.current = null;
+    Promise.all([
+      fetchImportTask(taskId),
+      fetchReviewDraft(taskId).catch(() => ({ draft: null, unavailable: true })),
+    ])
+      .then(async ([task, draftLookup]: [ImportPipelineTaskResponse, { draft: ReviewDraftResponse | null; unavailable?: boolean }]) => {
         const result = task.result ?? {};
         const questions = Array.isArray(result.questions) ? result.questions as Record<string, unknown>[] : [];
         const parsed = questions.map((raw, index) => normalizeDraft(raw, index));
+        const knowledgeItems = Array.isArray(result.knowledge_drafts) ? result.knowledge_drafts as Record<string, unknown>[] : [];
+        const parsedKnowledge = knowledgeItems.map((raw, index) => normalizeKnowledgeDraft(raw, index));
+        const batchId = String(result.batch_id || task.input_summary?.batch_id || '');
+        const resultMediaAssets = Array.isArray(result.media_assets) ? result.media_assets as ImportMediaAsset[] : [];
+        const batchMediaAssets = batchId ? await fetchBatchImages(batchId).catch(() => []) : [];
         const meta = {
+          batchId,
           warnings: Array.isArray(result.warnings) ? result.warnings.map(String) : [],
           pageResults: Array.isArray(result.page_results) ? result.page_results as PageResult[] : [],
-          mediaAssets: Array.isArray(result.media_assets) ? result.media_assets as ImportMediaAsset[] : [],
+          mediaAssets: mergeMediaAssets(resultMediaAssets, batchMediaAssets, mediaAssetsFromDrafts(parsed)),
         };
         const cached = readReviewCache(taskId);
+        const serverDraft = draftLookup.draft;
+        const cachedIsNewer = Boolean(cached && (!serverDraft || Date.parse(cached.savedAt) > Date.parse(serverDraft.updated_at)));
         originalsRef.current = new Map(parsed.map((draft) => [draft.question_id, cloneDraft(draft)]));
-        if (cached?.drafts.length) {
+        serverVersionRef.current = serverDraft?.version ?? 0;
+        setServerDraftVersion(serverDraft?.version ?? 0);
+        setServerDraftUpdatedAt(serverDraft ? new Date(serverDraft.updated_at) : null);
+        setServerDraftStatus(draftLookup.unavailable ? 'offline' : serverDraft ? 'saved' : 'idle');
+        if (cached?.drafts.length && cachedIsNewer) {
           const restored = cached.drafts.map((draft, index) => normalizeDraft(draft as unknown as Record<string, unknown>, index));
           setDrafts(restored);
-          setTaskMeta(cached.taskMeta ?? meta);
+          setKnowledgeDrafts(cached.knowledgeDrafts ?? parsedKnowledge);
+          setTaskMeta(mergeTaskMeta(cached.taskMeta, meta, restored));
           setCurrentIndex(Math.min(cached.currentIndex ?? 0, Math.max(restored.length - 1, 0)));
           setQueue(cached.queue ?? 'risk');
-          setCacheMessage(`已恢复 ${new Date(cached.savedAt).toLocaleString()} 的本地校对缓存`);
+          setCacheMessage(`已恢复 ${new Date(cached.savedAt).toLocaleString()} 的较新本地草稿`);
+        } else if (serverDraft?.state.drafts.length) {
+          const restored = serverDraft.state.drafts.map((draft, index) => normalizeDraft(draft as unknown as Record<string, unknown>, index));
+          setDrafts(restored);
+          setKnowledgeDrafts((serverDraft.state.knowledge_drafts ?? []).map((draft, index) => normalizeKnowledgeDraft(draft as unknown as Record<string, unknown>, index)));
+          setTaskMeta(mergeTaskMeta(serverDraft.state.task_meta as unknown as ReviewTaskMeta, meta, restored));
+          setCurrentIndex(Math.min(serverDraft.state.current_index ?? 0, Math.max(restored.length - 1, 0)));
+          setQueue((serverDraft.state.queue as QueueKey) ?? 'risk');
+          setCacheMessage(`已恢复服务器草稿 v${serverDraft.version}`);
         } else {
           setDrafts(parsed);
-          setTaskMeta(meta);
+          setKnowledgeDrafts(parsedKnowledge);
+          setTaskMeta(mergeTaskMeta(null, meta, parsed));
           setCurrentIndex(0);
           setCacheMessage(null);
         }
       })
       .catch((err: unknown) => setError(err instanceof Error ? err.message : '加载校对任务失败'))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        setLoading(false);
+        window.setTimeout(() => { serverAutosaveReadyRef.current = true; }, 0);
+      });
   }, [taskId]);
 
   const currentDraft = drafts[currentIndex] ?? null;
+  const currentOriginal = currentDraft ? originalsRef.current.get(currentDraft.question_id) ?? null : null;
   const currentPage = useMemo(() => {
     if (!currentDraft?.source_page) return null;
     return taskMeta.pageResults.find((page) => page.page_no === currentDraft.source_page) ?? null;
   }, [currentDraft, taskMeta.pageResults]);
   const failedPages = useMemo(() => taskMeta.pageResults.filter((page) => page.status === 'failed'), [taskMeta.pageResults]);
+  const duplicateQuestionIds = useMemo(() => findDuplicateQuestionIds(drafts, (draft) => draft.question_id), [drafts]);
+
+  useEffect(() => writeQualityConfig(qualityConfig), [qualityConfig]);
 
   const counts = useMemo(() => ({
     total: drafts.length,
-    risk: drafts.filter((draft) => getRiskItems(draft).length > 0).length,
-    missingAnswer: drafts.filter((draft) => getRiskItems(draft).some((risk) => risk.kind === 'missing_answer')).length,
-    missingOptions: drafts.filter((draft) => getRiskItems(draft).some((risk) => risk.kind === 'missing_options')).length,
-    imageIssue: drafts.filter((draft) => getRiskItems(draft).some((risk) => risk.kind === 'image_issue')).length,
+    risk: drafts.filter((draft) => getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0).length,
+    missingAnswer: drafts.filter((draft) => getRiskItems(draft, duplicateQuestionIds, qualityConfig).some((risk) => risk.kind === 'missing_answer')).length,
+    missingOptions: drafts.filter((draft) => getRiskItems(draft, duplicateQuestionIds, qualityConfig).some((risk) => risk.kind === 'missing_options')).length,
+    imageIssue: drafts.filter((draft) => getRiskItems(draft, duplicateQuestionIds, qualityConfig).some((risk) => risk.kind === 'image_issue')).length,
     failedPage: failedPages.length,
     pending: drafts.filter((draft) => draft.status === 'pending').length,
     modified: drafts.filter((draft) => draft.status === 'modified').length,
     confirmed: drafts.filter((draft) => draft.status === 'confirmed').length,
     discarded: drafts.filter((draft) => draft.status === 'discarded').length,
-  }), [drafts, failedPages.length]);
+  }), [drafts, duplicateQuestionIds, failedPages.length, qualityConfig]);
 
-  const filteredDrafts = useMemo(() => drafts.map((draft, index) => ({ draft, index })).filter(({ draft }) => matchesQueue(draft, queue)), [drafts, queue]);
+  const filteredDrafts = useMemo(() => {
+    const failedPageNumbers = new Set(failedPages.map((page) => page.page_no).filter((page): page is number => typeof page === 'number'));
+    const keyword = questionQuery.trim().toLowerCase();
+    return drafts
+      .map((draft, index) => ({ draft, index }))
+      .filter(({ draft, index }) => {
+        const matchesSelectedQueue = queue === 'ai_failed_page'
+          ? typeof draft.source_page === 'number' && failedPageNumbers.has(draft.source_page)
+          : matchesQueue(draft, queue, duplicateQuestionIds, qualityConfig);
+        if (!matchesSelectedQueue) return false;
+        if (!keyword) return true;
+        return [String(index + 1), draft.title, draft.answer, draft.knowledge_point, draft.tags.join(' ')]
+          .join(' ')
+          .toLowerCase()
+          .includes(keyword);
+      });
+  }, [drafts, duplicateQuestionIds, failedPages, qualityConfig, questionQuery, queue]);
 
   useEffect(() => {
     if (!taskId || loading || drafts.length === 0) return;
+    setCacheMessage('正在保存本地草稿...');
     const timer = window.setTimeout(() => {
-      writeReviewCache(taskId, { drafts, taskMeta, currentIndex, queue });
-      setCacheMessage('本地校对缓存已自动保存');
+      writeReviewCache(taskId, { drafts, knowledgeDrafts, taskMeta, currentIndex, queue });
+      const savedAt = new Date();
+      setCacheSavedAt(savedAt);
+      setCacheMessage(`已自动保存 ${savedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [currentIndex, drafts, loading, queue, taskId, taskMeta]);
+  }, [currentIndex, drafts, knowledgeDrafts, loading, queue, taskId, taskMeta]);
+
+  const flushServerDraft = useCallback(async () => {
+    if (!taskId || serverSavingRef.current || serverConflictRef.current) return;
+    const state = pendingServerSaveRef.current;
+    if (!state) return;
+    pendingServerSaveRef.current = null;
+    serverSavingRef.current = true;
+    setServerDraftStatus('saving');
+    try {
+      const saved = await saveReviewDraft(taskId, { base_version: serverVersionRef.current, state });
+      serverVersionRef.current = saved.version;
+      setServerDraftVersion(saved.version);
+      setServerDraftUpdatedAt(new Date(saved.updated_at));
+      setServerDraftStatus('saved');
+    } catch (err) {
+      if (err instanceof ReviewDraftConflictError) {
+        serverConflictRef.current = true;
+        setServerConflict(err.current);
+        setServerDraftStatus('conflict');
+      } else {
+        pendingServerSaveRef.current = state;
+        setServerDraftStatus('offline');
+      }
+    } finally {
+      serverSavingRef.current = false;
+      if (pendingServerSaveRef.current && !serverConflictRef.current) {
+        window.setTimeout(() => void flushServerDraft(), 0);
+      }
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    if (!taskId || loading || drafts.length === 0 || !serverAutosaveReadyRef.current || serverConflictRef.current) return;
+    pendingServerSaveRef.current = {
+      drafts,
+      knowledge_drafts: knowledgeDrafts,
+      task_meta: taskMeta as unknown as Record<string, unknown>,
+      current_index: currentIndex,
+      queue,
+    };
+    const timer = window.setTimeout(() => void flushServerDraft(), 1400);
+    return () => window.clearTimeout(timer);
+  }, [currentIndex, drafts, flushServerDraft, knowledgeDrafts, loading, queue, taskId, taskMeta]);
+
+  const applyServerSnapshot = useCallback((snapshot: ReviewDraftResponse, message: string) => {
+    const restored = snapshot.state.drafts.map((draft, index) => normalizeDraft(draft as unknown as Record<string, unknown>, index));
+    serverAutosaveReadyRef.current = false;
+    serverConflictRef.current = false;
+    pendingServerSaveRef.current = null;
+    serverVersionRef.current = snapshot.version;
+    setDrafts(restored);
+    setKnowledgeDrafts((snapshot.state.knowledge_drafts ?? []).map((draft, index) => normalizeKnowledgeDraft(draft as unknown as Record<string, unknown>, index)));
+    setTaskMeta((current) => mergeTaskMeta(snapshot.state.task_meta as unknown as ReviewTaskMeta, current, restored));
+    setCurrentIndex(Math.min(snapshot.state.current_index ?? 0, Math.max(restored.length - 1, 0)));
+    setQueue((snapshot.state.queue as QueueKey) ?? 'risk');
+    setServerDraftVersion(snapshot.version);
+    setServerDraftUpdatedAt(new Date(snapshot.updated_at));
+    setServerDraftStatus('saved');
+    setServerConflict(null);
+    setCacheMessage(message);
+    window.setTimeout(() => { serverAutosaveReadyRef.current = true; }, 0);
+  }, []);
+
+  const handleLoadServerConflict = useCallback(() => {
+    if (!serverConflict) return;
+    applyServerSnapshot(serverConflict, `已加载服务器草稿 v${serverConflict.version}，本页未保存修改仍保留在本地缓存中`);
+  }, [applyServerSnapshot, serverConflict]);
+
+  const handleToggleHistory = useCallback(async () => {
+    if (!taskId) return;
+    const willOpen = !historyOpen;
+    setHistoryOpen(willOpen);
+    if (!willOpen) return;
+    setHistoryLoading(true);
+    try {
+      const result = await fetchReviewDraftVersions(taskId, 12);
+      setDraftVersions(result.items);
+    } catch (err) {
+      setCacheMessage(`读取历史版本失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [historyOpen, taskId]);
+
+  const handleRestoreVersion = useCallback(async (version: number) => {
+    if (!taskId || version === serverVersionRef.current) return;
+    const confirmed = window.confirm(`恢复到服务器草稿 v${version}？当前版本仍会保留在历史记录中。`);
+    if (!confirmed) return;
+    setHistoryLoading(true);
+    try {
+      const restored = await restoreReviewDraftVersion(taskId, version, serverVersionRef.current);
+      applyServerSnapshot(restored, `已恢复历史草稿 v${version}，并生成新版本 v${restored.version}`);
+      const result = await fetchReviewDraftVersions(taskId, 12);
+      setDraftVersions(result.items);
+    } catch (err) {
+      setCacheMessage(`恢复历史版本失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [applyServerSnapshot, taskId]);
 
   const updateDraftAt = useCallback((index: number, patch: Partial<ReviewQuestionDraft>) => {
     setDrafts((prev) => {
@@ -324,26 +719,35 @@ export default function ReviewWorkbenchPage() {
     setDrafts((prev) => prev.map((draft, index) => index === currentIndex ? { ...draft, status } : draft));
   }, [currentIndex]);
 
+  const goPrevious = useCallback(() => setCurrentIndex((prev) => Math.max(0, prev - 1)), []);
   const goNext = useCallback(() => setCurrentIndex((prev) => Math.min(drafts.length - 1, prev + 1)), [drafts.length]);
   const goNextRisk = useCallback(() => {
-    const next = drafts.findIndex((draft, index) => index > currentIndex && draft.status !== 'discarded' && getRiskItems(draft).length > 0);
+    const next = drafts.findIndex((draft, index) => index > currentIndex && draft.status !== 'discarded' && getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0);
     if (next >= 0) return setCurrentIndex(next);
-    const first = drafts.findIndex((draft) => draft.status !== 'discarded' && getRiskItems(draft).length > 0);
+    const first = drafts.findIndex((draft) => draft.status !== 'discarded' && getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0);
     if (first >= 0) setCurrentIndex(first);
-  }, [currentIndex, drafts]);
+  }, [currentIndex, drafts, duplicateQuestionIds, qualityConfig]);
 
   const confirmAndNext = useCallback(() => {
+    if (!currentDraft) return;
+    const blockingRisks = getRiskItems(currentDraft, duplicateQuestionIds, qualityConfig).filter((risk) => risk.severity === 'danger');
+    if (blockingRisks.length > 0) {
+      const shouldContinue = window.confirm(`当前题仍有关键问题：\n${blockingRisks.map((risk) => `• ${risk.message}`).join('\n')}\n\n仍要确认这道题吗？`);
+      if (!shouldContinue) return;
+    }
     updateStatus('confirmed');
-    const nextRisk = drafts.findIndex((draft, index) => index > currentIndex && draft.status !== 'discarded' && getRiskItems(draft).length > 0);
+    const nextRisk = drafts.findIndex((draft, index) => index > currentIndex && draft.status !== 'discarded' && getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0);
     if (nextRisk >= 0) setCurrentIndex(nextRisk);
     else goNext();
-  }, [currentIndex, drafts, goNext, updateStatus]);
+  }, [currentDraft, currentIndex, drafts, duplicateQuestionIds, goNext, qualityConfig, updateStatus]);
 
   const restoreCurrent = useCallback(() => {
     if (!currentDraft) return;
     const original = originalsRef.current.get(currentDraft.question_id);
-    if (original) updateDraftAt(currentIndex, cloneDraft(original));
-  }, [currentDraft, currentIndex, updateDraftAt]);
+    if (!original) return;
+    setDrafts((prev) => prev.map((draft, index) => index === currentIndex ? cloneDraft(original) : draft));
+    setAiSuggestion(null);
+  }, [currentDraft, currentIndex]);
 
   const copyText = useCallback(async (text: string, message: string) => {
     await navigator.clipboard.writeText(text);
@@ -371,16 +775,43 @@ export default function ReviewWorkbenchPage() {
 
   const attachAssetToCurrent = useCallback((asset: ImportMediaAsset) => {
     if (!currentDraft) return;
-    const uuid = asset.image_id || asset.filename || asset.relative_path;
-    const reference = `![fig:${uuid}]`;
-    const figures = currentDraft.figures.some((figure) => figure.fig_uuid === uuid)
-      ? currentDraft.figures
-      : [...currentDraft.figures, { fig_uuid: uuid, local_path: asset.relative_path }];
-    const title = currentDraft.title.includes(reference) ? currentDraft.title : `${currentDraft.title.trimEnd()}\n${reference}`.trimStart();
-    updateDraftAt(currentIndex, { figures, title });
-    setCopyMessage(`已插入 ${reference}`);
+    const uuid = `fig_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    const figure = { fig_uuid: uuid, local_path: asset.relative_path, display_scale: 60, display_align: 'center' as const };
+    const figures = [...currentDraft.figures, figure];
+    updateDraftAt(currentIndex, { figures });
+    setFigureInsertRequest({ requestId: Date.now(), figure });
+    setImagePickerOpen(false);
+    setCopyMessage(`已插入图片 ${uuid}`);
     window.setTimeout(() => setCopyMessage(null), 1800);
   }, [currentDraft, currentIndex, updateDraftAt]);
+
+  const handleUploadImageToCurrent = useCallback(async (file: File) => {
+    if (!currentDraft) return;
+    const batchId = taskMeta.batchId?.trim();
+    if (!batchId) {
+      setCopyMessage('当前任务没有可用图片缓存目录');
+      window.setTimeout(() => setCopyMessage(null), 1800);
+      return;
+    }
+    setImageUploading(true);
+    setCopyMessage('正在上传图片...');
+    try {
+      const asset = await uploadBatchImage(batchId, file);
+      setTaskMeta((prev) => ({ ...prev, mediaAssets: [...prev.mediaAssets, asset] }));
+      const uuid = `fig_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+      const figure = { fig_uuid: uuid, local_path: asset.relative_path, display_scale: 60, display_align: 'center' as const };
+      const figures = [...currentDraft.figures, figure];
+      updateDraftAt(currentIndex, { figures });
+      setFigureInsertRequest({ requestId: Date.now(), figure });
+      setImagePickerOpen(false);
+      setCopyMessage(`已上传并插入图片 ${uuid}`);
+    } catch (err) {
+      setCopyMessage(`上传失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setImageUploading(false);
+      window.setTimeout(() => setCopyMessage(null), 2200);
+    }
+  }, [currentDraft, currentIndex, taskMeta.batchId, updateDraftAt]);
 
   const handleSingleAiSuggestion = useCallback(async () => {
     if (!currentDraft) return;
@@ -482,8 +913,12 @@ export default function ReviewWorkbenchPage() {
       const result = await saveReviewedQuestions({ task_id: taskId ?? 'review', questions });
       setSaveResult(result);
       if (taskId) {
+        await deleteReviewDraft(taskId);
         clearReviewCache(taskId);
-        setCacheMessage('已保存入库，本地校对缓存已清除');
+        serverVersionRef.current = 0;
+        setServerDraftVersion(0);
+        setServerDraftStatus('idle');
+        setCacheMessage('已保存入库，本地与服务器校对草稿已清除');
       }
     } catch (err) {
       setSaveError(`保存失败：${err instanceof Error ? err.message : '未知错误'}`);
@@ -492,123 +927,311 @@ export default function ReviewWorkbenchPage() {
     }
   }, [drafts, taskId]);
 
+  const handleSubmitReview = useCallback(async () => {
+    const unfinished = counts.pending + counts.modified;
+    if (unfinished > 0) {
+      const confirmed = window.confirm(`还有 ${unfinished} 道题尚未确认。本次只提交已确认的 ${counts.confirmed} 道题，是否继续？`);
+      if (!confirmed) return;
+    }
+    await handleSave();
+  }, [counts.confirmed, counts.modified, counts.pending, handleSave]);
+
+  const handleFastLatexCleanup = useCallback(async () => {
+    if (!taskId) return;
+    setAiProcessing(true);
+    setAiMessage('正在快速清洗 LaTeX，不调用 Claude Code...');
+    try {
+      const result = await fastCleanReviewLatex({ task_id: taskId, dry_run: false });
+      setAiMessage(
+        `快速清洗完成：影响 ${result.changed_questions} 题，替换 ${result.replacement_count} 处，用时 ${result.elapsed_ms}ms。正在刷新任务...`,
+      );
+      const task = await fetchImportTask(taskId);
+      const taskResult = task.result ?? {};
+      const questions = Array.isArray(taskResult.questions) ? taskResult.questions as Record<string, unknown>[] : [];
+      const parsed = questions.map((raw, index) => normalizeDraft(raw, index));
+      originalsRef.current = new Map(parsed.map((draft) => [draft.question_id, cloneDraft(draft)]));
+      setDrafts(parsed);
+      clearReviewCache(taskId);
+      setCacheMessage('已刷新快速清洗后的审核草稿，本地旧缓存已清除');
+    } catch (err) {
+      setAiMessage(`快速清洗失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setAiProcessing(false);
+    }
+  }, [taskId]);
+
+  const updateKnowledgeDraft = useCallback((index: number, patch: Partial<KnowledgeReviewDraft>) => {
+    setKnowledgeDrafts((prev) => {
+      const next = [...prev];
+      const updated = { ...next[index], ...patch };
+      if (updated.status === 'pending') updated.status = 'modified';
+      next[index] = updated;
+      return next;
+    });
+  }, []);
+
+  const setKnowledgeStatus = useCallback((index: number, status: KnowledgeReviewDraft['status']) => {
+    setKnowledgeDrafts((prev) => prev.map((draft, draftIndex) => draftIndex === index ? { ...draft, status } : draft));
+  }, []);
+
+  const handleSaveKnowledge = useCallback(async () => {
+    const confirmed = knowledgeDrafts.filter((draft) => draft.status === 'confirmed');
+    if (confirmed.length === 0) {
+      setSaveError('没有已确认知识点。请先确认至少一个知识点，再保存入库。');
+      return;
+    }
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const result = await saveReviewedKnowledge({
+        task_id: taskId ?? 'review',
+        knowledge_drafts: confirmed.map((draft) => ({ ...draft, review_status: draft.status })),
+      });
+      setKnowledgeSaveResult(result);
+    } catch (err) {
+      setSaveError(`保存知识点失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setSaving(false);
+    }
+  }, [knowledgeDrafts, taskId]);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
-      if (event.key === 'Enter') confirmAndNext();
+      const target = event.target;
+      const isEditing = target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || (target instanceof HTMLElement && target.isContentEditable);
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+        event.preventDefault();
+        confirmAndNext();
+        return;
+      }
+      if (isEditing) return;
       if (event.key.toLowerCase() === 'r') goNextRisk();
-      if (event.key === 'ArrowDown') goNext();
+      if (event.key === 'ArrowLeft') goPrevious();
+      if (event.key === 'ArrowRight') goNext();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [confirmAndNext, goNext, goNextRisk]);
+  }, [confirmAndNext, goNext, goNextRisk, goPrevious]);
 
-  if (!taskId) return <CenteredState title="校对中心" desc="请先在“导入识别”中完成一个导入任务，再从任务结果进入校对。" action="去导入识别" onAction={() => navigate('/import')} />;
+  if (!taskId) {
+    return (
+      <ReviewTaskQueuePage
+        tasks={reviewTasks}
+        loading={reviewTasksLoading}
+        error={reviewTasksError}
+        openTask={(id) => navigate(`/review/${encodeURIComponent(id)}`)}
+        deleteTask={(id) => void handleDeleteReviewTask(id)}
+        deletingTaskId={deletingTaskId}
+        goImport={() => navigate('/import')}
+      />
+    );
+  }
   if (loading) return <CenteredState title="正在加载校对任务" desc="正在读取导入结果和图片缓存。" />;
   if (error) return <CenteredState title={error} desc={`任务 ID：${taskId}`} action="返回导入识别" onAction={() => navigate('/import')} />;
+  if (knowledgeDrafts.length > 0 && drafts.length === 0) {
+    return (
+      <KnowledgeReviewWorkbench
+        drafts={knowledgeDrafts}
+        saving={saving}
+        saveError={saveError}
+        saveResult={knowledgeSaveResult}
+        updateDraft={updateKnowledgeDraft}
+        setStatus={setKnowledgeStatus}
+        save={handleSaveKnowledge}
+        back={() => navigate('/review')}
+      />
+    );
+  }
   if (drafts.length === 0) return <CenteredState title="暂无可校对数据" desc="该任务没有解析出题目，请先完成导入识别。" action="返回导入识别" onAction={() => navigate('/import')} />;
 
-  const risks = currentDraft ? getRiskItems(currentDraft) : [];
+  const risks = currentDraft ? getRiskItems(currentDraft, duplicateQuestionIds, qualityConfig) : [];
 
   return (
-    <main className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)]">
-      <header className="sticky top-0 z-20 border-b border-[var(--color-border)] bg-[var(--color-bg-card)]/95 px-6 py-3 backdrop-blur">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <button className={SOFT_BUTTON_CLASS} onClick={() => navigate('/import')}>返回导入</button>
-            <div>
-              <h1 className="text-lg font-bold">校对中心</h1>
-              <p className="text-xs text-[var(--color-text-muted)]">编辑、预览、图片缓存和原文对照在同一个工作台内完成。</p>
-            </div>
+    <main className="flex h-full min-h-0 flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
+      <header className="z-20 shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-card)] px-4 py-2">
+        <div className="flex min-w-0 items-center gap-3">
+          <button type="button" className={SOFT_BUTTON_CLASS} aria-label="返回任务列表" title="返回任务列表" onClick={() => navigate('/review')}><ChevronLeft size={14} className="sm:mr-1 sm:inline" /><span className="hidden sm:inline">任务列表</span></button>
+          <div className="min-w-0">
+            <h1 className="truncate text-base font-bold">题目校对</h1>
+            <div className="text-[11px] text-[var(--color-text-muted)]">第 {currentIndex + 1} 题 · 已处理 {counts.confirmed + counts.discarded}/{counts.total}</div>
           </div>
-          <div className="flex flex-wrap gap-2 text-xs">
-            <Stat label="总题数" value={counts.total} />
-            <Stat label="高风险" value={counts.risk} tone="danger" />
-            <Stat label="失败页" value={counts.failedPage} />
-            <Stat label="已确认" value={counts.confirmed} tone="success" />
+          <div className="hidden h-1.5 min-w-24 flex-1 overflow-hidden rounded-full bg-[var(--color-bg-hover)] sm:block">
+            <div className="h-full rounded-full bg-[var(--color-success)] transition-all" style={{ width: `${counts.total ? ((counts.confirmed + counts.discarded) / counts.total) * 100 : 0}%` }} />
           </div>
+          <span className="hidden text-xs font-semibold text-[var(--color-danger)] md:inline">风险 {counts.risk}</span>
+          <span className="hidden text-xs font-semibold text-[var(--color-success)] md:inline">已确认 {counts.confirmed}</span>
+          <span
+            title={serverDraftUpdatedAt?.toLocaleString()}
+            className={`hidden items-center gap-1 text-[11px] lg:inline-flex ${serverDraftStatus === 'conflict' ? 'text-[var(--color-danger)]' : serverDraftStatus === 'offline' ? 'text-[var(--color-orange)]' : 'text-[var(--color-success)]'}`}
+          >
+            <Cloud size={12} />
+            {serverDraftStatus === 'saving' && '保存中'}
+            {serverDraftStatus === 'conflict' && '版本冲突'}
+            {serverDraftStatus === 'offline' && '离线草稿'}
+            {(serverDraftStatus === 'saved' || serverDraftStatus === 'idle') && '已自动保存'}
+          </span>
+          <div className="relative">
+            <button type="button" className={SOFT_BUTTON_CLASS} aria-label="历史版本" title="历史版本" onClick={() => void handleToggleHistory()}><History size={15} /></button>
+            {historyOpen && (
+              <div className="absolute right-0 top-10 z-40 w-72 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-2 shadow-xl">
+                <div className="mb-2 px-1 text-xs font-bold">服务器草稿历史</div>
+                {historyLoading && <div className="px-2 py-3 text-xs text-[var(--color-text-muted)]">正在读取...</div>}
+                {!historyLoading && draftVersions.length === 0 && <div className="px-2 py-3 text-xs text-[var(--color-text-muted)]">暂无历史版本</div>}
+                {!historyLoading && draftVersions.map((item) => (
+                  <button type="button" key={item.version} className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-xs hover:bg-[var(--color-bg-hover)] disabled:opacity-50" disabled={item.version === serverDraftVersion} onClick={() => void handleRestoreVersion(item.version)}>
+                    <span className="font-semibold">v{item.version}{item.version === serverDraftVersion ? '（当前）' : ''}</span>
+                    <span className="text-[var(--color-text-muted)]">{new Date(item.updated_at).toLocaleString()} · {item.state.drafts.length} 题</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button type="button" className={`${PRIMARY_BUTTON_CLASS} inline-flex items-center gap-1.5`} onClick={() => void handleSubmitReview()} disabled={saving || counts.confirmed === 0} title={counts.confirmed === 0 ? '请先确认至少一道题' : `提交 ${counts.confirmed} 道已确认题目`}>
+            <Send size={14} />{saving ? '提交中...' : `提交（${counts.confirmed}）`}
+          </button>
         </div>
+        {serverDraftStatus === 'conflict' && (
+          <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-[var(--color-danger)] pt-2 text-xs text-[var(--color-danger)]">
+            <TriangleAlert size={14} />
+            <span className="font-semibold">另一页面已经保存了更新版本。为避免覆盖，当前页面已暂停服务器自动保存。</span>
+            {serverConflict && <button type="button" className="ml-auto rounded-md bg-white px-3 py-1.5 font-bold shadow-sm" onClick={handleLoadServerConflict}>加载服务器 v{serverConflict.version}</button>}
+          </div>
+        )}
+        {(saveError || saveResult) && (
+          <div className={`mt-2 rounded-md border px-3 py-2 text-xs ${saveError ? 'border-[var(--color-danger)] bg-[var(--color-danger-soft)] text-[var(--color-danger)]' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+            {saveError || `提交完成：已入库 ${saveResult?.saved_count || 0} 题，跳过 ${saveResult?.skipped_count || 0} 题，失败 ${saveResult?.failed_count || 0} 题。`}
+          </div>
+        )}
       </header>
 
-      <section className="grid h-[calc(100vh-73px)] grid-cols-[360px_minmax(760px,1fr)_300px] overflow-hidden">
-        <aside className="border-r border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
+      <section className={`relative grid min-h-0 flex-1 overflow-hidden ${toolsOpen ? 'lg:grid-cols-[220px_minmax(0,1fr)_300px]' : 'lg:grid-cols-[220px_minmax(0,1fr)]'}`}>
+        <aside className="hidden min-h-0 border-r border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 lg:block">
           <QueueTabs queue={queue} setQueue={setQueue} counts={counts} />
-          <div className="mt-4 h-[calc(100vh-250px)] space-y-2 overflow-y-auto pr-1">
+          <label className="mt-2 flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2">
+            <Search size={14} className="text-[var(--color-text-muted)]" />
+            <input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="搜索题干、知识点或答案" className="min-w-0 flex-1 border-none bg-transparent text-xs text-[var(--color-text)] outline-none" />
+          </label>
+          <div className="mt-2 h-[calc(100%-82px)] space-y-1.5 overflow-y-auto pr-1">
             {filteredDrafts.map(({ draft, index }) => (
               <button
+                type="button"
                 key={draft.question_id}
                 onClick={() => setCurrentIndex(index)}
-                className={`w-full rounded-lg border p-3 text-left ${index === currentIndex ? 'border-[var(--color-accent)] bg-[#eef5ff]' : 'border-[var(--color-border)] bg-[var(--color-bg)]'}`}
+                className={`w-full rounded-md border px-2.5 py-2 text-left ${index === currentIndex ? 'border-[var(--color-accent)] bg-[var(--color-accent-light)]' : 'border-[var(--color-border)] bg-[var(--color-bg)] hover:border-[var(--color-border-strong)]'}`}
               >
                 <div className="flex items-center justify-between gap-2 text-sm">
                   <span className="font-bold text-[var(--color-accent)]">{index + 1}</span>
-                  <span className="rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-xs">{TYPE_LABELS[draft.question_type] ?? draft.question_type}</span>
+                  <span className="text-[11px] text-[var(--color-text-muted)]">{TYPE_LABELS[draft.question_type] ?? draft.question_type}</span>
                   {draft.figures.length > 0 && <span className="text-xs text-[var(--color-text-muted)]">图 {draft.figures.length}</span>}
                   <span className="ml-auto text-xs text-[var(--color-text-muted)]">{statusLabel(draft.status)}</span>
                 </div>
-                <div className="mt-2 line-clamp-2 text-xs leading-5 text-[var(--color-text-secondary)]">{draft.title || '无题干'}</div>
-                {getRiskItems(draft).slice(0, 2).map((risk) => <div key={risk.kind} className="mt-1 text-xs font-semibold text-[var(--color-danger)]">{risk.message}</div>)}
+                <div className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--color-text-secondary)]">{draft.title || '无题干'}</div>
+                {getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0 ? (
+                  <div className="mt-1 truncate text-[10px] font-semibold text-[var(--color-danger)]"><TriangleAlert size={10} className="mr-1 inline" />{getRiskItems(draft, duplicateQuestionIds, qualityConfig)[0]?.message}</div>
+                ) : <div className="mt-1 inline-flex items-center gap-1 text-[10px] font-semibold text-[var(--color-success)]"><CheckCircle2 size={11} />结构完整</div>}
               </button>
             ))}
+            {filteredDrafts.length === 0 && <div className="rounded-lg border border-dashed border-[var(--color-border)] p-6 text-center text-xs text-[var(--color-text-muted)]">当前筛选下没有题目</div>}
           </div>
         </aside>
 
-        <section className="overflow-y-auto p-6">
-          {risks.length > 0 && (
-            <div className="mb-4 rounded-lg border border-[var(--color-danger)] bg-[#fff0f0] p-4 text-sm text-[var(--color-danger)]">
-              <div className="font-bold">需要优先检查</div>
-              <div>{risks.map((risk) => risk.message).join('、')}</div>
+        <section className="min-w-0 overflow-y-auto bg-[var(--color-bg)] p-3">
+          <div className="sticky top-0 z-10 mb-3 flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] p-2 shadow-sm">
+            <div className="flex rounded-md bg-[var(--color-bg-hover)] p-0.5">
+              <WorkspaceViewButton active={workspaceView === 'edit'} label="编辑" icon={<PencilLine size={14} />} onClick={() => setWorkspaceView('edit')} />
+              <WorkspaceViewButton active={workspaceView === 'preview'} label="预览" icon={<Eye size={14} />} onClick={() => setWorkspaceView('preview')} />
+              <WorkspaceViewButton active={workspaceView === 'source'} label="原文" icon={<FileSearch size={14} />} onClick={() => setWorkspaceView('source')} />
             </div>
-          )}
-          {currentDraft && (
-            <div className="grid grid-cols-2 gap-5">
-              <EditorPanel draft={currentDraft} updateField={updateCurrentField} updateDraftAt={(patch) => updateDraftAt(currentIndex, patch)} />
-              <LivePreviewPanel draft={currentDraft} />
-            </div>
-          )}
+            <div className="h-5 w-px bg-[var(--color-border)]" />
+            <button type="button" className={SOFT_BUTTON_CLASS} aria-label="上一题" title="上一题" onClick={goPrevious} disabled={currentIndex <= 0}><ChevronLeft size={15} /></button>
+            <span className="px-1 text-xs font-bold text-[var(--color-text-secondary)]">第 {currentIndex + 1} / {drafts.length} 题</span>
+            <button type="button" className={SOFT_BUTTON_CLASS} aria-label="下一题" title="下一题" onClick={goNext} disabled={currentIndex >= drafts.length - 1}><ChevronRight size={15} /></button>
+            <button type="button" className={PRIMARY_BUTTON_CLASS} onClick={confirmAndNext}><CheckCircle2 size={15} className="mr-1 inline" />确认并下一题</button>
+            <button type="button" className={SOFT_BUTTON_CLASS} onClick={handleSingleAiSuggestion} disabled={aiProcessing}><Sparkles size={15} className="mr-1 inline" />AI 建议</button>
+            <button type="button" className={SOFT_BUTTON_CLASS} aria-label="恢复原稿" title="恢复原稿" onClick={restoreCurrent}><RotateCcw size={15} /></button>
+            <button type="button" className={`${SOFT_BUTTON_CLASS} text-[var(--color-danger)]`} aria-label="丢弃此题" title="丢弃此题" onClick={() => updateStatus('discarded')}><Trash2 size={15} /></button>
+            <button type="button" className={`${SOFT_BUTTON_CLASS} ml-auto inline-flex items-center gap-1.5`} onClick={() => setToolsOpen((value) => !value)}>
+              {toolsOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}辅助工具
+            </button>
+          </div>
+          <div className="mx-auto max-w-[980px]">
+            {risks.length > 0 && (
+              <div className="mb-3 flex items-center gap-2 rounded-md border border-[var(--color-danger)] bg-[var(--color-danger-soft)] px-3 py-2 text-xs text-[var(--color-danger)]">
+                <TriangleAlert size={14} className="shrink-0" />
+                <b>请检查：</b><span className="truncate">{risks.map((risk) => risk.message).join('、')}</span>
+                <button type="button" className="ml-auto shrink-0 font-semibold" onClick={goNextRisk}>下一风险题</button>
+              </div>
+            )}
+            {workspaceView === 'edit' && currentDraft && <QualityChecklistPanel draft={currentDraft} original={currentOriginal} qualityConfig={qualityConfig} />}
+            {workspaceView === 'edit' && currentDraft && (
+              <EditorPanel
+                draft={currentDraft}
+                updateDraftAt={(patch) => updateDraftAt(currentIndex, patch)}
+                insertFigureRequest={figureInsertRequest}
+                openImagePicker={() => setImagePickerOpen(true)}
+              />
+            )}
+            {workspaceView === 'preview' && currentDraft && <LivePreviewPanel draft={currentDraft} />}
+            {workspaceView === 'source' && <OriginalPreviewPanel draft={currentDraft} page={currentPage} pages={taskMeta.pageResults} warnings={taskMeta.warnings} />}
+            {aiMessage && <div className="mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 text-xs text-[var(--color-text-secondary)]">{aiMessage}</div>}
+            {aiSuggestion && <div className="mt-3"><SuggestionPanel suggestion={aiSuggestion} accept={acceptSuggestion} dismiss={() => setAiSuggestion(null)} /></div>}
+          </div>
         </section>
 
-        <aside className="space-y-4 overflow-y-auto border-l border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
-          <OriginalPreviewPanel draft={currentDraft} page={currentPage} warnings={taskMeta.warnings} />
-          <ImageCachePanel assets={taskMeta.mediaAssets} draft={currentDraft} copyText={copyText} copyImage={copyImage} attachAsset={attachAssetToCurrent} copyMessage={copyMessage} />
-          <ActionPanel
-            aiProcessing={aiProcessing}
-            confirmAndNext={confirmAndNext}
-            goNextRisk={goNextRisk}
-            discard={() => updateStatus('discarded')}
-            restore={restoreCurrent}
-            generateSuggestion={handleSingleAiSuggestion}
-          />
-          {aiMessage && <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-xs text-[var(--color-text-secondary)]">{aiMessage}</div>}
-          {aiSuggestion && <SuggestionPanel suggestion={aiSuggestion} accept={acceptSuggestion} dismiss={() => setAiSuggestion(null)} />}
-          <BatchPanel
-            aiProcessing={aiProcessing}
-            cacheMessage={cacheMessage}
-            confirmQueue={() => {
-              const indexes = new Set(filteredDrafts.map((item) => item.index));
-              setDrafts((prev) => prev.map((draft, index) => indexes.has(index) && draft.status !== 'discarded' ? { ...draft, status: 'confirmed' } : draft));
-            }}
-            confirmClean={() => setDrafts((prev) => prev.map((draft) => draft.status !== 'discarded' && getRiskItems(draft).length === 0 ? { ...draft, status: 'confirmed' } : draft))}
-            batchAnalysis={handleBatchAnalysis}
-            batchMetadata={handleBatchMetadata}
-            exportJSON={handleExportJSON}
-            clearCache={() => {
-              if (!taskId) return;
-              clearReviewCache(taskId);
-              setCacheMessage('本地校对缓存已清除');
-            }}
-            save={handleSave}
-            saving={saving}
-            canSave={counts.confirmed > 0}
-          />
-          {(saveError || saveResult) && (
-            <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-xs">
-              {saveError && <p className="text-[var(--color-danger)]">{saveError}</p>}
-              {saveResult && <p className="text-[var(--color-success)]">已入库 {saveResult.saved_count} 题，跳过 {saveResult.skipped_count} 题，失败 {saveResult.failed_count} 题。</p>}
+        {toolsOpen && (
+          <aside className="absolute inset-y-0 right-0 z-30 w-[min(320px,92vw)] space-y-3 overflow-y-auto border-l border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 shadow-xl lg:static lg:w-auto lg:shadow-none">
+            <div className="flex items-center justify-between border-b border-[var(--color-border)] pb-2">
+              <h2 className="text-sm font-bold">辅助工具</h2>
+              <button type="button" className={SOFT_BUTTON_CLASS} aria-label="关闭辅助工具" title="关闭辅助工具" onClick={() => setToolsOpen(false)}><PanelRightClose size={15} /></button>
             </div>
-          )}
-        </aside>
+            <QualityRuleSettingsPanel config={qualityConfig} setConfig={setQualityConfig} />
+            <ChangeReviewPanel draft={currentDraft} original={currentOriginal} restoreField={(field) => {
+              if (!currentOriginal) return;
+              const originalValue = currentOriginal[field];
+              updateCurrentField(field, originalValue && typeof originalValue === 'object' ? JSON.parse(JSON.stringify(originalValue)) : originalValue);
+            }} />
+            <BatchPanel
+              aiProcessing={aiProcessing}
+              cacheMessage={cacheMessage}
+              confirmQueue={() => {
+                const indexes = new Set(filteredDrafts.map((item) => item.index));
+                setDrafts((prev) => prev.map((draft, index) => indexes.has(index) && draft.status !== 'discarded' ? { ...draft, status: 'confirmed' } : draft));
+              }}
+              confirmClean={() => setDrafts((prev) => prev.map((draft) => draft.status !== 'discarded' && getRiskItems(draft, duplicateQuestionIds, qualityConfig).length === 0 ? { ...draft, status: 'confirmed' } : draft))}
+              batchAnalysis={handleBatchAnalysis}
+              batchMetadata={handleBatchMetadata}
+              fastLatexCleanup={handleFastLatexCleanup}
+              exportJSON={handleExportJSON}
+              clearCache={() => {
+                if (!taskId) return;
+                clearReviewCache(taskId);
+                setCacheMessage('本地校对缓存已清除');
+              }}
+            />
+          </aside>
+        )}
       </section>
+      {imagePickerOpen && (
+        <div className="fixed inset-0 z-[70] flex justify-end bg-slate-950/20" role="dialog" aria-modal="true" aria-label="图片缓存" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setImagePickerOpen(false);
+        }}>
+          <section className="flex h-full w-full max-w-[420px] flex-col border-l border-[var(--color-border)] bg-[var(--color-bg-card)] shadow-2xl">
+            <header className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
+              <div>
+                <h2 className="text-sm font-bold">图片缓存</h2>
+                <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">点击图片，插入到当前光标位置。</p>
+              </div>
+              <button type="button" className={SOFT_BUTTON_CLASS} aria-label="关闭图片缓存" title="关闭图片缓存" onClick={() => setImagePickerOpen(false)}><X size={15} /></button>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto p-3">
+              <ImageCachePanel assets={taskMeta.mediaAssets} draft={currentDraft} canUpload={Boolean(taskMeta.batchId)} uploading={imageUploading} copyText={copyText} copyImage={copyImage} attachAsset={attachAssetToCurrent} uploadImage={(file) => void handleUploadImageToCurrent(file)} copyMessage={copyMessage} />
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
@@ -627,71 +1250,344 @@ function QueueTabs({ queue, setQueue, counts }: { queue: QueueKey; setQueue: (qu
     ['all', `全部 ${counts.total}`],
   ];
   return (
-    <div className="grid grid-cols-2 gap-2">
-      {tabs.map(([key, label]) => (
-        <button key={key} onClick={() => setQueue(key)} className={`rounded-md border px-3 py-2 text-sm ${queue === key ? 'border-[var(--color-accent)] bg-[#eef5ff] text-[var(--color-accent)]' : 'border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-secondary)]'}`}>
-          {label}
-        </button>
-      ))}
+    <label className="block text-[11px] font-semibold text-[var(--color-text-muted)]">
+      审核队列
+      <select className={`${INPUT_CLASS} mt-1`} value={queue} onChange={(event) => setQueue(event.target.value as QueueKey)}>
+        {tabs.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function WorkspaceViewButton({ active, label, icon, onClick }: { active: boolean; label: string; icon: ReactNode; onClick: () => void }) {
+  return (
+    <button type="button" className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-semibold ${active ? 'bg-white text-[var(--color-accent)] shadow-sm' : 'text-[var(--color-text-secondary)]'}`} onClick={onClick}>
+      {icon}{label}
+    </button>
+  );
+}
+
+function ReviewTaskQueuePage({
+  tasks,
+  loading,
+  error,
+  openTask,
+  deleteTask,
+  deletingTaskId,
+  goImport,
+}: {
+  tasks: ReviewTaskListItem[];
+  loading: boolean;
+  error: string | null;
+  openTask: (taskId: string) => void;
+  deleteTask: (taskId: string) => void;
+  deletingTaskId: string | null;
+  goImport: () => void;
+}) {
+  const questionTaskCount = tasks.filter((task) => task.task_type !== 'ai_generated_knowledge_review').length;
+  const knowledgeTaskCount = tasks.length - questionTaskCount;
+  const pendingItemCount = tasks.reduce((total, task) => total + (task.knowledge_count > 0 ? task.knowledge_count : task.question_count), 0);
+
+  return (
+    <main className="h-full overflow-y-auto bg-[#f3f6fa] px-3 py-3 text-[var(--color-text)] sm:px-5 sm:py-4">
+      <div className="mx-auto max-w-[1280px]">
+      <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-bold text-[#1d3148]">待校对任务</h1>
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">确认后写入正式题库；未提交内容保留在校对区。</p>
+        </div>
+        <button type="button" className={PRIMARY_BUTTON_CLASS} onClick={goImport}>新建导入任务</button>
+      </header>
+      {!loading && !error && tasks.length > 0 && (
+        <section className="mb-3 grid overflow-hidden rounded-lg border border-[var(--color-border)] bg-white sm:grid-cols-3 sm:divide-x sm:divide-[var(--color-border)]">
+          <QueueMetric label="待校对对象" value={pendingItemCount} hint="题目与知识点合计" />
+          <QueueMetric label="试题任务" value={questionTaskCount} hint="等待结构与答案核验" />
+          <QueueMetric label="知识点任务" value={knowledgeTaskCount} hint="等待内容与层级核验" />
+        </section>
+      )}
+      {loading && <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-8 text-center text-sm">正在读取审核数据库...</div>}
+      {error && <div className="rounded-lg border border-[var(--color-danger)] bg-[#fff0f0] p-8 text-center text-sm text-[var(--color-danger)]">{error}</div>}
+      {!loading && !error && tasks.length === 0 && (
+        <div className="rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-bg-card)] p-10 text-center">
+          <h2 className="text-base font-bold">暂无审核任务</h2>
+          <p className="mt-2 text-sm text-[var(--color-text-secondary)]">从 AI 对话里送审后，这里会自动出现任务。</p>
+        </div>
+      )}
+      {!loading && !error && tasks.length > 0 && (
+        <div className="divide-y divide-[var(--color-border)] overflow-hidden rounded-lg border border-[var(--color-border)] bg-white shadow-sm">
+          {tasks.map((task) => (
+            <article key={task.task_id} className="grid gap-3 px-4 py-3 transition-colors hover:bg-[#f8fafc] sm:grid-cols-[minmax(0,1fr)_140px_180px_auto] sm:items-center">
+                <div className="min-w-0">
+                  <h2 className="truncate text-sm font-semibold text-[#263b52]">{task.title || task.batch_id || task.task_id}</h2>
+                  <p className="mt-1 truncate text-xs text-[var(--color-text-muted)]">{task.source || task.batch_id}</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded bg-[#eff6ff] px-2 py-1 text-xs font-bold text-[var(--color-accent)]">
+                      {task.task_type === 'ai_generated_knowledge_review' ? '知识点送审' : '试题送审'}
+                    </span>
+                    <span className="text-xs font-medium text-[var(--color-text-secondary)]">
+                      {task.knowledge_count > 0 ? `${task.knowledge_count} 知识点` : `${task.question_count} 题`}
+                    </span>
+                </div>
+                <p className="text-xs text-[var(--color-text-muted)]">更新 {new Date(task.updated_at).toLocaleString()}</p>
+                <div className="flex shrink-0 gap-2 sm:justify-end">
+                  <button type="button" className={PRIMARY_BUTTON_CLASS} onClick={() => openTask(task.task_id)}>打开校对</button>
+                  <button
+                    type="button"
+                    className={`${SOFT_BUTTON_CLASS} text-[var(--color-danger)]`}
+                    onClick={() => deleteTask(task.task_id)}
+                    disabled={deletingTaskId === task.task_id}
+                  >
+                    {deletingTaskId === task.task_id ? '删除中...' : '删除任务'}
+                  </button>
+                </div>
+            </article>
+          ))}
+        </div>
+      )}
+      </div>
+    </main>
+  );
+}
+
+function QueueMetric({ label, value, hint }: { label: string; value: number; hint: string }) {
+  return (
+    <div className="px-4 py-3">
+      <p className="text-xs font-medium text-[var(--color-text-muted)]">{label}</p>
+      <div className="mt-1 flex items-end justify-between gap-3">
+        <strong className="text-lg font-bold text-[#1d3148]">{value}</strong>
+        <span className="pb-0.5 text-xs text-[var(--color-text-secondary)]">{hint}</span>
+      </div>
     </div>
   );
 }
 
-function EditorPanel({ draft, updateField, updateDraftAt }: {
-  draft: ReviewQuestionDraft;
-  updateField: (field: keyof ReviewQuestionDraft, value: unknown) => void;
-  updateDraftAt: (patch: Partial<ReviewQuestionDraft>) => void;
+function KnowledgeReviewWorkbench({
+  drafts,
+  saving,
+  saveError,
+  saveResult,
+  updateDraft,
+  setStatus,
+  save,
+  back,
+}: {
+  drafts: KnowledgeReviewDraft[];
+  saving: boolean;
+  saveError: string | null;
+  saveResult: SaveReviewedKnowledgeResponse | null;
+  updateDraft: (index: number, patch: Partial<KnowledgeReviewDraft>) => void;
+  setStatus: (index: number, status: KnowledgeReviewDraft['status']) => void;
+  save: () => void;
+  back: () => void;
 }) {
-  const updateOption = (index: number, content: string) => {
-    const next = [...draft.options];
-    next[index] = { ...next[index], content };
-    updateField('options', next);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const currentDraft = drafts[Math.min(currentIndex, Math.max(drafts.length - 1, 0))] ?? null;
+  const confirmedCount = drafts.filter((draft) => draft.status === 'confirmed').length;
+  const unfinishedCount = drafts.filter((draft) => draft.status === 'pending' || draft.status === 'modified').length;
+
+  const submitKnowledge = () => {
+    if (unfinishedCount > 0) {
+      const confirmed = window.confirm(`还有 ${unfinishedCount} 个知识点尚未确认。本次只提交已确认的 ${confirmedCount} 个，是否继续？`);
+      if (!confirmed) return;
+    }
+    save();
   };
+
+  if (!currentDraft) {
+    return <CenteredState title="暂无知识点草稿" desc="当前任务没有可校对的知识点。" action="返回队列" onAction={back} />;
+  }
+
+  const risks = getKnowledgeRisks(currentDraft);
+
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
-      <h2 className="mb-3 text-sm font-bold">编辑区</h2>
-      <div className="grid grid-cols-3 gap-3">
-        <Field label="题型">
-          <select className={INPUT_CLASS} value={draft.question_type} onChange={(event) => updateField('question_type', event.target.value)}>
-            {TYPE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-          </select>
-        </Field>
-        <Field label="难度">
-          <input className={INPUT_CLASS} value={draft.difficulty ?? ''} onChange={(event) => updateField('difficulty', event.target.value ? Number(event.target.value) : null)} />
-        </Field>
-        <Field label="来源">
-          <input className={INPUT_CLASS} value={draft.source} onChange={(event) => updateField('source', event.target.value)} />
-        </Field>
-      </div>
-      <Field label="知识点">
-        <input className={INPUT_CLASS} value={draft.knowledge_point} onChange={(event) => updateField('knowledge_point', event.target.value)} />
-      </Field>
-      <Field label="标签">
-        <input className={INPUT_CLASS} value={draft.tags.join('、')} onChange={(event) => updateField('tags', event.target.value.split(/[、,，]/).map((item) => item.trim()).filter(Boolean))} />
-      </Field>
-      <Field label="题干">
-        <textarea className={TEXTAREA_CLASS} rows={8} value={draft.title} onChange={(event) => updateField('title', event.target.value)} />
-      </Field>
-      <div className="space-y-2">
-        <div className="text-xs font-bold text-[var(--color-text-muted)]">选项</div>
-        {draft.options.map((option, index) => (
-          <div key={`${option.opt}-${index}`} className="grid grid-cols-[32px_1fr_auto] items-center gap-2">
-            <span className="font-bold text-[var(--color-accent)]">{option.opt || String.fromCharCode(65 + index)}</span>
-            <input className={INPUT_CLASS} value={option.content} onChange={(event) => updateOption(index, event.target.value)} />
-            <button className={SOFT_BUTTON_CLASS} onClick={() => updateField('options', draft.options.filter((_, i) => i !== index))}>删除</button>
+    <main className="flex h-screen min-h-0 flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
+      <header className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-card)] px-4 py-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-base font-bold">知识点校对中心</h1>
+          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">左侧修改，右侧实时渲染；确认后才写入正式知识点库。</p>
+        </div>
+        <div className="flex gap-2">
+          <button type="button" className={SOFT_BUTTON_CLASS} onClick={back}>返回队列</button>
+          <button type="button" className={`${PRIMARY_BUTTON_CLASS} inline-flex items-center gap-1.5`} onClick={submitKnowledge} disabled={saving || confirmedCount === 0}>
+            <Send size={14} />{saving ? '提交中...' : `提交校对（${confirmedCount}）`}
+          </button>
+        </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2 text-xs">
+          <Stat label="知识点" value={drafts.length} />
+          <Stat label="已确认" value={drafts.filter((draft) => draft.status === 'confirmed').length} tone="success" />
+        </div>
+        {saveError && <div className="mt-3 rounded-lg border border-[var(--color-danger)] bg-[#fff0f0] p-3 text-sm text-[var(--color-danger)]">{saveError}</div>}
+        {saveResult && <div className="mt-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 text-sm">已保存 {saveResult.saved_count} 个，跳过 {saveResult.skipped_count} 个，失败 {saveResult.failed_count} 个。</div>}
+      </header>
+
+      <section className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)_minmax(300px,0.8fr)] overflow-hidden">
+        <aside className="overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
+          <div className="mb-2 text-xs font-bold text-[var(--color-text-muted)]">待校对知识点</div>
+          <div className="space-y-2">
+            {drafts.map((draft, index) => (
+              <button
+                key={draft.draft_id}
+                type="button"
+                onClick={() => setCurrentIndex(index)}
+                className={`w-full rounded-md border p-3 text-left ${index === currentIndex ? 'border-[var(--color-accent)] bg-[#eef5ff]' : 'border-[var(--color-border)] bg-[var(--color-bg)]'}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-[var(--color-accent)]">{index + 1}</span>
+                  <span className="rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-[11px]">{statusLabel(draft.status)}</span>
+                </div>
+                <div className="mt-2 line-clamp-2 text-xs font-semibold text-[var(--color-text)]">{draft.topic3_name || '未命名知识点'}</div>
+                <div className="mt-1 truncate text-[11px] text-[var(--color-text-muted)]">{draft.topic3_id || draft.draft_id}</div>
+              </button>
+            ))}
           </div>
-        ))}
-        <button className={SOFT_BUTTON_CLASS} onClick={() => updateField('options', [...draft.options, { opt: String.fromCharCode(65 + draft.options.length), content: '' }])}>添加选项</button>
+        </aside>
+
+        <section className="min-h-0 overflow-y-auto p-3">
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-[var(--color-accent)]">修改区 · 知识点 {currentIndex + 1}</div>
+                <h2 className="mt-1 text-base font-bold">{currentDraft.topic3_name || '未命名知识点'}</h2>
+              </div>
+              <span className="rounded-full bg-[var(--color-bg-hover)] px-2 py-1 text-xs">{statusLabel(currentDraft.status)}</span>
+            </div>
+            {risks.length > 0 && <div className="mb-3 rounded-md bg-[#fff7ed] p-2 text-xs text-[#c2410c]">{risks.join('；')}</div>}
+            <div className="grid gap-3 md:grid-cols-2">
+              <TextField label="知识点 ID" value={currentDraft.topic3_id} onChange={(value) => updateDraft(currentIndex, { topic3_id: value })} />
+              <TextField label="知识点名称" value={currentDraft.topic3_name} onChange={(value) => updateDraft(currentIndex, { topic3_name: value })} />
+              <TextField label="一级章节 ID" value={currentDraft.topic1_id} onChange={(value) => updateDraft(currentIndex, { topic1_id: value })} />
+              <TextField label="一级章节" value={currentDraft.topic1_name} onChange={(value) => updateDraft(currentIndex, { topic1_name: value })} />
+              <TextField label="二级章节 ID" value={currentDraft.topic2_id} onChange={(value) => updateDraft(currentIndex, { topic2_id: value })} />
+              <TextField label="二级章节" value={currentDraft.topic2_name} onChange={(value) => updateDraft(currentIndex, { topic2_name: value })} />
+              <TextField label="来源章节" value={currentDraft.source_chapter} onChange={(value) => updateDraft(currentIndex, { source_chapter: value })} />
+              <TextField label="标签" value={currentDraft.tags.join('、')} onChange={(value) => updateDraft(currentIndex, { tags: value.split(/[、,，]/).map((item) => item.trim()).filter(Boolean) })} />
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button type="button" className={PRIMARY_BUTTON_CLASS} onClick={() => setStatus(currentIndex, 'confirmed')}>确认</button>
+              <button type="button" className={SOFT_BUTTON_CLASS} onClick={() => setStatus(currentIndex, 'pending')}>待改</button>
+              <button type="button" className={SOFT_BUTTON_CLASS} onClick={() => setStatus(currentIndex, 'discarded')}>丢弃</button>
+            </div>
+            <div className="mt-4 grid gap-3">
+              <TextAreaField label="标准定义" value={currentDraft.definition} onChange={(value) => updateDraft(currentIndex, { definition: value })} />
+              <TextAreaField label="核心公式" value={currentDraft.formula} onChange={(value) => updateDraft(currentIndex, { formula: value })} />
+              <TextAreaField label="核心摘要" value={currentDraft.key_summary} onChange={(value) => updateDraft(currentIndex, { key_summary: value })} />
+              <TextAreaField label="易错点" value={currentDraft.error_prone} onChange={(value) => updateDraft(currentIndex, { error_prone: value })} />
+              <TextAreaField label="例题解析" value={currentDraft.example_analysis} onChange={(value) => updateDraft(currentIndex, { example_analysis: value })} />
+            </div>
+          </div>
+        </section>
+
+        <aside className="min-h-0 overflow-y-auto border-l border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
+          <KnowledgeDraftPreview draft={currentDraft} />
+        </aside>
+      </section>
+    </main>
+  );
+}
+
+function KnowledgeDraftPreview({ draft }: { draft: KnowledgeReviewDraft }) {
+  return (
+    <article className="space-y-4">
+      <div>
+        <div className="text-xs font-bold text-[var(--color-accent)]">渲染区</div>
+        <h2 className="mt-1 text-lg font-bold">{draft.topic3_name || '未命名知识点'}</h2>
+        <div className="mt-2 flex flex-wrap gap-2 text-xs text-[var(--color-text-secondary)]">
+          {draft.topic1_name && <span className="pv-chip">{draft.topic1_name}</span>}
+          {draft.topic2_name && <span className="pv-chip">{draft.topic2_name}</span>}
+          {draft.source_chapter && <span className="pv-chip">{draft.source_chapter}</span>}
+        </div>
       </div>
-      <Field label="答案">
-        <textarea className={TEXTAREA_CLASS} rows={4} value={draft.answer} onChange={(event) => updateField('answer', event.target.value)} />
-      </Field>
-      <Field label="解析">
-        <textarea className={TEXTAREA_CLASS} rows={7} value={draft.analysis} onChange={(event) => updateField('analysis', event.target.value)} />
-      </Field>
-      <div className="mt-3 flex gap-2">
-        <button className={SOFT_BUTTON_CLASS} onClick={() => updateDraftAt({ answer: '', analysis: '' })}>清空答案解析</button>
+      <KnowledgePreviewSection title="标准定义" text={draft.definition} />
+      <KnowledgePreviewSection title="核心公式" text={draft.formula} />
+      <KnowledgePreviewSection title="核心摘要" text={draft.key_summary} />
+      <KnowledgePreviewSection title="易错点" text={draft.error_prone} />
+      <KnowledgePreviewSection title="例题解析" text={draft.example_analysis} />
+      {draft.tags.length > 0 && (
+        <section>
+          <div className="mb-2 text-xs font-bold text-[var(--color-text-muted)]">标签</div>
+          <div className="flex flex-wrap gap-2">{draft.tags.map((tag) => <span key={tag} className="pv-chip">{tag}</span>)}</div>
+        </section>
+      )}
+    </article>
+  );
+}
+
+function KnowledgePreviewSection({ title, text }: { title: string; text: string }) {
+  if (!text.trim()) return null;
+  return (
+    <section>
+      <div className="mb-2 text-xs font-bold text-[var(--color-text-muted)]">{title}</div>
+      <div className="rounded-md bg-[var(--color-bg)] p-3 text-sm leading-7">
+        <LatexRenderer text={text} />
       </div>
+    </section>
+  );
+}
+
+function TextField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="grid gap-1 text-xs font-semibold text-[var(--color-text-secondary)]">
+      {label}
+      <input className={INPUT_CLASS} value={value} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+function TextAreaField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <div className="grid gap-1 text-xs font-semibold text-[var(--color-text-secondary)]">
+      <div className="flex items-center justify-between gap-2">
+        <span>{label}</span>
+        <button type="button" className={SOFT_BUTTON_CLASS} onClick={() => onChange(appendTableTemplate(value))}>插入表格</button>
+      </div>
+      <textarea rows={3} className={TEXTAREA_CLASS} value={value} onChange={(event) => onChange(event.target.value)} />
+      {value.trim() && <div className="rounded-md bg-[var(--color-bg)] p-2 font-normal"><LatexRenderer text={value} /></div>}
+    </div>
+  );
+}
+
+function EditorPanel({ draft, updateDraftAt, insertFigureRequest, openImagePicker }: {
+  draft: ReviewQuestionDraft;
+  updateDraftAt: (patch: Partial<ReviewQuestionDraft>) => void;
+  insertFigureRequest: FigureInsertRequest | null;
+  openImagePicker: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
+      <div className="mb-3 flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] pb-3">
+        <div className="mr-auto">
+          <h2 className="text-sm font-bold">整题编辑</h2>
+          <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">题干、选项、图片、答案和解析连续编辑；选中图片可移动、对齐、缩放或删除。</p>
+        </div>
+        <button type="button" className={`${SOFT_BUTTON_CLASS} inline-flex items-center gap-1.5`} onClick={openImagePicker}><ImagePlus size={14} />新增图片</button>
+        <button type="button" className={SOFT_BUTTON_CLASS} onClick={() => updateDraftAt(buildSafeQuestionPatch(draft))} title="整理换行、行尾空格、选项编号和首尾空白，不改写题意">规范格式</button>
+      </div>
+      <QuestionLiveEditor
+        question={draft as unknown as Question}
+        onChange={(patch) => {
+          const { editor_document: _editorDocument, ...reviewPatch } = patch;
+          updateDraftAt(reviewPatch as Partial<ReviewQuestionDraft>);
+        }}
+        compact={false}
+        showPreview={false}
+        showHeader={false}
+        showImageManager={false}
+        insertFigureRequest={insertFigureRequest}
+        onRequestImage={openImagePicker}
+      />
+      <details className="mt-3 border-t border-[var(--color-border)] pt-3">
+        <summary className="cursor-pointer text-xs font-semibold text-[var(--color-text-secondary)]">题型、知识点与来源</summary>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <Field label="题型"><select className={INPUT_CLASS} value={draft.question_type} onChange={(event) => updateDraftAt({ question_type: event.target.value })}>{TYPE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
+          <Field label="难度"><input className={INPUT_CLASS} value={draft.difficulty ?? ''} onChange={(event) => updateDraftAt({ difficulty: event.target.value ? Number(event.target.value) : null })} /></Field>
+          <Field label="知识点"><input className={INPUT_CLASS} value={draft.knowledge_point} onChange={(event) => updateDraftAt({ knowledge_point: event.target.value })} /></Field>
+          <Field label="来源"><input className={INPUT_CLASS} value={draft.source} onChange={(event) => updateDraftAt({ source: event.target.value })} /></Field>
+          <div className="sm:col-span-2"><Field label="标签"><input className={INPUT_CLASS} value={draft.tags.join('、')} onChange={(event) => updateDraftAt({ tags: event.target.value.split(/[、,，]/).map((item) => item.trim()).filter(Boolean) })} /></Field></div>
+        </div>
+      </details>
     </div>
   );
 }
@@ -712,45 +1608,299 @@ function LivePreviewPanel({ draft }: { draft: ReviewQuestionDraft }) {
   );
 }
 
-function OriginalPreviewPanel({ draft, page, warnings }: { draft: ReviewQuestionDraft | null; page: PageResult | null; warnings: string[] }) {
-  const image = fileUrl(page?.page_image_path);
+function QualityChecklistPanel({ draft, original, qualityConfig }: { draft: ReviewQuestionDraft; original: ReviewQuestionDraft | null; qualityConfig: QuestionQualityRuleConfig }) {
+  const isChoice = draft.question_type === 'single_choice' || draft.question_type === 'multi_choice';
+  const qualityIssues = analyzeQuestionQuality(draft, { requireKnowledge: true, requireSource: true, config: qualityConfig });
+  const qualityScore = scoreQuestionQuality(qualityIssues, qualityConfig);
+  const items = [
+    { label: '题干', passed: Boolean(draft.title.trim()) },
+    { label: '选项', passed: !isChoice || draft.options.length >= 2 },
+    { label: '答案', passed: Boolean(draft.answer.trim()) },
+    { label: '知识点', passed: Boolean(draft.knowledge_point.trim()) },
+    { label: '图片引用', passed: draft.figureIssues.length === 0 },
+    { label: '来源', passed: Boolean(draft.source.trim()) },
+  ];
+  const passedCount = items.filter((item) => item.passed).length;
+  const changedCount = getChangedReviewFields(original, draft).length;
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
-      <h2 className="text-sm font-bold">原文对照</h2>
-      {warnings.length > 0 && <div className="mt-2 text-xs text-[var(--color-danger)]">{warnings.slice(0, 2).join('；')}</div>}
-      {image ? <img src={image} className="mt-3 max-h-64 w-full object-contain" /> : <div className="mt-3 rounded-md border border-dashed border-[var(--color-border)] p-3 text-xs text-[var(--color-text-muted)]">{draft?.raw_text || '当前题没有可定位的页图。'}</div>}
+    <div className="mb-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-xs font-bold text-[var(--color-text)]">字段完整度 {passedCount}/{items.length}</div>
+          <div className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">与识别原稿相比已修改 {changedCount} 个字段</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="h-1.5 w-24 overflow-hidden rounded-full bg-[var(--color-bg-hover)]">
+            <div className="h-full rounded-full" style={{ width: `${qualityScore}%`, background: qualityScore >= 85 ? 'var(--color-success)' : qualityScore >= 60 ? 'var(--color-orange)' : 'var(--color-danger)' }} />
+          </div>
+          <span className="text-sm font-black" style={{ color: qualityScore >= 85 ? 'var(--color-success)' : qualityScore >= 60 ? 'var(--color-orange)' : 'var(--color-danger)' }}>{qualityScore} 分</span>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {items.map((item) => (
+          <span key={item.label} className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-semibold ${item.passed ? 'bg-[var(--color-green-light)] text-[var(--color-green)]' : 'bg-[var(--color-danger-soft)] text-[var(--color-danger)]'}`}>
+            {item.passed ? <CheckCircle2 size={11} /> : <TriangleAlert size={11} />}{item.label}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
 
-function ImageCachePanel({ assets, draft, copyText, copyImage, attachAsset, copyMessage }: {
+function QualityRuleSettingsPanel({ config, setConfig }: { config: QuestionQualityRuleConfig; setConfig: (config: QuestionQualityRuleConfig) => void }) {
+  const rules = Object.entries(QUESTION_QUALITY_RULE_LABELS) as Array<[QuestionQualityCode, string]>;
+  const updateEnabled = (code: QuestionQualityCode, enabled: boolean) => {
+    setConfig({ ...config, enabled: { ...config.enabled, [code]: enabled } });
+  };
+  return (
+    <details className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-bold">
+        <span>质检规则</span>
+        <span className="text-[10px] font-normal text-[var(--color-text-muted)]">可按任务习惯调整</span>
+      </summary>
+      <label className="mt-3 flex items-center justify-between gap-3 text-xs text-[var(--color-text-secondary)]">
+        <span>选择题最少选项数</span>
+        <input
+          type="number"
+          min={1}
+          max={8}
+          value={config.minimumChoiceOptions ?? 2}
+          onChange={(event) => setConfig({ ...config, minimumChoiceOptions: Math.max(1, Math.min(8, Number(event.target.value) || 2)) })}
+          className="w-16 rounded border border-[var(--color-border)] bg-[var(--color-bg-card)] px-2 py-1 text-center"
+        />
+      </label>
+      <div className="mt-3 max-h-72 space-y-1 overflow-y-auto pr-1">
+        {rules.map(([code, label]) => (
+          <div key={code} className="flex items-center gap-2 rounded-md px-1.5 py-1.5 hover:bg-[var(--color-bg-hover)]">
+            <input type="checkbox" checked={config.enabled?.[code] !== false} onChange={(event) => updateEnabled(code, event.target.checked)} />
+            <span className="min-w-0 flex-1 text-[11px] text-[var(--color-text-secondary)]">{label}</span>
+            <select
+              value={config.severity?.[code] ?? ''}
+              onChange={(event) => {
+                const value = event.target.value;
+                const severity = { ...config.severity };
+                if (value) severity[code] = value as QuestionQualitySeverity;
+                else delete severity[code];
+                setConfig({ ...config, severity });
+              }}
+              className="rounded border border-[var(--color-border)] bg-[var(--color-bg-card)] px-1 py-0.5 text-[10px]"
+              aria-label={`${label}严重级别`}
+            >
+              <option value="">默认</option>
+              <option value="danger">阻断</option>
+              <option value="warning">警告</option>
+              <option value="suggestion">建议</option>
+            </select>
+          </div>
+        ))}
+      </div>
+      <button type="button" className={`${SOFT_BUTTON_CLASS} mt-3 w-full`} onClick={() => setConfig({})}>恢复默认规则</button>
+    </details>
+  );
+}
+
+function OriginalPreviewPanel({ draft, page, pages, warnings }: { draft: ReviewQuestionDraft | null; page: PageResult | null; pages: PageResult[]; warnings: string[] }) {
+  const orderedPages = useMemo(
+    () => [...pages].filter((item) => item.page_no).sort((a, b) => Number(a.page_no) - Number(b.page_no)),
+    [pages],
+  );
+  const [selectedPageNo, setSelectedPageNo] = useState<number | null>(page?.page_no ?? null);
+  const [zoom, setZoom] = useState(1);
+  const [naturalSize, setNaturalSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    setSelectedPageNo(page?.page_no ?? null);
+    setZoom(1);
+  }, [draft?.question_id, page?.page_no]);
+
+  const selectedPage = orderedPages.find((item) => item.page_no === selectedPageNo) ?? page;
+  const selectedPageIndex = orderedPages.findIndex((item) => item.page_no === selectedPage?.page_no);
+  const image = fileUrl(selectedPage?.page_image_path);
+  const matchingRegion = selectedPage?.regions?.find((region) => (
+    (draft?.source_region_id && region.region_id === draft.source_region_id)
+    || region.question_id === draft?.question_id
+  ));
+  const bbox = selectedPage?.page_no === draft?.source_page
+    ? (draft?.source_bbox ?? matchingRegion?.bbox ?? null)
+    : null;
+  const imageWidth = Number(selectedPage?.image_width || naturalSize.width || 0);
+  const imageHeight = Number(selectedPage?.image_height || naturalSize.height || 0);
+  const regionStyle = useMemo(() => {
+    if (!bbox) return null;
+    const [x, y, width, height] = bbox;
+    const normalized = Math.max(x, y, width, height) <= 1;
+    if (!normalized && (!imageWidth || !imageHeight)) return null;
+    return {
+      left: `${(normalized ? x : x / imageWidth) * 100}%`,
+      top: `${(normalized ? y : y / imageHeight) * 100}%`,
+      width: `${(normalized ? width : width / imageWidth) * 100}%`,
+      height: `${(normalized ? height : height / imageHeight) * 100}%`,
+    };
+  }, [bbox, imageHeight, imageWidth]);
+
+  const movePage = (offset: number) => {
+    if (selectedPageIndex < 0) return;
+    const next = orderedPages[selectedPageIndex + offset];
+    if (next?.page_no) setSelectedPageNo(next.page_no);
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-bold">原文对照</h2>
+          <div className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">
+            {selectedPage?.page_no ? `第 ${selectedPage.page_no} 页` : '未定位页码'}
+            {draft?.source_region_id ? ` · 区域 ${draft.source_region_id}` : ''}
+          </div>
+        </div>
+        <div className="flex items-center gap-1">
+          <button type="button" className={SOFT_BUTTON_CLASS} aria-label="上一页" title="上一页" disabled={selectedPageIndex <= 0} onClick={() => movePage(-1)}><ChevronLeft size={13} /></button>
+          <button type="button" className={SOFT_BUTTON_CLASS} aria-label="下一页" title="下一页" disabled={selectedPageIndex < 0 || selectedPageIndex >= orderedPages.length - 1} onClick={() => movePage(1)}><ChevronRight size={13} /></button>
+        </div>
+      </div>
+      {warnings.length > 0 && <div className="mt-2 text-xs text-[var(--color-danger)]">{warnings.slice(0, 2).join('；')}</div>}
+      {image ? (
+        <>
+          <div className="mt-2 flex items-center gap-1 text-[11px] text-[var(--color-text-muted)]">
+            <button type="button" className={SOFT_BUTTON_CLASS} aria-label="缩小" title="缩小" onClick={() => setZoom((value) => Math.max(0.65, value - 0.2))}><ZoomOut size={13} /></button>
+            <button type="button" className={SOFT_BUTTON_CLASS} onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button>
+            <button type="button" className={SOFT_BUTTON_CLASS} aria-label="放大" title="放大" onClick={() => setZoom((value) => Math.min(2.4, value + 0.2))}><ZoomIn size={13} /></button>
+            <a className={`${SOFT_BUTTON_CLASS} ml-auto inline-flex items-center`} href={image} target="_blank" rel="noreferrer" title="新窗口打开"><ExternalLink size={13} /></a>
+          </div>
+          <div className="mt-2 max-h-[calc(100vh-260px)] overflow-auto rounded-md border border-[var(--color-border)] bg-white">
+            <div className="relative origin-top-left transition-[width]" style={{ width: `${zoom * 100}%` }}>
+              <img
+                src={image}
+                alt={`原文第 ${selectedPage?.page_no ?? '-'} 页`}
+                className="block h-auto w-full"
+                onLoad={(event) => setNaturalSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+              />
+              {regionStyle && (
+                <div
+                  className="pointer-events-none absolute border-2 border-[var(--color-danger)] bg-red-400/15 shadow-[0_0_0_2px_rgba(255,255,255,0.8)]"
+                  style={regionStyle}
+                  title="当前题原文区域"
+                />
+              )}
+            </div>
+          </div>
+          {draft?.source_page === selectedPage?.page_no && !regionStyle && (
+            <div className="mt-2 text-[10px] text-[var(--color-text-muted)]">已定位到原文页；当前识别结果暂未提供区域坐标。</div>
+          )}
+        </>
+      ) : <div className="mt-3 rounded-md border border-dashed border-[var(--color-border)] p-3 text-xs text-[var(--color-text-muted)]">{draft?.raw_text || '当前题没有可定位的页图。'}</div>}
+    </div>
+  );
+}
+
+function ChangeReviewPanel({
+  draft,
+  original,
+  restoreField,
+}: {
+  draft: ReviewQuestionDraft | null;
+  original: ReviewQuestionDraft | null;
+  restoreField: (field: keyof ReviewQuestionDraft) => void;
+}) {
+  const changedFields = getChangedReviewFields(original, draft);
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-bold">原稿差异</h2>
+        <span className="rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-[11px] text-[var(--color-text-muted)]">{changedFields.length} 处</span>
+      </div>
+      {changedFields.length === 0 ? (
+        <div className="mt-3 flex items-center gap-2 rounded-md bg-[var(--color-green-light)] p-2 text-xs font-semibold text-[var(--color-green)]"><CheckCircle2 size={14} />当前内容与识别原稿一致</div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {changedFields.map((field) => (
+            <details key={field} className="group rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)]">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-2.5 py-2 text-xs font-semibold text-[var(--color-text-secondary)]">
+                <span>{REVIEW_FIELD_LABELS[field] ?? field}</span><span className="text-[10px] text-[var(--color-accent)]">查看差异</span>
+              </summary>
+              <div className="border-t border-[var(--color-border)] p-2.5">
+                <ChangeValue before={displayReviewValue(original?.[field])} after={displayReviewValue(draft?.[field])} />
+                <button type="button" className={`${SOFT_BUTTON_CLASS} mt-2 w-full`} onClick={() => restoreField(field)}>仅恢复此字段</button>
+              </div>
+            </details>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChangeValue({ before, after }: { before: string; after: string }) {
+  let prefix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix += 1;
+  const beforeChanged = before.slice(prefix, before.length - suffix || before.length);
+  const afterChanged = after.slice(prefix, after.length - suffix || after.length);
+  const start = before.slice(Math.max(0, prefix - 36), prefix);
+  const end = suffix ? before.slice(before.length - suffix, Math.min(before.length, before.length - suffix + 36)) : '';
+  return (
+    <div className="space-y-2 text-[11px] leading-5">
+      <div><div className="mb-1 font-bold text-[var(--color-text-muted)]">识别原稿</div><div className="max-h-24 overflow-auto whitespace-pre-wrap rounded bg-[var(--color-red-light)] p-2 text-[var(--color-text-secondary)]">{prefix > 36 && '…'}{start}<mark className="bg-[#fecaca] text-[#991b1b] line-through">{beforeChanged || '（删除）'}</mark>{end}{suffix > 36 && '…'}</div></div>
+      <div><div className="mb-1 font-bold text-[var(--color-text-muted)]">当前版本</div><div className="max-h-24 overflow-auto whitespace-pre-wrap rounded bg-[var(--color-green-light)] p-2 text-[var(--color-text-secondary)]">{prefix > 36 && '…'}{start}<mark className="bg-[#bbf7d0] text-[#166534]">{afterChanged || '（删除）'}</mark>{end}{suffix > 36 && '…'}</div></div>
+    </div>
+  );
+}
+
+function ImageCachePanel({ assets, draft, canUpload, uploading, copyText, copyImage, attachAsset, uploadImage, copyMessage }: {
   assets: ImportMediaAsset[];
   draft: ReviewQuestionDraft | null;
+  canUpload: boolean;
+  uploading: boolean;
   copyText: (text: string, message: string) => Promise<void>;
   copyImage: (asset: ImportMediaAsset) => Promise<void>;
   attachAsset: (asset: ImportMediaAsset) => void;
+  uploadImage: (file: File) => void;
   copyMessage: string | null;
 }) {
   const used = new Set(draft?.figures.map((figure) => figure.local_path) ?? []);
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
-      <div className="flex items-center justify-between"><h2 className="text-sm font-bold">图片缓存区</h2>{copyMessage && <span className="text-xs text-[var(--color-success)]">{copyMessage}</span>}</div>
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-bold">图片缓存区</h2>
+        {copyMessage && <span className="text-xs text-[var(--color-success)]">{copyMessage}</span>}
+      </div>
+      <label className={`mt-3 flex cursor-pointer items-center justify-center rounded-md border border-dashed px-3 py-2 text-xs font-semibold ${canUpload ? 'border-[var(--color-accent)] bg-[#eef5ff] text-[var(--color-accent)]' : 'border-[var(--color-border)] text-[var(--color-text-muted)]'}`}>
+        {uploading ? '正在上传图片...' : canUpload ? '上传图片并插入当前题' : '当前任务暂不支持上传图片'}
+        <input
+          type="file"
+          accept="image/*"
+          disabled={!canUpload || uploading || !draft}
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.currentTarget.value = '';
+            if (file) uploadImage(file);
+          }}
+        />
+      </label>
       {assets.length === 0 && <div className="mt-3 rounded-md border border-dashed border-[var(--color-border)] p-3 text-xs text-[var(--color-text-muted)]">暂无缓存图片。导入识别提取到图片后会显示在这里。</div>}
-      <div className="mt-3 space-y-3">
+      <div className="mt-3 grid grid-cols-2 gap-2">
         {assets.map((asset) => {
           const ref = `![fig:${asset.image_id || asset.filename || asset.relative_path}]`;
           return (
-            <div key={asset.relative_path} className="rounded-md border border-[var(--color-border)] p-2">
-              <img src={fileUrl(asset.relative_path) ?? ''} className="max-h-28 w-full object-contain" />
-              <div className="mt-1 truncate text-[11px] text-[var(--color-text-muted)]">{asset.filename}</div>
-              {used.has(asset.relative_path) && <div className="mt-1 text-[11px] font-semibold text-[var(--color-success)]">当前题已用</div>}
-              <div className="mt-2 flex flex-wrap gap-1">
-                <button className={SOFT_BUTTON_CLASS} onClick={() => attachAsset(asset)}>插入引用</button>
-                <button className={SOFT_BUTTON_CLASS} onClick={() => void copyImage(asset)}>复制图片</button>
-                <button className={SOFT_BUTTON_CLASS} onClick={() => void copyText(ref, `已复制 ${ref}`)}>复制引用</button>
-                <button className={SOFT_BUTTON_CLASS} onClick={() => void copyText(asset.relative_path, '已复制图片路径')}>复制路径</button>
+            <article key={asset.relative_path} className="overflow-hidden rounded-md border border-[var(--color-border)] bg-white">
+              <button type="button" className="group relative block h-32 w-full bg-[#f7f9fc] p-2 hover:bg-[var(--color-accent-light)]" onClick={() => attachAsset(asset)} title="插入到当前光标位置">
+                <img src={fileUrl(asset.relative_path) ?? ''} className="h-full w-full object-contain" />
+                <span className="absolute inset-x-2 bottom-2 rounded bg-slate-900/75 px-2 py-1 text-[10px] font-semibold text-white opacity-0 transition-opacity group-hover:opacity-100">点击插入</span>
+              </button>
+              <div className="px-2 py-1.5">
+                <div className="truncate text-[11px] text-[var(--color-text-secondary)]" title={asset.filename}>{asset.filename || asset.relative_path}</div>
+                <div className="mt-1 flex items-center justify-between gap-1">
+                  {used.has(asset.relative_path) ? <span className="text-[10px] font-semibold text-[var(--color-success)]">当前题已用</span> : <span />}
+                  <div className="flex gap-1">
+                    <button type="button" className="text-[10px] font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-accent)]" onClick={() => void copyImage(asset)}>复制</button>
+                    <button type="button" className="text-[10px] font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-accent)]" onClick={() => void copyText(ref, `已复制 ${ref}`)}>引用</button>
+                  </div>
+                </div>
               </div>
-            </div>
+            </article>
           );
         })}
       </div>
@@ -758,40 +1908,16 @@ function ImageCachePanel({ assets, draft, copyText, copyImage, attachAsset, copy
   );
 }
 
-function ActionPanel({ aiProcessing, confirmAndNext, goNextRisk, discard, restore, generateSuggestion }: {
-  aiProcessing: boolean;
-  confirmAndNext: () => void;
-  goNextRisk: () => void;
-  discard: () => void;
-  restore: () => void;
-  generateSuggestion: () => void;
-}) {
-  return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
-      <h2 className="text-sm font-bold">当前题操作</h2>
-      <div className="mt-3 grid gap-2">
-        <button onClick={confirmAndNext} className={PRIMARY_BUTTON_CLASS}>确认并下一题</button>
-        <button onClick={goNextRisk} className={SOFT_BUTTON_CLASS}>跳到下一个风险题</button>
-        <button onClick={discard} className={`${SOFT_BUTTON_CLASS} text-[var(--color-danger)]`}>丢弃此题</button>
-        <button onClick={restore} className={SOFT_BUTTON_CLASS}>恢复原稿</button>
-        <button onClick={generateSuggestion} disabled={aiProcessing} className={SOFT_BUTTON_CLASS}>生成 AI 修复建议</button>
-      </div>
-    </div>
-  );
-}
-
-function BatchPanel({ aiProcessing, cacheMessage, confirmQueue, confirmClean, batchAnalysis, batchMetadata, exportJSON, clearCache, save, saving, canSave }: {
+function BatchPanel({ aiProcessing, cacheMessage, confirmQueue, confirmClean, batchAnalysis, batchMetadata, fastLatexCleanup, exportJSON, clearCache }: {
   aiProcessing: boolean;
   cacheMessage: string | null;
   confirmQueue: () => void;
   confirmClean: () => void;
   batchAnalysis: () => void;
   batchMetadata: () => void;
+  fastLatexCleanup: () => void;
   exportJSON: () => void;
   clearCache: () => void;
-  save: () => void;
-  saving: boolean;
-  canSave: boolean;
 }) {
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
@@ -799,11 +1925,11 @@ function BatchPanel({ aiProcessing, cacheMessage, confirmQueue, confirmClean, ba
       <div className="mt-3 grid gap-2">
         <button onClick={confirmQueue} className={SOFT_BUTTON_CLASS}>确认当前队列</button>
         <button onClick={confirmClean} className={SOFT_BUTTON_CLASS}>确认无风险题</button>
+        <button onClick={fastLatexCleanup} disabled={aiProcessing} className={SOFT_BUTTON_CLASS}>快速清洗 LaTeX</button>
         <button onClick={batchAnalysis} disabled={aiProcessing} className={SOFT_BUTTON_CLASS}>批量生成解析</button>
         <button onClick={batchMetadata} disabled={aiProcessing} className={SOFT_BUTTON_CLASS}>AI 补全元数据</button>
         <button onClick={exportJSON} className={SOFT_BUTTON_CLASS}>导出草稿 JSON</button>
         <button onClick={clearCache} className={SOFT_BUTTON_CLASS}>清除本地缓存</button>
-        <button onClick={save} disabled={saving || !canSave} className={PRIMARY_BUTTON_CLASS}>{saving ? '保存中...' : '保存入库'}</button>
       </div>
       {cacheMessage && <p className="mt-3 text-xs text-[var(--color-text-muted)]">{cacheMessage}</p>}
     </div>
@@ -848,6 +1974,6 @@ function CenteredState({ title, desc, action, onAction }: { title: string; desc:
   );
 }
 
-function statusLabel(status: ReviewQuestionDraft['status']): string {
+function statusLabel(status: ReviewQuestionDraft['status'] | KnowledgeReviewDraft['status']): string {
   return { pending: '待确认', modified: '已修改', discarded: '已丢弃', confirmed: '已确认' }[status] ?? status;
 }

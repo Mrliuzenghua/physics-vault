@@ -1,6 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react';
 
-import { addToBasket, clearBasket, getBasket, removeFromBasket, subscribeBasket } from '../services/api';
+import { addToBasket, clearBasket, getBasket, moveBasketItem, removeFromBasket, subscribeBasket } from '../services/api';
 import type { BasketItem } from '../types';
 
 export function useBasket() {
@@ -22,5 +22,9 @@ export function useBasket() {
     clearBasket();
   }, []);
 
-  return { items, count: items.length, add, remove, clear };
+  const move = useCallback((questionId: string, direction: 'up' | 'down') => {
+    moveBasketItem(questionId, direction);
+  }, []);
+
+  return { items, count: items.length, add, remove, clear, move };
 }

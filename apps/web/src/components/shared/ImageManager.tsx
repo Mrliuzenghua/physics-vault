@@ -11,6 +11,7 @@ import {
   validateQuestionImages,
 } from '../../services/api';
 import type { QuestionImageDetail, ValidationResponse } from '../../types';
+import { imageFileUrl } from '../../utils/imageUrl';
 
 const ROLE_LABELS: Record<string, string> = {
   stem: '题干图',
@@ -22,7 +23,7 @@ const ROLE_LABELS: Record<string, string> = {
 interface Props {
   questionId: string;
   stemText: string;
-  onImagesChanged?: () => void;
+  onImagesChanged?: (images: QuestionImageDetail[]) => void;
 }
 
 export default function ImageManager({ questionId, stemText, onImagesChanged }: Props) {
@@ -36,14 +37,16 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
 
-  const load = useCallback(async () => {
-    if (!questionId) return;
+  const load = useCallback(async (): Promise<QuestionImageDetail[]> => {
+    if (!questionId) return [];
     setLoading(true);
     try {
       const data = await fetchQuestionImages(questionId);
       setImages(data.images);
+      return data.images;
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '加载图片失败');
+      return [];
     } finally {
       setLoading(false);
     }
@@ -58,10 +61,10 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
 
   const handleAdd = useCallback(async (assetId: string) => {
     try {
-      await addQuestionImage(questionId, { asset_id: assetId, role: 'stem' });
+      await addQuestionImage(questionId, { asset_id: assetId, role: 'stem', placeholder_key: assetId });
       setShowPicker(false);
-      await load();
-      onImagesChanged?.();
+      const nextImages = await load();
+      onImagesChanged?.(nextImages);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '添加失败');
     }
@@ -71,8 +74,8 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
     if (!window.confirm('确定移除此图片绑定？不会删除素材文件。')) return;
     try {
       await deleteQuestionImage(questionId, assetId);
-      await load();
-      onImagesChanged?.();
+      const nextImages = await load();
+      onImagesChanged?.(nextImages);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '删除失败');
     }
@@ -83,8 +86,8 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
     if (!newId) return;
     try {
       await replaceQuestionImage(questionId, oldId, { old_asset_id: oldId, new_asset_id: newId });
-      await load();
-      onImagesChanged?.();
+      const nextImages = await load();
+      onImagesChanged?.(nextImages);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '替换失败');
     }
@@ -107,11 +110,13 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
   const handleUpdate = useCallback(async (assetId: string, field: string, value: unknown) => {
     try {
       await updateQuestionImage(questionId, assetId, { [field]: value });
-      setImages((prev) => prev.map((img) => img.asset_id === assetId ? { ...img, [field]: value } : img));
+      const nextImages = images.map((img) => img.asset_id === assetId ? { ...img, [field]: value } : img);
+      setImages(nextImages);
+      onImagesChanged?.(nextImages);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '更新失败');
     }
-  }, [questionId]);
+  }, [images, onImagesChanged, questionId]);
 
   const openPicker = useCallback(async () => {
     setShowPicker(true);
@@ -214,7 +219,7 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
           >
             {img.file_path ? (
               <img
-                src={`/files/${img.file_path}`}
+                src={imageFileUrl(img.file_path || img.filename) || ''}
                 alt={img.filename}
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
@@ -247,12 +252,29 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
                 style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)', fontFamily: 'monospace', fontSize: 10 }}
               />
             </div>
+            <div className="mt-2 flex items-center gap-1.5">
+              <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>尺寸</span>
+              {[40, 60, 80, 100].map((scale) => (
+                <button
+                  key={scale}
+                  type="button"
+                  onClick={() => handleUpdate(img.asset_id, 'display_scale', scale)}
+                  className="rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                  style={{
+                    background: (img.display_scale || 60) === scale ? 'var(--color-accent)' : 'var(--color-bg-hover)',
+                    color: (img.display_scale || 60) === scale ? '#fff' : 'var(--color-text-secondary)',
+                  }}
+                >
+                  {scale}%
+                </button>
+              ))}
+            </div>
 
             {/* Preview expanded */}
             {previewId === img.asset_id && (
               <div className="mt-2 rounded overflow-hidden border" style={{ borderColor: 'var(--color-border)' }}>
                 <img
-                  src={`/files/${img.file_path}`}
+                  src={imageFileUrl(img.file_path || img.filename) || ''}
                   alt={img.filename}
                   style={{ maxWidth: '100%', maxHeight: 300, display: 'block' }}
                   onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}

@@ -1,41 +1,27 @@
 import { useState, useEffect, useCallback } from 'react';
 
-type Theme = 'light' | 'dark' | 'system';
+type Theme = 'light';
 
 export function useTheme() {
-  const [theme, setThemeState] = useState<Theme>(() => {
-    return (localStorage.getItem('physics_vault_theme') as Theme) || 'system';
-  });
+  // The product visual language is intentionally blue-and-white.  Migrate any
+  // older dark/system preference so an OS dark preference cannot turn the
+  // workspace back into a black interface.
+  const [theme, setThemeState] = useState<Theme>('light');
 
-  const applyTheme = useCallback((t: Theme) => {
-    const root = document.documentElement;
-    if (t === 'system') {
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      root.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
-    } else {
-      root.setAttribute('data-theme', t);
-    }
+  const applyTheme = useCallback(() => {
+    document.documentElement.setAttribute('data-theme', 'light');
   }, []);
 
-  const setTheme = useCallback((t: Theme) => {
-    setThemeState(t);
-    localStorage.setItem('physics_vault_theme', t);
-    applyTheme(t);
+  const setTheme = useCallback(() => {
+    setThemeState('light');
+    localStorage.setItem('physics_vault_theme', 'light');
+    applyTheme();
   }, [applyTheme]);
 
   useEffect(() => {
-    applyTheme(theme);
-    if (theme === 'system') {
-      const mq = window.matchMedia('(prefers-color-scheme: dark)');
-      const handler = () => applyTheme('system');
-      mq.addEventListener('change', handler);
-      return () => mq.removeEventListener('change', handler);
-    }
+    applyTheme();
+    localStorage.setItem('physics_vault_theme', 'light');
   }, [theme, applyTheme]);
 
-  const toggleTheme = useCallback(() => {
-    setTheme(theme === 'dark' ? 'light' : 'dark');
-  }, [theme, setTheme]);
-
-  return { theme, setTheme, toggleTheme, isDark: theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches) };
+  return { theme, setTheme, isDark: false };
 }

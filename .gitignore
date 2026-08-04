@@ -7,6 +7,9 @@ Thumbs.db
 .playwright-cli/
 .workbuddy/
 output/
+.server-logs/
+.claude/
+.mcp.json
 
 # Python
 __pycache__/
@@ -22,6 +25,8 @@ node_modules/
 dist/
 coverage/
 .pnpm-store/
+apps/web/src/index-huahua.css
+scripts/screenshot_compose*.js
 
 # Local env
 .env
@@ -32,10 +37,17 @@ coverage/
 apps/data/
 data/app-db/*.sqlite3
 data/app-db/*.db
+data/app-db/*.sqlite3-shm
+data/app-db/*.sqlite3-wal
+data/agent_config.json
+data/runtime_ai_config.json
+data/mcp/memory.jsonl
+data/mcp/*.sqlite3
 data/assets/questions/*
 data/assets/extracted/*
 data/cache/knowledge/*
 data/cache/ai-tasks/*
+data/.cache/
 data/exports/*
 data/logs/*
 data/import-batches/*

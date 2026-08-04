@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import PureWindowsPath
 from typing import Any
 
 from ..repositories.question_search import QuestionSearchRepository
@@ -117,10 +118,10 @@ class QuestionSearchService:
         query: str | None,
     ) -> QuestionItem:
         options = self._parse_options(row.get("options_json"))
-        figures = (
-            json.loads(row["image_filenames_json"])
-            if isinstance(row.get("image_filenames_json"), str) and row["image_filenames_json"]
-            else (row.get("image_filenames_json") if isinstance(row.get("image_filenames_json"), list) else [])
+        figures = self._parse_figures(
+            row.get("figures_json"),
+            row.get("image_asset_ids_json"),
+            row.get("image_filenames_json"),
         )
         knowledge_points = row.get("knowledge_points", []) or []
 
@@ -139,7 +140,7 @@ class QuestionSearchService:
         return QuestionItem(
             question_id=row["question_id"],
             question_type=row.get("question_type"),
-            title=row.get("canonical_title"),
+            title=row.get("title_text") or row.get("canonical_title"),
             answer=row.get("answer_text"),
             analysis=row.get("analysis_text"),
             options=options,
@@ -147,7 +148,7 @@ class QuestionSearchService:
             difficulty=str(row.get("difficulty", "")) if row.get("difficulty") is not None else None,
             knowledge_point=row.get("topic3"),
             tags=self._build_tags(row),
-            source=row.get("primary_paper_id"),
+            source=self._resolve_display_source(row),
             year=resolved_year,
             status=row.get("status"),
             is_mistake=bool(row.get("is_mistake", False)),
@@ -179,6 +180,63 @@ class QuestionSearchService:
             return parsed if isinstance(parsed, list) else []
         except (json.JSONDecodeError, TypeError):
             return []
+
+    @classmethod
+    def _resolve_display_source(cls, row: dict[str, Any]) -> str | None:
+        for key in ("source_label", "paper_name", "source_text", "source", "primary_paper_id"):
+            label = cls._normalize_source_label(row.get(key))
+            if label:
+                return label
+        return None
+
+    @staticmethod
+    def _normalize_source_label(raw: Any) -> str | None:
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text or text.lower() in {"none", "null"}:
+            return None
+        if text.startswith("batch_"):
+            return None
+
+        label = PureWindowsPath(text).name or text
+        lower_label = label.lower()
+        for suffix in (".docx", ".doc", ".pdf", ".md", ".txt", ".json", ".png", ".jpg", ".jpeg", ".webp"):
+            if lower_label.endswith(suffix):
+                label = label[: -len(suffix)]
+                break
+        return label.strip() or None
+
+    @staticmethod
+    def _parse_json_list(raw: Any) -> list[Any]:
+        if isinstance(raw, list):
+            return raw
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @classmethod
+    def _parse_figures(
+        cls,
+        figures_raw: Any,
+        asset_ids_raw: Any,
+        filenames_raw: Any,
+    ) -> list[dict[str, Any]]:
+        figures = cls._parse_json_list(figures_raw)
+        if figures and all(isinstance(item, dict) for item in figures):
+            return figures
+
+        asset_ids = [str(item) for item in cls._parse_json_list(asset_ids_raw) if item]
+        filenames = [str(item) for item in cls._parse_json_list(filenames_raw) if item]
+        result: list[dict[str, Any]] = []
+        for index, filename in enumerate(filenames):
+            fig_uuid = asset_ids[index] if index < len(asset_ids) else filename
+            result.append({"fig_uuid": fig_uuid, "local_path": filename})
+        return result
 
     @staticmethod
     def _build_tags(row: dict[str, Any]) -> list[str]:

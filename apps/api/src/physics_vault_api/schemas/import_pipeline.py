@@ -7,7 +7,16 @@ from pydantic import BaseModel, Field
 
 
 DocumentType = Literal["pdf", "docx", "markdown", "html", "txt", "image"]
-TaskStatus = Literal["pending", "running", "completed", "failed"]
+TaskStatus = Literal[
+    "pending",
+    "running",
+    "retrying",
+    "cancel_requested",
+    "cancelled",
+    "completed",
+    "failed",
+]
+
 
 
 class ConvertDocumentRequest(BaseModel):
@@ -40,6 +49,7 @@ class ImportBatchResponse(BaseModel):
     relative_source_path: str
     status: str
     created_at: datetime
+    content_version: int = 1
 
 
 class PandocBatchResponse(BaseModel):
@@ -143,12 +153,60 @@ class DraftMetadataResponse(BaseModel):
 class ConfirmBatchQuestionsRequest(BaseModel):
     """Edited questions confirmed by the user in the import workbench."""
     questions: list[dict] = Field(..., description="User-edited question list")
+    media_assets: list[ImportMediaAsset] = Field(
+        default_factory=list,
+        description="All images extracted or uploaded for this import batch",
+    )
+    input_version: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional optimistic-lock version returned by the batch status API",
+    )
 
 
 class ConfirmBatchQuestionsResponse(BaseModel):
     task_id: str
     batch_id: str
     question_count: int
+
+
+class AiGeneratedReviewRequest(BaseModel):
+    """AI-generated question text submitted to the review workbench."""
+    source_text: str = Field(..., min_length=1, description="AI output containing generated questions")
+    source: str = Field(default="AI 题库助手", description="Human-readable source label")
+    chat_context: str | None = Field(default=None, description="Optional surrounding chat context")
+    session_id: str | None = Field(default=None, description="Optional Claude Code session id")
+
+
+class AiGeneratedReviewResponse(BaseModel):
+    task_id: str
+    batch_id: str
+    question_count: int
+    knowledge_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ReviewTaskListItem(BaseModel):
+    task_id: str
+    task_type: str
+    status: str
+    batch_id: str = ""
+    title: str = ""
+    question_count: int = 0
+    knowledge_count: int = 0
+    source: str = ""
+    created_at: str
+    updated_at: str
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ReviewTaskListResponse(BaseModel):
+    items: list[ReviewTaskListItem] = Field(default_factory=list)
+
+
+class DeleteReviewTaskResponse(BaseModel):
+    task_id: str
+    deleted: bool
 
 
 class ImportBatchStatusResponse(BaseModel):
@@ -161,6 +219,9 @@ class ImportBatchStatusResponse(BaseModel):
     question_count: int = 0
     created_at: str | None = None
     updated_at: str | None = None
+    content_version: int = 1
+    active_task_id: str | None = None
+    active_operation: str | None = None
 
 
 class CleanDocumentRequest(BaseModel):
@@ -178,15 +239,33 @@ class ParseStructuredQuestionsRequest(BaseModel):
     source_type: DocumentType = "markdown"
 
 
+class TaskErrorResponse(BaseModel):
+    error_type: str
+    message: str
+    technical_details: str | None = None
+    retryable: bool = False
+
+
 class ImportPipelineTaskResponse(BaseModel):
     task_id: str
     task_type: str
     status: TaskStatus
     created_at: datetime
     updated_at: datetime
-    input_summary: dict[str, str | int | None] = Field(default_factory=dict)
+    input_summary: dict = Field(default_factory=dict)
     result: dict | None = None
     error: str | None = None
+    progress: int = Field(default=0, ge=0, le=100)
+    current_step: str | None = None
+    attempt: int = Field(default=0, ge=0)
+    max_attempts: int = Field(default=1, ge=1)
+    idempotency_key: str | None = None
+    message_id: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    result_file_path: str | None = None
+    error_info: TaskErrorResponse | None = None
 
 
 class ConvertDocumentResponse(BaseModel):

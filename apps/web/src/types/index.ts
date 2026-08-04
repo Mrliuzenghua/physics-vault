@@ -12,6 +12,9 @@ export interface Option {
 export interface Figure {
   fig_uuid: string;
   local_path: string;
+  display_scale?: number;
+  display_align?: 'left' | 'center' | 'right';
+  caption?: string;
 }
 
 export interface SubQuestion {
@@ -42,6 +45,7 @@ export interface Question {
   options: Option[];
   answer: string;
   analysis: string;
+  editor_document?: Record<string, unknown>;
   sub_questions: SubQuestion[];
   figures: Figure[];
   difficulty: number;
@@ -182,7 +186,7 @@ export interface ComposeKnowledgeItem {
   points: string[];
 }
 
-export type HandoutTextBlockKind = 'body' | 'exam_title' | 'name_line' | 'section_title';
+export type HandoutTextBlockKind = 'body' | 'exam_title' | 'name_line' | 'section_title' | 'text_box';
 
 export interface HandoutTextBlockStyle {
   fontFamily?: HandoutFontFamily;
@@ -196,6 +200,7 @@ export interface ComposeTextItem {
   id: string;
   title: string;
   content: string;
+  document?: Record<string, unknown>;
   blockKind?: HandoutTextBlockKind;
   style?: HandoutTextBlockStyle;
 }
@@ -230,6 +235,7 @@ export interface LessonTextBlock {
   id: string;
   title: string;
   content: string;
+  document?: Record<string, unknown>;
   blockKind?: HandoutTextBlockKind;
   style?: HandoutTextBlockStyle;
 }
@@ -345,6 +351,11 @@ export interface TemplateConfig {
   header?: string;
   footer?: string;
   sections?: string[];
+  option_layout?: 'auto' | 'single' | 'double';
+  keep_question_together?: boolean;
+  keep_figure_with_stem?: boolean;
+  start_long_question_on_new_page?: boolean;
+  page_fill_percent?: number;
 }
 
 // ── Question Version History ──
@@ -523,6 +534,9 @@ export interface McpRuntimeStatus {
   tools: McpToolStatusMap;
   vl_available: boolean;
   llm_available: boolean;
+  http_mode?: boolean;
+  vl_model?: string | null;
+  llm_model?: string | null;
   last_checked_at: string | null;
 }
 
@@ -580,6 +594,72 @@ export interface AiAssistantResponse {
   usage?: Record<string, unknown> | null;
 }
 
+export interface AgentConfig {
+  claude_code_path: string;
+  enabled: boolean;
+  timeout_seconds: number;
+}
+
+export interface AgentConfigResponse {
+  config: AgentConfig;
+  available: boolean;
+  message: string;
+}
+
+export interface AgentTestResponse {
+  ok: boolean;
+  message: string;
+  version?: string | null;
+}
+
+export interface ReviewLatexCleanupResponse {
+  ok: boolean;
+  task_id?: string | null;
+  dry_run: boolean;
+  fast_path: boolean;
+  changed_questions: number;
+  replacement_count: number;
+  elapsed_ms: number;
+  items: Array<Record<string, unknown>>;
+  error?: string | null;
+  message: string;
+}
+
+export interface AgentAction {
+  action_id: string;
+  type: 'add_to_basket' | 'create_paper_draft' | 'open_questions';
+  label: string;
+  question_ids: string[];
+  payload: Record<string, unknown>;
+  requires_confirmation: boolean;
+}
+
+export interface AgentTraceStep {
+  title: string;
+  detail: string;
+  status: 'done' | 'warning' | 'error';
+}
+
+export interface AgentStreamEvent {
+  type: 'trace' | 'terminal' | 'warning' | 'error' | 'response';
+  message?: string;
+  step?: AgentTraceStep;
+  response?: QuestionPickerAgentResponse;
+}
+
+export interface QuestionPickerAgentResponse {
+  reply: string;
+  agent_used: boolean;
+  agent_name: string;
+  session_id?: string | null;
+  query_used: string;
+  selected_questions: AiAssistantQuestionContext[];
+  actions: AgentAction[];
+  warnings: string[];
+  trace: AgentTraceStep[];
+  raw_agent_text?: string | null;
+}
+
 export interface TaskLog {
   run_id: string;
   pipeline_name: string;
@@ -590,6 +670,72 @@ export interface TaskLog {
   question_count?: number;
   success_count?: number;
   fail_count?: number;
+}
+
+export interface ChangeBatch {
+  batch_id: string;
+  change_type: string;
+  reason?: string | null;
+  source: string;
+  status: string;
+  target_count: number;
+  changed_count: number;
+  created_at: string;
+  applied_at?: string | null;
+  rolled_back_at?: string | null;
+  rollback_reason?: string | null;
+}
+
+export interface ChangeItem {
+  item_id: string;
+  batch_id: string;
+  entity_type: string;
+  entity_id: string;
+  field_name: string;
+  status: string;
+  risk_level: string;
+  created_at: string;
+  before_value: unknown;
+  after_value: unknown;
+}
+
+export interface RollbackPreviewItem {
+  question_id: string;
+  field_name: string;
+  current_value: unknown;
+  rollback_to: unknown;
+  expected_current: unknown;
+  status: 'will_rollback' | 'already_rolled_back' | 'current_value_conflict' | string;
+}
+
+export interface ChangeBatchListResponse {
+  ok: boolean;
+  items: ChangeBatch[];
+  total: number;
+  limit: number;
+  canonical_database_path?: string;
+  review_database_path?: string;
+}
+
+export interface ChangeBatchDetailResponse {
+  ok: boolean;
+  batch: ChangeBatch;
+  items: ChangeItem[];
+  canonical_database_path?: string;
+  review_database_path?: string;
+}
+
+export interface RollbackChangeBatchResponse {
+  ok: boolean;
+  batch_id: string;
+  change_type: string;
+  dry_run: boolean;
+  requires_confirmation: boolean;
+  rollbackable_count: number;
+  changed_count: number;
+  conflict_count: number;
+  items: RollbackPreviewItem[];
+  batch?: ChangeBatch;
 }
 
 export interface SearchResponse {
@@ -609,7 +755,14 @@ export interface ApiError {
 
 export type ImportMode = 'convert_only' | 'convert_clean' | 'convert_clean_parse' | 'ai_parse';
 
-export type ImportTaskStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type ImportTaskStatus =
+  | 'pending'
+  | 'running'
+  | 'retrying'
+  | 'cancel_requested'
+  | 'cancelled'
+  | 'completed'
+  | 'failed';
 
 export type DocumentSourceType = 'pdf' | 'docx' | 'markdown' | 'html' | 'txt' | 'image';
 
@@ -651,6 +804,7 @@ export interface ImportBatchResponse {
   relative_source_path: string;
   status: string;
   created_at: string;
+  content_version: number;
 }
 
 export interface PandocBatchResponse {
@@ -775,13 +929,64 @@ export interface AiParseDocumentResponse {
 
 export interface ImportPipelineTaskResponse {
   task_id: string;
-  task_type: ImportTaskType;
+  task_type: ImportTaskType | 'word_export' | 'pptx_export' | `background_${string}`;
   status: ImportTaskStatus;
   created_at: string;
   updated_at: string;
   input_summary: Record<string, string | number | null>;
   result: Record<string, unknown> | null;
   error: string | null;
+  progress?: number;
+  current_step?: string | null;
+  attempt?: number;
+  max_attempts?: number;
+  result_file_path?: string | null;
+  error_info?: {
+    error_type: string;
+    message: string;
+    technical_details: string | null;
+    retryable: boolean;
+  } | null;
+}
+
+export interface TaskCenterError {
+  error_type: string;
+  user_message: string;
+  technical_detail: string | null;
+  retryable: boolean;
+}
+
+export interface TaskCenterItem {
+  task_id: string;
+  task_type: string;
+  task_name: string;
+  status: ImportTaskStatus;
+  progress: number;
+  current_step: string;
+  attempt: number;
+  max_attempts: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  result_available: boolean;
+  error: TaskCenterError | null;
+  input_summary: Record<string, unknown>;
+  result_summary: Record<string, unknown> | null;
+}
+
+export interface TaskCenterListResponse {
+  items: TaskCenterItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+}
+
+export interface TaskActionResponse {
+  task: TaskCenterItem;
+  message: string;
+  original_task_id?: string | null;
 }
 
 export interface ImportFileInfo {
@@ -856,6 +1061,7 @@ export type HandoutPageSize = 'A4' | 'A3';
 export type HandoutPageOrientation = 'portrait' | 'landscape';
 export type HandoutLayoutMode = 'flow' | 'paged-single' | 'paged-double';
 export type HandoutFontFamily = 'songti' | 'heiti' | 'kaiti' | 'fangsong' | 'system';
+export type HandoutOptionLayout = 'auto' | 'single' | 'double';
 
 export interface HandoutStyleConfig {
   fontFamily: HandoutFontFamily;
@@ -872,12 +1078,19 @@ export interface HandoutStyleConfig {
   pageSize: HandoutPageSize;
   pageOrientation: HandoutPageOrientation;
   layoutMode: HandoutLayoutMode;
+  optionLayout: HandoutOptionLayout;
+  keepQuestionTogether: boolean;
+  keepFigureWithStem: boolean;
+  startLongQuestionOnNewPage: boolean;
+  pageFillPercent: number;
 }
 
 export interface HandoutStylePreset {
   id: string;
   name: string;
   config: HandoutStyleConfig;
+  category?: 'handout' | 'exam' | 'teacher' | 'large-format';
+  description?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -917,6 +1130,7 @@ export interface HandoutPageBreakItem {
 }
 
 export interface HandoutItem {
+  id?: string;
   type: 'question' | 'page_break' | 'knowledge' | 'text';
   question?: Question;
   title?: string;
@@ -994,9 +1208,38 @@ export interface ReviewQuestionDraft {
   import_batch_id?: string;
   source_page?: number | null;
   source_region_id?: string | null;
+  source_bbox?: [number, number, number, number] | null;
   raw_text?: string | null;
   status: ReviewQuestionStatus;
   figureIssues: FigureReferenceIssue[];
+}
+
+export interface ReviewDraftStatePayload {
+  drafts: ReviewQuestionDraft[];
+  knowledge_drafts: KnowledgeReviewDraft[];
+  task_meta: Record<string, unknown>;
+  current_index: number;
+  queue: string;
+}
+
+export interface ReviewDraftResponse {
+  task_id: string;
+  version: number;
+  state: ReviewDraftStatePayload;
+  updated_at: string;
+}
+
+export interface ReviewDraftLookupResponse {
+  draft: ReviewDraftResponse | null;
+}
+
+export interface ReviewDraftVersionListResponse {
+  items: ReviewDraftResponse[];
+}
+
+export interface SaveReviewDraftRequest {
+  base_version: number;
+  state: ReviewDraftStatePayload;
 }
 
 // ── Review Save API Types ──
@@ -1017,6 +1260,7 @@ export interface ReviewedQuestionPayload {
   import_batch_id?: string;
   source_page?: number | null;
   source_region_id?: string | null;
+  source_bbox?: [number, number, number, number] | null;
   raw_text?: string | null;
   review_status: string;
 }
@@ -1039,16 +1283,89 @@ export interface SaveReviewedQuestionsResponse {
   results: SaveResultItem[];
 }
 
-// ── Assets Manager Types ──
+export interface AiGeneratedReviewRequest {
+  source_text: string;
+  source?: string;
+  chat_context?: string | null;
+  session_id?: string | null;
+}
+
+export interface AiGeneratedReviewResponse {
+  task_id: string;
+  batch_id: string;
+  question_count: number;
+  knowledge_count: number;
+  warnings: string[];
+}
+
+export interface ReviewTaskListItem {
+  task_id: string;
+  task_type: string;
+  status: string;
+  batch_id: string;
+  title: string;
+  question_count: number;
+  knowledge_count: number;
+  source: string;
+  created_at: string;
+  updated_at: string;
+  warnings: string[];
+}
+
+export interface ReviewTaskListResponse {
+  items: ReviewTaskListItem[];
+}
+
+export interface DeleteReviewTaskResponse {
+  task_id: string;
+  deleted: boolean;
+}
+
+export interface KnowledgeReviewDraft {
+  draft_id: string;
+  topic3_id: string;
+  topic3_name: string;
+  topic2_id: string;
+  topic2_name: string;
+  topic1_id: string;
+  topic1_name: string;
+  source_chapter: string;
+  definition: string;
+  formula: string;
+  key_summary: string;
+  error_prone: string;
+  example_analysis: string;
+  tags: string[];
+  raw_text: string;
+  status: 'pending' | 'modified' | 'confirmed' | 'discarded';
+}
+
+export interface SaveReviewedKnowledgeRequest {
+  task_id: string;
+  knowledge_drafts: Array<KnowledgeReviewDraft & { review_status: string }>;
+}
+
+export interface SaveReviewedKnowledgeResponse {
+  saved_count: number;
+  skipped_count: number;
+  failed_count: number;
+  results: SaveResultItem[];
+}
+
+  // ── Assets Manager Types ──
 
 export interface AssetItem {
   filename: string;
   relative_path: string;
+  source?: 'question_bank' | 'import_batch' | string;
+  batch_id?: string | null;
   size_bytes: number;
   mime_type: string;
   modified_at: string;
   is_referenced: boolean;
   reference_count: number;
+  reference_question_ids: string[];
+  lifecycle_status: 'referenced' | 'unreferenced' | 'staged' | 'imported' | 'unknown' | string;
 }
 
 export interface AssetStats {
@@ -1061,6 +1378,61 @@ export interface AssetStats {
 export interface AssetListResponse {
   assets: AssetItem[];
   stats: AssetStats;
+  library_stats: AssetStats;
+  batches: AssetBatchSummary[];
+  pagination: AssetPagination;
+  reference_scan_available: boolean;
+}
+
+export interface AssetBatchSummary {
+  batch_id: string;
+  asset_count: number;
+  referenced: number;
+  unreferenced: number;
+  total_size_bytes: number;
+  modified_at: string;
+}
+
+export interface AssetPagination {
+  page: number;
+  page_size: number;
+  total_items: number;
+  total_pages: number;
+}
+
+export interface CleanupPreviewResponse {
+  candidate_count: number;
+  reclaimable_bytes: number;
+  protected_count: number;
+  scope: string;
+}
+
+export interface CacheCleanupPreviewResponse {
+  batch_id?: string | null;
+  batch_count: number;
+  candidate_count: number;
+  reclaimable_bytes: number;
+  protected_count: number;
+  active_batches: string[];
+}
+
+export interface DuplicateAssetGroup {
+  content_hash: string;
+  copies: number;
+  size_bytes: number;
+  reclaimable_bytes: number;
+  paths: string[];
+}
+
+export interface StorageAnalysisResponse {
+  scanned_files: number;
+  duplicate_groups: number;
+  duplicate_files: number;
+  reclaimable_bytes: number;
+  tiny_files: string[];
+  corrupt_files: string[];
+  oversized_files: string[];
+  groups: DuplicateAssetGroup[];
 }
 
 export interface CleanupResponse {
@@ -1199,6 +1571,7 @@ export interface QuestionImageDetail {
   width: number | null;
   height: number | null;
   description: string | null;
+  display_scale?: number;
 }
 
 export interface ImageListResponse {

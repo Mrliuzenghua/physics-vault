@@ -3,7 +3,13 @@
   AiChatMessage,
   AiChatTestResponse,
   AiAssistantResponse,
+  AgentStreamEvent,
+  AgentConfig,
+  AgentConfigResponse,
+  AgentTestResponse,
   BasketItem,
+  ChangeBatchDetailResponse,
+  ChangeBatchListResponse,
   CleanDocumentRequest,
   CleanDocumentResponse,
   Collection,
@@ -29,12 +35,18 @@
   ParseStructuredQuestionsRequest,
   ParseStructuredQuestionsResponse,
   Question,
+  QuestionPickerAgentResponse,
   RecognizeBatchResponse,
   RestorePackageResponse,
+  ReviewLatexCleanupResponse,
+  RollbackChangeBatchResponse,
   SearchFilters,
   SearchResponse,
   SystemSettings,
   TaskLog,
+  TaskActionResponse,
+  TaskCenterItem,
+  TaskCenterListResponse,
   Template,
   UploadImportFileResponse,
 } from '../types';
@@ -50,6 +62,7 @@ export {
   getMcpConfig,
   getSettings,
   getTheme,
+  moveBasketItem,
   pushMcpConfigToBackend,
   removeFromBasket,
   saveMcpConfig,
@@ -121,6 +134,27 @@ export async function fetchQuestionsByIds(questionIds: string[]): Promise<Questi
   return result.items.map(normalizeQuestion);
 }
 
+export async function deleteQuestions(questionIds: string[]): Promise<{
+  requested_count: number;
+  deleted_count: number;
+  missing_ids: string[];
+}> {
+  return request('/api/questions/batch-delete', {
+    method: 'POST',
+    body: JSON.stringify({ question_ids: questionIds }),
+  });
+}
+
+export async function returnQuestionToReview(
+  questionId: string,
+  reason = '题目需要回炉重造',
+): Promise<{ question_id: string; review_id?: string | null; status: 'queued'; message: string }> {
+  return request(`/api/questions/${encodeURIComponent(questionId)}/return-to-review`, {
+    method: 'POST',
+    body: JSON.stringify({ reason, reviewer: 'teacher' }),
+  });
+}
+
 export async function listPaperDrafts(limit = 30): Promise<PaperDraftListResponse> {
   return request(`/api/paper-drafts?limit=${limit}`);
 }
@@ -132,6 +166,7 @@ export async function fetchLatestPaperDraft(): Promise<PaperDraft | null> {
 export async function savePaperDraft(
   pkg: LessonPackage,
   qualityReport: Record<string, unknown> = {},
+  documentRevision = 0,
 ): Promise<PaperDraft> {
   const questionMap = new Map(pkg.questions.map((question) => [question.question_id, question]));
   const textMap = new Map(pkg.textBlocks.map((block) => [block.id, block]));
@@ -192,6 +227,7 @@ export async function savePaperDraft(
       status: 'draft',
       items,
       metadata: {
+        documentRevision,
         headerFooter: pkg.headerFooter,
         styleConfig: pkg.styleConfig,
         slideTemplate: pkg.slideTemplate,
@@ -221,12 +257,23 @@ export async function updateQuestion(id: string, data: Partial<Question>): Promi
   delete contentData.has_media;
   delete contentData.stem_text;
   delete contentData.canonical_title;
-  const result = await request<Question | Record<string, unknown>>(`/questions/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(contentData),
-  });
-  return normalizeQuestion(result);
-}
+    const result = await request<Question | Record<string, unknown>>(`/questions/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(contentData),
+    });
+    const normalized = normalizeQuestion(result);
+    // The question PUT intentionally omits media fields because image assets
+    // are managed by dedicated endpoints. Keep the current media metadata in
+    // the client response so saving text cannot make referenced figures vanish.
+    return {
+      ...normalized,
+      figures: normalized.figures?.length ? normalized.figures : data.figures || [],
+      image_filenames: normalized.image_filenames?.length ? normalized.image_filenames : data.image_filenames,
+      image_asset_ids: normalized.image_asset_ids?.length ? normalized.image_asset_ids : data.image_asset_ids,
+      image_count: normalized.image_count || data.image_count || 0,
+      has_media: normalized.has_media ?? data.has_media,
+    };
+  }
 
 // 鈹€鈹€ Question Version History 鈹€鈹€
 
@@ -298,6 +345,78 @@ export async function fetchProcessingRuns(): Promise<TaskLog[]> {
   return request('/processing-runs');
 }
 
+export async function fetchTasks(params: {
+  status?: string;
+  task_type?: string;
+  created_from?: string;
+  created_to?: string;
+  page?: number;
+  page_size?: number;
+} = {}): Promise<TaskCenterListResponse> {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== '') search.set(key, String(value));
+  });
+  return request(`/api/tasks?${search.toString()}`);
+}
+
+export async function fetchTask(taskId: string): Promise<TaskCenterItem> {
+  return request(`/api/tasks/${encodeURIComponent(taskId)}`);
+}
+
+export async function retryTask(taskId: string): Promise<TaskActionResponse> {
+  return request(`/api/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' });
+}
+
+export async function cancelTask(taskId: string): Promise<TaskActionResponse> {
+  return request(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' });
+}
+
+export async function downloadTaskResult(taskId: string): Promise<void> {
+  const response = await fetch(`${BASE}/api/tasks/${encodeURIComponent(taskId)}/download`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(extractErrorMessage(payload, `HTTP ${response.status}`));
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  const filename = utf8Name ? decodeURIComponent(utf8Name) : plainName || `task-${taskId}`;
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function fetchChangeBatches(params: {
+  change_type?: string;
+  status?: string;
+  limit?: number;
+} = {}): Promise<ChangeBatchListResponse> {
+  const search = new URLSearchParams();
+  if (params.change_type) search.set('change_type', params.change_type);
+  if (params.status) search.set('status', params.status);
+  search.set('limit', String(params.limit ?? 50));
+  return request(`/api/audit/batches?${search.toString()}`);
+}
+
+export async function fetchChangeBatch(batchId: string): Promise<ChangeBatchDetailResponse> {
+  return request(`/api/audit/batches/${encodeURIComponent(batchId)}`);
+}
+
+export async function rollbackChangeBatch(
+  batchId: string,
+  body: { dry_run?: boolean; reason?: string; allow_conflicts?: boolean },
+): Promise<RollbackChangeBatchResponse> {
+  return request(`/api/audit/batches/${encodeURIComponent(batchId)}/rollback`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
 export async function fetchEmbeddingStatus(): Promise<unknown> {
   return request('/embeddings/status');
 }
@@ -310,6 +429,15 @@ export async function healthCheck(): Promise<{ status: string }> {
 
 export async function fetchMcpStatus(): Promise<import('../types').McpRuntimeStatus> {
   return request('/api/mcp/status');
+}
+
+export async function fetchMcpRuntimeConfig(): Promise<{
+  vl: McpConfig['vl'];
+  llm: McpConfig['llm'];
+  vl_configured: boolean;
+  llm_configured: boolean;
+}> {
+  return request('/api/mcp/config');
 }
 
 export async function testMcpConnection(target: 'vl' | 'llm'): Promise<import('../types').McpConnectionTestResponse> {
@@ -368,28 +496,69 @@ export async function createImportBatch(file: File): Promise<ImportBatchResponse
   return res.json();
 }
 
+async function waitForImportTask(
+  initialTask: ImportPipelineTaskResponse,
+  timeoutMs = 30 * 60 * 1000,
+): Promise<ImportPipelineTaskResponse> {
+  let task = initialTask;
+  const deadline = Date.now() + timeoutMs;
+  while (
+    task.status === 'pending'
+    || task.status === 'running'
+    || task.status === 'retrying'
+    || task.status === 'cancel_requested'
+  ) {
+    if (Date.now() >= deadline) {
+      throw new Error('后台任务仍在运行，可稍后从导入记录中继续查看');
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    task = await fetchImportTask(task.task_id);
+  }
+  if (task.status === 'failed') {
+    throw new Error(task.error || '后台任务执行失败');
+  }
+  if (task.status === 'cancelled') {
+    throw new Error('后台任务已取消');
+  }
+  return task;
+}
+
+async function runQueuedBatchStage<T>(batchId: string, stage: string): Promise<T> {
+  let initialTask: ImportPipelineTaskResponse;
+  try {
+    initialTask = await request<ImportPipelineTaskResponse>(
+      `/api/import/batches/${encodeURIComponent(batchId)}/${stage}-task`,
+      { method: 'POST' },
+    );
+  } catch (submissionError) {
+    // The server may have accepted the job before the connection dropped.
+    // Recover the durable task id instead of submitting the same work again.
+    const status = await fetchImportBatchStatus(batchId).catch(() => null);
+    const expectedOperation = stage.replaceAll('-', '_');
+    if (!status?.active_task_id || status.active_operation !== expectedOperation) {
+      throw submissionError;
+    }
+    initialTask = await fetchImportTask(status.active_task_id);
+  }
+  const task = await waitForImportTask(initialTask);
+  if (!task.result) throw new Error('后台任务完成但没有返回结果');
+  return task.result as T;
+}
+
 export async function runImportBatchPandoc(batchId: string): Promise<PandocBatchResponse> {
-  return request(`/api/import/batches/${encodeURIComponent(batchId)}/pandoc`, {
-    method: 'POST',
-  });
+  return runQueuedBatchStage<PandocBatchResponse>(batchId, 'pandoc');
 }
 
 export async function runImportBatchAiClean(batchId: string): Promise<AiCleanBatchResponse> {
-  return request(`/api/import/batches/${encodeURIComponent(batchId)}/ai-clean`, {
-    method: 'POST',
-  });
+  return runQueuedBatchStage<AiCleanBatchResponse>(batchId, 'ai-clean');
 }
 
 export async function runImportBatchAiStructure(batchId: string): Promise<AiStructureBatchResponse> {
-  return request(`/api/import/batches/${encodeURIComponent(batchId)}/ai-structure`, {
-    method: 'POST',
-  });
+  return runQueuedBatchStage<AiStructureBatchResponse>(batchId, 'ai-structure');
 }
 
 export async function runImportBatchRecognize(batchId: string): Promise<RecognizeBatchResponse> {
-  return request(`/api/import/batches/${encodeURIComponent(batchId)}/recognize`, {
-    method: 'POST',
-  });
+  return runQueuedBatchStage<RecognizeBatchResponse>(batchId, 'recognize');
 }
 
 export async function extractBatchImages(batchId: string): Promise<ExtractBatchImagesResponse> {
@@ -409,6 +578,44 @@ export async function runImportBatchAiRefine(
   });
 }
 
+export interface PersistedImportBatchSummary {
+  batch_id: string;
+  source: string;
+  original_filename: string;
+  status: string;
+  question_count: number;
+  image_count: number;
+  duplicate_count: number;
+  updated_at: string;
+  created_at: string;
+  error?: string | null;
+  retryable: boolean;
+  active_task_id?: string | null;
+  active_operation?: string | null;
+  content_version: number;
+}
+
+export interface ImportBatchStatus {
+  batch_id: string;
+  status: string;
+  content_version: number;
+  active_task_id?: string | null;
+  active_operation?: string | null;
+}
+
+export async function fetchImportBatchStatus(batchId: string): Promise<ImportBatchStatus> {
+  return request(`/api/import/batches/${encodeURIComponent(batchId)}`);
+}
+
+export async function fetchImportBatchOverview(limit = 80): Promise<PersistedImportBatchSummary[]> {
+  const result = await request<{ items: PersistedImportBatchSummary[] }>(`/api/import/batches?limit=${limit}`);
+  return result.items ?? [];
+}
+
+export async function retrySavedImportBatch(batchId: string): Promise<RecognizeBatchResponse> {
+  return request(`/api/import/batches/${encodeURIComponent(batchId)}/retry`, { method: 'POST' });
+}
+
 export async function sendAiAssistantChat(
   messages: AiChatMessage[],
   options?: { query?: string; contextLimit?: number; temperature?: number },
@@ -422,6 +629,113 @@ export async function sendAiAssistantChat(
       temperature: options?.temperature ?? 0.35,
     }),
   });
+}
+
+export async function fetchAgentConfig(): Promise<AgentConfigResponse> {
+  return request('/api/agents/config');
+}
+
+export async function saveAgentConfig(config: AgentConfig): Promise<AgentConfigResponse> {
+  return request('/api/agents/config', {
+    method: 'POST',
+    body: JSON.stringify(config),
+  });
+}
+
+export async function testClaudeCodeAgent(): Promise<AgentTestResponse> {
+  return request('/api/agents/test-claude-code', { method: 'POST' });
+}
+
+export async function fastCleanReviewLatex(body: {
+  task_id?: string;
+  user_text?: string;
+  dry_run?: boolean;
+}): Promise<ReviewLatexCleanupResponse> {
+  return request('/api/agents/review-latex-cleanup', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function runQuestionPickerAgent(
+  messages: AiChatMessage[],
+  options?: {
+    query?: string;
+    contextLimit?: number;
+    contextQuestionIds?: string[];
+    sessionId?: string;
+    resumeSession?: boolean;
+  },
+): Promise<QuestionPickerAgentResponse> {
+  return request('/api/agents/question-picker', {
+    method: 'POST',
+    body: JSON.stringify({
+      messages,
+      query: options?.query,
+      context_limit: options?.contextLimit ?? 12,
+      context_question_ids: options?.contextQuestionIds ?? [],
+      session_id: options?.sessionId,
+      resume_session: options?.resumeSession ?? false,
+    }),
+  });
+}
+
+export async function streamQuestionPickerAgent(
+  messages: AiChatMessage[],
+  options: {
+    query?: string;
+    contextLimit?: number;
+    contextQuestionIds?: string[];
+    sessionId?: string;
+    resumeSession?: boolean;
+    signal?: AbortSignal;
+    onEvent: (event: AgentStreamEvent) => void;
+  },
+): Promise<void> {
+  const res = await fetch(`${BASE}/api/agents/question-picker/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: options.signal,
+    body: JSON.stringify({
+      messages,
+      query: options.query,
+      context_limit: options.contextLimit ?? 12,
+      context_question_ids: options.contextQuestionIds ?? [],
+      session_id: options.sessionId,
+      resume_session: options.resumeSession ?? false,
+    }),
+  });
+
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({ detail: res.statusText || `HTTP ${res.status}` }));
+    throw new Error(extractErrorMessage(payload, `HTTP ${res.status}`));
+  }
+  if (!res.body) {
+    throw new Error('浏览器没有返回可读取的智能体事件流');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      options.onEvent(JSON.parse(trimmed) as AgentStreamEvent);
+    }
+  }
+
+  buffer += decoder.decode();
+  const trimmed = buffer.trim();
+  if (trimmed) {
+    options.onEvent(JSON.parse(trimmed) as AgentStreamEvent);
+  }
 }
 
 export async function completeImportDraftMetadata(
@@ -438,10 +752,31 @@ export async function completeImportDraftMetadata(
 export async function confirmImportBatch(
   batchId: string,
   questions: Record<string, unknown>[],
+  inputVersion?: number,
+  mediaAssets: import('../types').ImportMediaAsset[] = [],
 ): Promise<{ task_id: string; batch_id: string; question_count: number }> {
   return request(`/api/import/batches/${encodeURIComponent(batchId)}/confirm`, {
     method: 'POST',
-    body: JSON.stringify({ questions }),
+    body: JSON.stringify({ questions, input_version: inputVersion, media_assets: mediaAssets }),
+  });
+}
+
+export async function submitAiGeneratedReview(
+  body: import('../types').AiGeneratedReviewRequest,
+): Promise<import('../types').AiGeneratedReviewResponse> {
+  return request('/api/import/ai-generated-review', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchReviewTasks(limit = 80): Promise<import('../types').ReviewTaskListResponse> {
+  return request(`/api/import/review-tasks?limit=${limit}`);
+}
+
+export async function deleteReviewTask(taskId: string): Promise<import('../types').DeleteReviewTaskResponse> {
+  return request(`/api/import/review-tasks/${encodeURIComponent(taskId)}`, {
+    method: 'DELETE',
   });
 }
 
@@ -557,14 +892,142 @@ export async function saveReviewedQuestions(
   });
 }
 
+export async function fetchBatchImages(batchId: string): Promise<import('../types').ImportMediaAsset[]> {
+  try {
+    return await request(`/api/import/batches/${encodeURIComponent(batchId)}/images`);
+  } catch {
+    // Keep historical batches usable while an older API process is still running.
+    const result = await fetchAssetList({ source: 'all', batchId, pageSize: 200 });
+    return result.assets
+      .filter((asset) => asset.batch_id === batchId)
+      .map((asset) => ({
+        image_id: asset.filename || asset.relative_path,
+        filename: asset.filename,
+        relative_path: asset.relative_path,
+        absolute_path: '',
+        size: asset.size_bytes,
+      }));
+  }
+}
+
+export async function saveReviewedKnowledge(
+  body: import('../types').SaveReviewedKnowledgeRequest,
+): Promise<import('../types').SaveReviewedKnowledgeResponse> {
+  return request('/api/review/save-knowledge', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export class ReviewDraftConflictError extends Error {
+  current: import('../types').ReviewDraftResponse | null;
+
+  constructor(current: import('../types').ReviewDraftResponse | null) {
+    super('服务器草稿已更新，请先处理版本冲突');
+    this.name = 'ReviewDraftConflictError';
+    this.current = current;
+  }
+}
+
+export async function fetchReviewDraft(taskId: string): Promise<import('../types').ReviewDraftLookupResponse> {
+  return request(`/api/review/drafts/${encodeURIComponent(taskId)}`);
+}
+
+export async function saveReviewDraft(
+  taskId: string,
+  body: import('../types').SaveReviewDraftRequest,
+): Promise<import('../types').ReviewDraftResponse> {
+  const response = await fetch(`${BASE}/api/review/drafts/${encodeURIComponent(taskId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (response.status === 409) {
+    const payload = await response.json().catch(() => null) as { detail?: { current?: import('../types').ReviewDraftResponse | null } } | null;
+    throw new ReviewDraftConflictError(payload?.detail?.current ?? null);
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(extractErrorMessage(payload, `HTTP ${response.status}`));
+  }
+  return response.json();
+}
+
+export async function fetchReviewDraftVersions(
+  taskId: string,
+  limit = 20,
+): Promise<import('../types').ReviewDraftVersionListResponse> {
+  return request(`/api/review/drafts/${encodeURIComponent(taskId)}/versions?limit=${limit}`);
+}
+
+export async function deleteReviewDraft(taskId: string): Promise<void> {
+  await request(`/api/review/drafts/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
+}
+
+export async function restoreReviewDraftVersion(
+  taskId: string,
+  version: number,
+  baseVersion: number,
+): Promise<import('../types').ReviewDraftResponse> {
+  return request(`/api/review/drafts/${encodeURIComponent(taskId)}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({ version, base_version: baseVersion }),
+  });
+}
+
 // 鈹€鈹€ Assets Manager API 鈹€鈹€
 
 export async function fetchAssetList(
-  filterMode: string = 'all',
-  keyword: string = '',
+  options: {
+    filterMode?: string;
+    keyword?: string;
+    source?: string;
+    batchId?: string;
+    sortBy?: string;
+    sortOrder?: string;
+    page?: number;
+    pageSize?: number;
+    refresh?: boolean;
+  } = {},
 ): Promise<import('../types').AssetListResponse> {
-  const params = new URLSearchParams({ filter_mode: filterMode, keyword });
+  const params = new URLSearchParams({
+    filter_mode: options.filterMode ?? 'all',
+    keyword: options.keyword ?? '',
+    source: options.source ?? 'all',
+    batch_id: options.batchId ?? '',
+    sort_by: options.sortBy ?? 'modified_at',
+    sort_order: options.sortOrder ?? 'desc',
+    page: String(options.page ?? 1),
+    page_size: String(options.pageSize ?? 60),
+    refresh: String(options.refresh ?? false),
+  });
   return request(`/api/assets?${params}`);
+}
+
+export async function fetchAssetCleanupPreview(): Promise<import('../types').CleanupPreviewResponse> {
+  return request('/api/assets/cleanup-preview');
+}
+
+export async function fetchImportCacheCleanupPreview(
+  batchId: string = '',
+): Promise<import('../types').CacheCleanupPreviewResponse> {
+  const params = new URLSearchParams({ batch_id: batchId });
+  return request(`/api/assets/cache-cleanup-preview?${params}`);
+}
+
+export async function cleanupImportCache(batchId: string = ''): Promise<import('../types').CleanupResponse> {
+  return request('/api/assets/cleanup-import-cache', {
+    method: 'POST',
+    body: JSON.stringify({ batch_id: batchId || null }),
+  });
+}
+
+export async function fetchAssetStorageAnalysis(
+  source: string = 'all',
+  refresh: boolean = false,
+): Promise<import('../types').StorageAnalysisResponse> {
+  const params = new URLSearchParams({ source, refresh: String(refresh) });
+  return request(`/api/assets/storage-analysis?${params}`);
 }
 
 export async function cleanupUnreferencedAssets(): Promise<import('../types').CleanupResponse> {

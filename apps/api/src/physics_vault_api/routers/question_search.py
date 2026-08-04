@@ -3,18 +3,24 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 
 from ..schemas.question_search import (
+    BatchQuestionDeleteRequest,
+    BatchQuestionDeleteResponse,
     BatchQuestionFetchRequest,
     BatchQuestionFetchResponse,
     FilterFacetsResponse,
     QuestionSearchParams,
+    ReturnQuestionToReviewRequest,
+    ReturnQuestionToReviewResponse,
     SearchMode,
     SearchResponse,
 )
 from ..services.question_search import QuestionSearchService, SearchError
+from ..services.question_write import QuestionWriteService
 
 
 def build_question_search_router(
     service: QuestionSearchService | None = None,
+    write_service: QuestionWriteService | None = None,
 ) -> APIRouter:
     """Create a router exposing the question-search API surface.
 
@@ -23,6 +29,8 @@ def build_question_search_router(
     """
     if service is None:
         service = QuestionSearchService()
+    if write_service is None:
+        write_service = QuestionWriteService()
 
     router = APIRouter(tags=["question-search"])
 
@@ -133,6 +141,64 @@ def build_question_search_router(
             raise HTTPException(
                 status_code=500,
                 detail={"message": "批量加载题目失败", "detail": str(exc)},
+            ) from exc
+
+    @router.post(
+        "/api/questions/batch-delete",
+        response_model=BatchQuestionDeleteResponse,
+        summary="批量删除题目",
+    )
+    async def batch_delete_questions(
+        request: BatchQuestionDeleteRequest,
+    ) -> BatchQuestionDeleteResponse:
+        try:
+            result = write_service.delete_batch(request.question_ids)
+            if result.get("error"):
+                raise HTTPException(status_code=500, detail=result["error"])
+            return BatchQuestionDeleteResponse(
+                requested_count=result.get("requested", len(request.question_ids)),
+                deleted_count=result.get("deleted", 0),
+                missing_ids=result.get("missing_ids", []),
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"message": "批量删除题目失败", "detail": str(exc)},
+            ) from exc
+
+    @router.post(
+        "/api/questions/{question_id}/return-to-review",
+        response_model=ReturnQuestionToReviewResponse,
+        summary="将题目送回校对中心",
+    )
+    async def return_question_to_review(
+        question_id: str,
+        request: ReturnQuestionToReviewRequest,
+    ) -> ReturnQuestionToReviewResponse:
+        try:
+            result = write_service.return_to_review(
+                question_id,
+                reason=request.reason,
+                reviewer=request.reviewer,
+            )
+            if result.get("error"):
+                raise HTTPException(status_code=500, detail=result["error"])
+            if result.get("status") == "missing":
+                raise HTTPException(status_code=404, detail="Question not found")
+            return ReturnQuestionToReviewResponse(
+                question_id=result["question_id"],
+                review_id=result.get("review_id"),
+                status="queued",
+                message="已送回校对中心，等待回炉重造",
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"message": "送回校对中心失败", "detail": str(exc)},
             ) from exc
 
     return router

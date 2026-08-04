@@ -18,9 +18,6 @@ ON questions(status, question_type, difficulty);
 CREATE INDEX IF NOT EXISTS idx_papers_filter_combo
 ON papers(year, region, exam_type);
 
-CREATE INDEX IF NOT EXISTS idx_review_queue_work
-ON review_queue(status, priority, created_at);
-
 CREATE INDEX IF NOT EXISTS idx_favorite_items_browse
 ON favorite_items(group_id, star_rating, added_at);
 

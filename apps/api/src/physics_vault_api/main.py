@@ -7,7 +7,7 @@ their path/method signature is not already provided by the modular routers.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,8 +22,18 @@ def _route_key(route: BaseRoute) -> tuple[str | None, frozenset[str]]:
     return getattr(route, "path", None), frozenset(methods or ())
 
 
+def _iter_concrete_routes(routes: Iterable[BaseRoute]) -> Iterator[BaseRoute]:
+    """Expand FastAPI's deferred include-router wrappers into real routes."""
+    for route in routes:
+        original_router = getattr(route, "original_router", None)
+        if original_router is not None:
+            yield from _iter_concrete_routes(original_router.routes)
+            continue
+        yield route
+
+
 def _covered_route_keys(routes: Iterable[BaseRoute]) -> set[tuple[str | None, frozenset[str]]]:
-    return {_route_key(route) for route in routes}
+    return {_route_key(route) for route in _iter_concrete_routes(routes)}
 
 
 def create_app() -> FastAPI:

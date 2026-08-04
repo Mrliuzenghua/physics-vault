@@ -8,8 +8,26 @@ from pathlib import Path
 from .database import connect_db
 from .paths import default_backups_dir, default_db_path
 
-SCHEMA_VERSION = "2026.07.v1"
+SCHEMA_VERSION = "2026.08.v2"
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+IMPORT_TASK_LIFECYCLE_MIGRATION_ID = "20260803_01_import_task_lifecycle"
+
+IMPORT_TASK_LIFECYCLE_COLUMNS: dict[str, str] = {
+    "progress": "INTEGER NOT NULL DEFAULT 0",
+    "current_step": "TEXT",
+    "attempt": "INTEGER NOT NULL DEFAULT 0",
+    "max_attempts": "INTEGER NOT NULL DEFAULT 1",
+    "idempotency_key": "TEXT",
+    "message_id": "TEXT",
+    "started_at": "TEXT",
+    "finished_at": "TEXT",
+    "heartbeat_at": "TEXT",
+    "result_file_path": "TEXT",
+    "error_type": "TEXT",
+    "error_message": "TEXT",
+    "error_details": "TEXT",
+    "error_retryable": "INTEGER NOT NULL DEFAULT 0",
+}
 
 SCHEMA_SQL = f"""
 PRAGMA foreign_keys = ON;
@@ -24,6 +42,55 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     migration_id TEXT PRIMARY KEY,
     applied_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS import_pipeline_tasks (
+    task_id             TEXT PRIMARY KEY,
+    task_type           TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    input_summary_json  TEXT NOT NULL DEFAULT '{{}}',
+    result_json         TEXT,
+    error               TEXT,
+    progress            INTEGER NOT NULL DEFAULT 0 CHECK(progress >= 0 AND progress <= 100),
+    current_step        TEXT,
+    attempt             INTEGER NOT NULL DEFAULT 0,
+    max_attempts        INTEGER NOT NULL DEFAULT 1,
+    idempotency_key     TEXT,
+    message_id          TEXT,
+    started_at          TEXT,
+    finished_at         TEXT,
+    heartbeat_at        TEXT,
+    result_file_path    TEXT,
+    error_type          TEXT,
+    error_message       TEXT,
+    error_details       TEXT,
+    error_retryable     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_pipeline_tasks_work
+ON import_pipeline_tasks(task_type, status, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_import_pipeline_tasks_status_created
+ON import_pipeline_tasks(status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_import_pipeline_tasks_idempotency
+ON import_pipeline_tasks(idempotency_key);
+
+CREATE TABLE IF NOT EXISTS task_action_audit (
+    audit_id       TEXT PRIMARY KEY,
+    task_id        TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    source         TEXT NOT NULL,
+    session_id     TEXT,
+    operator       TEXT NOT NULL,
+    confirmed      INTEGER NOT NULL DEFAULT 0,
+    details_json   TEXT NOT NULL DEFAULT '{{}}',
+    created_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_action_audit_task_created
+ON task_action_audit(task_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS import_batches (
     import_batch_id   TEXT PRIMARY KEY,
@@ -196,19 +263,6 @@ CREATE TABLE IF NOT EXISTS question_assets (
     UNIQUE (question_id, asset_id)
 );
 
-CREATE TABLE IF NOT EXISTS review_queue (
-    review_id         TEXT PRIMARY KEY,
-    entity_type       TEXT NOT NULL DEFAULT 'question',
-    entity_id         TEXT NOT NULL,
-    queue_type        TEXT NOT NULL DEFAULT 'manual',
-    status            TEXT NOT NULL DEFAULT 'pending',
-    priority          INTEGER NOT NULL DEFAULT 0,
-    reason            TEXT,
-    payload_json      TEXT,
-    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
 CREATE TABLE IF NOT EXISTS question_versions (
     version_id        TEXT PRIMARY KEY,
     question_id       TEXT NOT NULL,
@@ -342,8 +396,6 @@ CREATE INDEX IF NOT EXISTS idx_qkp_topic3 ON question_knowledge_points(topic3_id
 CREATE INDEX IF NOT EXISTS idx_img_question ON image_assets(question_id);
 CREATE INDEX IF NOT EXISTS idx_img_paper ON image_assets(paper_id);
 CREATE INDEX IF NOT EXISTS idx_qassets_question ON question_assets(question_id);
-CREATE INDEX IF NOT EXISTS idx_review_entity ON review_queue(entity_type, entity_id);
-CREATE INDEX IF NOT EXISTS idx_review_status ON review_queue(status);
 CREATE INDEX IF NOT EXISTS idx_qv_question_id ON question_versions(question_id);
 CREATE INDEX IF NOT EXISTS idx_annotations_question ON question_annotations(question_id);
 CREATE INDEX IF NOT EXISTS idx_collections_parent ON collections(parent_id);
@@ -398,6 +450,90 @@ def initialize_database(db_path: Path | str | None = None) -> Path:
     return resolved
 
 
+def ensure_import_task_lifecycle_schema(conn: sqlite3.Connection) -> None:
+    """Create or incrementally upgrade the durable task table in-place.
+
+    This is also used by the standalone review database, which is intentionally
+    not initialized through the canonical application schema.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS import_pipeline_tasks (
+            task_id TEXT PRIMARY KEY,
+            task_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            input_summary_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT,
+            error TEXT,
+            progress INTEGER NOT NULL DEFAULT 0 CHECK(progress >= 0 AND progress <= 100),
+            current_step TEXT,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 1,
+            idempotency_key TEXT,
+            message_id TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            heartbeat_at TEXT,
+            result_file_path TEXT,
+            error_type TEXT,
+            error_message TEXT,
+            error_details TEXT,
+            error_retryable INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    existing_columns = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+        for row in conn.execute("PRAGMA table_info(import_pipeline_tasks)")
+    }
+    for column_name, column_definition in IMPORT_TASK_LIFECYCLE_COLUMNS.items():
+        if column_name not in existing_columns:
+            conn.execute(
+                f"ALTER TABLE import_pipeline_tasks ADD COLUMN {column_name} {column_definition}"
+            )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_import_pipeline_tasks_work
+        ON import_pipeline_tasks(task_type, status, updated_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_import_pipeline_tasks_status_created
+        ON import_pipeline_tasks(status, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_import_pipeline_tasks_idempotency
+        ON import_pipeline_tasks(idempotency_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_action_audit (
+            audit_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            source TEXT NOT NULL,
+            session_id TEXT,
+            operator TEXT NOT NULL,
+            confirmed INTEGER NOT NULL DEFAULT 0,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_action_audit_task_created
+        ON task_action_audit(task_id, created_at DESC)
+        """
+    )
+
+
 def apply_schema_migrations(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -425,6 +561,16 @@ def apply_schema_migrations(conn: sqlite3.Connection) -> None:
             VALUES (?, datetime('now'))
             """,
             (migration_id,),
+        )
+
+    if IMPORT_TASK_LIFECYCLE_MIGRATION_ID not in applied:
+        ensure_import_task_lifecycle_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO schema_migrations (migration_id, applied_at)
+            VALUES (?, datetime('now'))
+            """,
+            (IMPORT_TASK_LIFECYCLE_MIGRATION_ID,),
         )
 
 

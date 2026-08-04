@@ -1,9 +1,51 @@
-from fastapi import FastAPI, HTTPException
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
+from PIL import Image, ImageOps
 
 from .application import ApplicationContainer
 from .db_schema import initialize_database
 from .paths import project_root
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+def _resolve_project_file(file_path: str) -> Path:
+    root = project_root().resolve()
+    target = (root / file_path).resolve()
+    if not target.is_file() or root not in target.parents:
+        raise HTTPException(status_code=404, detail="File not found")
+    return target
+
+
+def _cache_response(response: FileResponse, max_age: int = 86400) -> FileResponse:
+    response.headers.setdefault("Cache-Control", f"public, max-age={max_age}")
+    return response
+
+
+def _thumbnail_cache_path(target: Path, width: int) -> Path:
+    stat = target.stat()
+    key = f"{target}:{stat.st_mtime_ns}:{stat.st_size}:{width}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return project_root() / "data" / ".cache" / "image-thumbs" / f"{digest}.webp"
+
+
+def _build_thumbnail(target: Path, cache_path: Path, width: int) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(target) as raw_image:
+        image = ImageOps.exif_transpose(raw_image)
+        image.thumbnail((width, width * 4), Image.Resampling.LANCZOS)
+        if image.mode in {"RGBA", "LA"}:
+            background = Image.new("RGB", image.size, "white")
+            background.paste(image, mask=image.getchannel("A"))
+            image = background
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+        image.save(cache_path, "WEBP", quality=82, method=4)
 
 
 def create_app() -> FastAPI:
@@ -21,11 +63,21 @@ def create_app() -> FastAPI:
 
     @app.get("/files/{file_path:path}")
     def serve_file(file_path: str) -> FileResponse:
-        root = project_root().resolve()
-        target = (root / file_path).resolve()
-        if not target.is_file() or root not in target.parents:
-            raise HTTPException(status_code=404, detail="File not found")
-        return FileResponse(target)
+        return _cache_response(FileResponse(_resolve_project_file(file_path)))
+
+    @app.get("/thumbs/{file_path:path}")
+    def serve_thumbnail(file_path: str, w: int = Query(default=720, ge=120, le=1600)) -> FileResponse:
+        target = _resolve_project_file(file_path)
+        if target.suffix.lower() not in IMAGE_EXTENSIONS:
+            return _cache_response(FileResponse(target))
+
+        cache_path = _thumbnail_cache_path(target, w)
+        if not cache_path.exists():
+            try:
+                _build_thumbnail(target, cache_path, w)
+            except Exception:
+                return _cache_response(FileResponse(target), max_age=3600)
+        return _cache_response(FileResponse(cache_path, media_type="image/webp"))
 
     container = ApplicationContainer.build()
     for router in container.routers():

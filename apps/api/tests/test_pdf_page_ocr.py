@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from physics_vault_api.services import pdf_page_ocr
-from physics_vault_api.services.pdf_page_ocr import parse_pdf_by_page
+from physics_vault_api.services.pdf_page_ocr import _normalize_page_questions, parse_pdf_by_page
 
 
 class FakeGateway:
@@ -50,3 +50,46 @@ async def test_parse_pdf_by_page_keeps_failed_page_isolated(monkeypatch: pytest.
     assert result["question_count"] == 2
     assert [q["source_page"] for q in result["questions"]] == [1, 3]
     assert len(result["warnings"]) == 1
+
+
+def test_normalize_page_questions_tolerates_ai_page_and_option_variants() -> None:
+    questions = _normalize_page_questions(
+        [
+            {
+                "question_id": "",
+                "question_type": "填空题",
+                "title": "测试题",
+                "options": ["A. 选项一", "B. 选项二"],
+                "source_page": "文件名而不是页码",
+            }
+        ],
+        batch_id="batch-001",
+        source="source.pdf",
+        page_no=5,
+    )
+
+    assert questions[0]["question_type"] == "fill"
+    assert questions[0]["source_page"] == 5
+    assert questions[0]["options"] == [
+        {"opt": "A", "content": "选项一"},
+        {"opt": "B", "content": "选项二"},
+    ]
+
+
+def test_normalize_page_questions_keeps_region_bbox_for_review_linkage() -> None:
+    questions = _normalize_page_questions(
+        [
+            {
+                "question_id": "q-1",
+                "title": "region question",
+                "source_region_id": "region-1",
+                "bbox": [100, 200, 900, 1200],
+            }
+        ],
+        batch_id="batch-001",
+        source="source.pdf",
+        page_no=2,
+    )
+
+    assert questions[0]["source_region_id"] == "region-1"
+    assert questions[0]["source_bbox"] == [100.0, 200.0, 800.0, 1000.0]

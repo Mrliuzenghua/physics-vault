@@ -2,6 +2,8 @@ import type { HandoutStyleConfig } from '../../types';
 
 interface Props {
   styleConfig: HandoutStyleConfig;
+  pagesPerRow?: number;
+  pageGapMm?: number;
   children: React.ReactNode;
 }
 
@@ -13,18 +15,26 @@ interface PageSizeMm {
 const RULER_HEIGHT = 28;
 const RULER_WIDTH = 34;
 
-export default function PageRuler({ styleConfig, children }: Props) {
+export default function PageRuler({ styleConfig, pagesPerRow = 1, pageGapMm = 10, children }: Props) {
   const page = getPageSizeMm(styleConfig);
-  const horizontalTicks = buildTicks(page.width);
+  const safePagesPerRow = Math.max(1, pagesPerRow);
+  const spreadWidth = page.width * safePagesPerRow + pageGapMm * (safePagesPerRow - 1);
+  const horizontalTicks = buildTicks(spreadWidth);
   const verticalTicks = buildTicks(page.height);
 
   return (
-    <div className="handout-screen-only mx-auto inline-grid max-w-full grid-cols-[34px_minmax(0,auto)] grid-rows-[28px_auto]">
+    <div
+      className="handout-screen-only mx-auto inline-grid"
+      style={{
+        gridTemplateColumns: `${RULER_WIDTH}px ${spreadWidth}mm`,
+        gridTemplateRows: `${RULER_HEIGHT}px auto`,
+      }}
+    >
       <div className="sticky left-0 top-0 z-20 border-b border-r border-[#b8c2d1] bg-[#f4f7fb]" />
 
       <div
         className="sticky top-0 z-20 overflow-hidden border-b border-[#b8c2d1] bg-[#f4f7fb] text-[10px] text-slate-500"
-        style={{ height: RULER_HEIGHT, width: `${page.width}mm` }}
+        style={{ height: RULER_HEIGHT, width: `${spreadWidth}mm` }}
       >
         {horizontalTicks.map((tick) => (
           <span
@@ -43,8 +53,8 @@ export default function PageRuler({ styleConfig, children }: Props) {
       </div>
 
       <div
-        className="sticky left-0 z-10 overflow-hidden border-r border-[#b8c2d1] bg-[#f4f7fb] pt-6 text-[10px] text-slate-500"
-        style={{ width: RULER_WIDTH, minHeight: `calc(${page.height}mm + 48px)` }}
+        className="sticky left-0 z-10 overflow-hidden border-r border-[#b8c2d1] bg-[#f4f7fb] text-[10px] text-slate-500"
+        style={{ width: RULER_WIDTH, minHeight: `${page.height}mm` }}
       >
         <div className="relative" style={{ height: `${page.height}mm` }}>
           {verticalTicks.map((tick) => (
@@ -64,7 +74,9 @@ export default function PageRuler({ styleConfig, children }: Props) {
         </div>
       </div>
 
-      <div className="min-w-0 overflow-visible">{children}</div>
+      <div className="min-w-0 overflow-visible" style={{ width: `${spreadWidth}mm` }}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -90,4 +102,3 @@ function buildTicks(maxMm: number): Array<{ mm: number; major: boolean; medium: 
   }
   return ticks;
 }
-

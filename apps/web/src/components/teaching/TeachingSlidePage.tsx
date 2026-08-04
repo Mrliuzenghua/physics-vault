@@ -1,4 +1,6 @@
 import type { SlidePage, SlideSection } from '../../types/slides';
+import { imageFileUrl } from '../../utils/imageUrl';
+import LatexRenderer from '../render/LatexRenderer';
 
 interface Props {
   data: SlidePage;
@@ -94,19 +96,12 @@ function SectionCard({ section }: { section: SlideSection }) {
             <span style={bulletStyle(cfg)}>•</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <span style={itemTextStyle(item.emphasis || false)}>
-                {item.text}
+                <LatexRenderer text={item.text.replace(/!\[fig:[^\]]+\]/g, '').trim()} />
               </span>
               {item.formula && (
-                <span style={formulaStyle}>{item.formula}</span>
+                <span style={formulaStyle}><LatexRenderer text={item.formula} /></span>
               )}
-              {item.imagePath && (
-                <div style={imagePlaceholderStyle}>
-                  <span style={{ fontSize: 18 }}>📷</span>
-                  <span style={{ fontSize: 11, color: '#94a3b8' }}>
-                    {item.imageAlt || item.imagePath}
-                  </span>
-                </div>
-              )}
+              {item.imagePath && <SlideItemImage path={item.imagePath} alt={item.imageAlt} />}
             </div>
           </div>
         ))}
@@ -116,6 +111,23 @@ function SectionCard({ section }: { section: SlideSection }) {
 }
 
 // ── Grid calculation ──────────────────────────────────────────────────
+function SlideItemImage({ path, alt }: { path: string; alt?: string }) {
+  const src = imageFileUrl(path);
+  if (!src) {
+    return <div style={imagePlaceholderStyle}><span style={{ fontSize: 11, color: '#94a3b8' }}>{alt || path}</span></div>;
+  }
+  return (
+    <figure style={imagePlaceholderStyle}>
+      <img
+        src={src}
+        alt={alt || '教学插图'}
+        style={{ display: 'block', width: 'auto', maxWidth: '100%', maxHeight: 220, objectFit: 'contain', margin: '0 auto' }}
+      />
+      {alt && <figcaption style={{ marginTop: 5, fontSize: 11, color: '#64748b', textAlign: 'center' }}>{alt}</figcaption>}
+    </figure>
+  );
+}
+
 function gridStyle(sections: SlideSection[]): React.CSSProperties {
   const count = sections.length;
   if (count <= 2) return { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 };

@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ArchiveRestore, Download, Save } from 'lucide-react';
 import { downloadExportPackage, getSettings, restorePackage, saveSettings } from '../services/api';
 import type { RestorePackageResponse, SystemSettings } from '../types';
 
@@ -44,26 +45,25 @@ export default function SettingsPage() {
   }, []);
 
   const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
-    <div className="mb-4 p-4 rounded-lg" style={{ background: 'var(--color-bg-card)', boxShadow: 'var(--shadow-card)' }}>
-      <h2 className="text-sm font-semibold mb-3 pb-2 border-b" style={{ color: 'var(--color-text)', borderColor: 'var(--color-border)' }}>
+    <section className="mb-4 rounded-lg border border-[var(--color-border)] bg-white p-4 shadow-sm">
+      <h2 className="mb-3 border-b border-[var(--color-border)] pb-2 text-sm font-semibold text-[var(--color-text)]">
         {title}
       </h2>
       {children}
-    </div>
+    </section>
   );
 
   const Field = ({ label, value, onChange, type = 'text', placeholder }: {
     label: string; value: string; onChange: (v: string) => void; type?: string; placeholder?: string;
   }) => (
-    <div className="mb-2">
-      <label className="text-xs font-medium block mb-1" style={{ color: 'var(--color-text-secondary)' }}>{label}</label>
+    <div className="mb-2.5">
+      <label className="mb-1 block text-xs font-medium text-[var(--color-text-secondary)]">{label}</label>
       <input
         type={type}
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full px-3 py-1.5 rounded text-sm border outline-none"
-        style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text)' }}
+        className="h-9 w-full rounded-md border border-[var(--color-border)] bg-white px-3 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent-light)]"
       />
     </div>
   );
@@ -90,22 +90,23 @@ export default function SettingsPage() {
   );
 
   return (
-    <div className="max-w-3xl mx-auto p-6 overflow-y-auto h-full">
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-bold" style={{ color: 'var(--color-text)' }}>⚙ 系统设置</h1>
+    <div className="h-full overflow-y-auto bg-[#f3f6fa] p-3 sm:p-5">
+      <div className="mx-auto max-w-4xl">
+      <div className="mb-4 flex items-center justify-between">
+        <div><h1 className="text-lg font-bold text-[#1d3148]">系统设置</h1><p className="mt-1 text-xs text-[var(--color-text-muted)]">本地存储、显示、日志与数据迁移</p></div>
         <div className="flex gap-2">
           <button
             onClick={handleSave}
-            className="px-4 py-2 rounded-lg text-sm font-medium cursor-pointer border-none text-white"
+            className="flex h-9 cursor-pointer items-center gap-1.5 rounded-md border-none px-4 text-sm font-medium text-white"
             style={{ background: saved ? 'var(--color-green)' : 'var(--color-accent)' }}
           >
-            {saved ? '✓ 已保存' : '💾 保存设置'}
+            <Save size={15} />{saved ? '已保存' : '保存设置'}
           </button>
         </div>
       </div>
 
       {/* 数据存储 */}
-      <Section title="📂 数据存储">
+      <Section title="数据存储">
         <Field label="数据库路径" value={settings.db_path} onChange={v => update({ db_path: v })} />
         <Field label="素材目录" value={settings.assets_path} onChange={v => update({ assets_path: v })} />
         <Field label="导入批次目录" value={settings.import_batches_path} onChange={v => update({ import_batches_path: v })} />
@@ -115,7 +116,7 @@ export default function SettingsPage() {
       </Section>
 
       {/* AI 设置 */}
-      <Section title="🤖 AI 设置">
+      <Section title="AI 设置">
         <Toggle label="全局 AI 开关" value={settings.ai_enabled} onChange={v => update({ ai_enabled: v })} />
         <Toggle
           label="离线模式"
@@ -128,12 +129,12 @@ export default function SettingsPage() {
           className="mt-2 px-3 py-1.5 rounded text-sm cursor-pointer border"
           style={{ borderColor: 'var(--color-accent)', color: 'var(--color-accent)', background: 'transparent' }}
         >
-          → 前往 MCP 配置页
+          配置 AI 与 MCP
         </button>
       </Section>
 
       {/* 显示设置 */}
-      <Section title="🖥 显示设置">
+      <Section title="显示设置">
         <div className="mb-2">
           <label className="text-xs font-medium block mb-1" style={{ color: 'var(--color-text-secondary)' }}>主题</label>
           <div className="flex gap-2">
@@ -167,7 +168,7 @@ export default function SettingsPage() {
       </Section>
 
       {/* 日志 */}
-      <Section title="📋 日志">
+      <Section title="日志">
         <div className="mb-2">
           <label className="text-xs font-medium block mb-1" style={{ color: 'var(--color-text-secondary)' }}>日志级别</label>
           <select
@@ -182,7 +183,7 @@ export default function SettingsPage() {
       </Section>
 
       {/* 数据迁移与备份 */}
-      <Section title="📦 数据迁移与备份">
+      <Section title="数据导出">
         <p className="mb-3 text-xs" style={{ color: 'var(--color-text-muted)' }}>
           将数据库文件和素材目录打包为一个 .zip 文件下载，方便迁移到其他设备或备份存档。
           导出包内含：数据库文件、素材目录、导出说明文件。
@@ -194,7 +195,7 @@ export default function SettingsPage() {
             className="px-4 py-2 rounded-lg text-sm font-medium cursor-pointer border-none text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             style={{ background: 'var(--color-accent)' }}
           >
-            {exporting ? '正在打包导出…' : '📦 导出题库包'}
+            <span className="inline-flex items-center gap-1.5"><Download size={15} />{exporting ? '正在打包导出…' : '导出题库包'}</span>
           </button>
           {exportMsg && (
             <span
@@ -214,7 +215,7 @@ export default function SettingsPage() {
       </Section>
 
       {/* 导入恢复题库包 */}
-      <Section title="📥 导入恢复题库包">
+      <Section title="数据恢复">
         <p className="mb-3 text-xs" style={{ color: 'var(--color-text-muted)' }}>
           选择之前导出的 .zip 迁移包，将数据库和素材恢复到当前系统。
           恢复前会自动备份当前数据，失败时当前数据不会被覆盖。
@@ -229,7 +230,7 @@ export default function SettingsPage() {
             color: 'var(--color-orange)',
           }}
         >
-          ⚠ 恢复将覆盖当前题库数据。系统会在恢复前自动创建旧数据备份，但仍建议在操作前手动导出一次当前数据。
+          恢复将覆盖当前题库数据。系统会在恢复前自动创建旧数据备份，仍建议先手动导出当前数据。
         </div>
 
         {/* Hidden file input */}
@@ -287,7 +288,7 @@ export default function SettingsPage() {
             className="cursor-pointer rounded-lg border-none px-4 py-1.5 text-sm font-semibold text-white transition-colors disabled:opacity-40"
             style={{ background: 'var(--color-accent)' }}
           >
-            {restoring ? '恢复中...' : '开始恢复'}
+            <span className="inline-flex items-center gap-1.5"><ArchiveRestore size={15} />{restoring ? '恢复中...' : '开始恢复'}</span>
           </button>
         </div>
 
@@ -301,7 +302,7 @@ export default function SettingsPage() {
               color: 'var(--color-green)',
             }}
           >
-            <p className="font-semibold">✓ 恢复成功</p>
+            <p className="font-semibold">恢复成功</p>
             <p>数据库文件：{restoreResult.database_file || '—'}</p>
             <p>素材数量：{restoreResult.asset_count} 个</p>
             {restoreResult.backup_path && (
@@ -310,7 +311,7 @@ export default function SettingsPage() {
             {restoreResult.warnings.length > 0 && (
               <div style={{ color: 'var(--color-orange)' }}>
                 {restoreResult.warnings.map((w, i) => (
-                  <p key={i}>⚠ {w}</p>
+                  <p key={i}>{w}</p>
                 ))}
               </div>
             )}
@@ -330,7 +331,7 @@ export default function SettingsPage() {
               color: 'var(--color-red)',
             }}
           >
-            <p className="font-semibold">✗ 恢复失败</p>
+            <p className="font-semibold">恢复失败</p>
             <p>{restoreError}</p>
             <p className="mt-1 text-xs">
               当前数据未被修改。请检查导入包是否完整，然后重试。
@@ -340,13 +341,14 @@ export default function SettingsPage() {
       </Section>
 
       {/* 关于 */}
-      <Section title="ℹ️ 关于">
+      <Section title="关于">
         <div className="text-sm space-y-1" style={{ color: 'var(--color-text-secondary)' }}>
           <p>Physics Vault 版本：1.0.0</p>
           <p>数据库版本：20260721</p>
           <p>技术栈：React + TypeScript + Vite + Python FastAPI + SQLite</p>
         </div>
       </Section>
+      </div>
     </div>
   );
 }

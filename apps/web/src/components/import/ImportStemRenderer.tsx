@@ -1,25 +1,69 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { SyntheticEvent } from 'react';
 import type { Figure } from '../../types';
+import { updateQuestionImage } from '../../services/api';
+import { imageFileUrl, imageThumbnailUrl } from '../../utils/imageUrl';
 import LatexRenderer from '../render/LatexRenderer';
 
 interface Props {
-  title: string;
-  figures: Figure[];
+  title?: string | null;
+  figures?: Figure[];
   maxImageHeight?: number;
+  thumbnailWidth?: number;
+  questionId?: string;
+  onScaleChange?: (figure: Figure, scale: number) => void;
+  onLayoutChange?: (figure: Figure, patch: Pick<Figure, 'display_align' | 'caption'>) => void;
+}
+
+const STEM_IMAGE_SCALE_KEY = 'physics-vault.stem-image-scale';
+const IMAGE_SCALE_PRESETS = [
+  { label: '小', value: 40 },
+  { label: '中', value: 60 },
+  { label: '大', value: 80 },
+  { label: '满', value: 100 },
+] as const;
+
+function getFigureKey(figure: Figure) {
+  return figure.fig_uuid || figure.local_path;
+}
+
+function loadScale(figure: Figure) {
+  if (typeof figure.display_scale === 'number' && figure.display_scale >= 25 && figure.display_scale <= 100) {
+    return figure.display_scale;
+  }
+  try {
+    const raw = localStorage.getItem(`${STEM_IMAGE_SCALE_KEY}.${getFigureKey(figure)}`);
+    const scale = Number(raw);
+    if (scale >= 25 && scale <= 100) return scale;
+  } catch {
+    // localStorage may be unavailable in embedded previews.
+  }
+  return 60;
+}
+
+function saveScale(figure: Figure, scale: number) {
+  try {
+    localStorage.setItem(`${STEM_IMAGE_SCALE_KEY}.${getFigureKey(figure)}`, String(scale));
+  } catch {
+    // Ignore storage failures; the live resize still works for this session.
+  }
 }
 
 /**
  * Render a question stem with ![fig:uuid] placeholders.
  * Each placeholder becomes an image from the import media library.
  */
-export default function ImportStemRenderer({ title, figures, maxImageHeight = 180 }: Props) {
-  const parts = title.split(/(!\[fig:[^\]]+\])/g);
+export default function ImportStemRenderer({ title, figures, maxImageHeight = 180, thumbnailWidth, questionId, onScaleChange, onLayoutChange }: Props) {
+  const safeTitle = String(title ?? '');
+  const safeFigures = useMemo(() => figures || [], [figures]);
+  const parts = safeTitle.split(/(!\[fig:[^\]]+\])/g);
 
   return (
     <div>
       {parts.map((part, i) => {
         const match = part.match(/!\[fig:([^\]]+)\]/);
         if (match) {
-          const fig = figures.find((item) => item.fig_uuid === match[1]);
+          const fig = safeFigures.find((item) => item.fig_uuid === match[1]);
           if (!fig) {
             return (
               <span
@@ -31,29 +75,185 @@ export default function ImportStemRenderer({ title, figures, maxImageHeight = 18
               </span>
             );
           }
-          return (
-            <span key={i} className="my-1 block">
-              <img
-                src={`/files/${fig.local_path}`}
-                alt={fig.fig_uuid}
-                style={{
-                  maxWidth: '60%',
-                  maxHeight: maxImageHeight,
-                  objectFit: 'contain',
-                  borderRadius: 6,
-                  border: '1px solid var(--color-border)',
-                  display: 'block',
-                }}
-                onError={(event) => {
-                  (event.target as HTMLImageElement).style.display = 'none';
-                }}
-              />
-            </span>
-          );
+          return <ResizableStemFigure key={i} figure={fig} maxImageHeight={maxImageHeight} thumbnailWidth={thumbnailWidth} questionId={questionId} onScaleChange={onScaleChange} onLayoutChange={onLayoutChange} />;
         }
         if (!part.trim()) return null;
         return <LatexRenderer key={i} text={part} />;
       })}
     </div>
+  );
+}
+
+function ResizableStemFigure({
+  figure,
+  maxImageHeight,
+  thumbnailWidth,
+  questionId,
+  onScaleChange,
+  onLayoutChange,
+}: {
+  figure: Figure;
+  maxImageHeight: number;
+  thumbnailWidth?: number;
+  questionId?: string;
+  onScaleChange?: (figure: Figure, scale: number) => void;
+  onLayoutChange?: (figure: Figure, patch: Pick<Figure, 'display_align' | 'caption'>) => void;
+}) {
+  const [scale, setScale] = useState(() => loadScale(figure));
+  const [loaded, setLoaded] = useState(false);
+  const [broken, setBroken] = useState(false);
+  const [activeSrc, setActiveSrc] = useState<string | null>(null);
+  const originalSrc = imageFileUrl(figure.local_path);
+  const thumbnailSrc = thumbnailWidth ? imageThumbnailUrl(figure.local_path, thumbnailWidth) : null;
+  const alignment = figure.display_align || 'center';
+
+  useEffect(() => {
+    setScale(loadScale(figure));
+    setLoaded(false);
+    setBroken(false);
+    setActiveSrc(null);
+
+    const candidates = [thumbnailSrc, originalSrc].filter((item, index, all): item is string => Boolean(item) && all.indexOf(item) === index);
+    let cancelled = false;
+
+    const loadCandidate = (index: number) => {
+      const nextSrc = candidates[index];
+      if (!nextSrc) {
+        if (!cancelled) setBroken(true);
+        return;
+      }
+
+      const image = new Image();
+      image.onload = () => {
+        if (cancelled) return;
+        setActiveSrc(nextSrc);
+        setLoaded(true);
+        setBroken(false);
+      };
+      image.onerror = () => {
+        loadCandidate(index + 1);
+      };
+      image.src = nextSrc;
+    };
+
+    loadCandidate(0);
+    return () => {
+      cancelled = true;
+    };
+  }, [figure, originalSrc, thumbnailSrc]);
+
+  const updateScale = useCallback((nextScale: number) => {
+    const safeScale = Math.min(100, Math.max(25, nextScale));
+    setScale(safeScale);
+    saveScale(figure, safeScale);
+    onScaleChange?.(figure, safeScale);
+    if (questionId && figure.fig_uuid) {
+      void updateQuestionImage(questionId, figure.fig_uuid, { display_scale: safeScale });
+    }
+  }, [figure, onScaleChange, questionId]);
+
+  const stopImageInteraction = useCallback((event: SyntheticEvent) => {
+    event.stopPropagation();
+  }, []);
+  const updateLayout = useCallback((patch: Pick<Figure, 'display_align' | 'caption'>) => {
+    onLayoutChange?.(figure, patch);
+    if (questionId && figure.fig_uuid) void updateQuestionImage(questionId, figure.fig_uuid, patch);
+  }, [figure, onLayoutChange, questionId]);
+
+  return (
+    <span
+      className="group my-3 block cursor-default"
+      onClick={stopImageInteraction}
+      onDoubleClick={stopImageInteraction}
+      onMouseDown={stopImageInteraction}
+      onPointerDown={stopImageInteraction}
+      onTouchStart={stopImageInteraction}
+    >
+      <span
+        className="relative block rounded-md border bg-white p-2"
+        style={{ borderColor: 'var(--color-border)' }}
+      >
+        {activeSrc && loaded && !broken && (
+          <span style={{ display: 'block', width: `${scale}%`, marginLeft: alignment === 'left' ? 0 : 'auto', marginRight: alignment === 'right' ? 0 : 'auto', transition: 'width 0.16s ease' }}>
+            <img
+              src={activeSrc}
+              alt={figure.caption || figure.fig_uuid}
+              decoding="async"
+              onError={() => setBroken(true)}
+              draggable={false}
+              onClick={stopImageInteraction}
+              onMouseDown={stopImageInteraction}
+              style={{ width: '100%', maxWidth: '100%', maxHeight: maxImageHeight, objectFit: 'contain', borderRadius: 6, display: 'block' }}
+            />
+            {figure.caption && <span style={{ display: 'block', marginTop: 5, textAlign: 'center', fontSize: 11, lineHeight: 1.5, color: 'var(--color-text-muted)' }}>{figure.caption}</span>}
+          </span>
+        )}
+
+        {!broken && !loaded && (
+          <span
+            className="block rounded bg-[var(--color-bg-hover)] px-3 py-8 text-center text-xs"
+            style={{ color: 'var(--color-text-muted)', minHeight: Math.min(maxImageHeight, 120) }}
+          >
+            正在准备图片...
+          </span>
+        )}
+
+        {broken && (
+          <span className="block py-6 text-center text-xs" style={{ color: 'var(--color-red)' }}>
+            图片不可用
+          </span>
+        )}
+
+        {loaded && !broken && (
+          <span
+            className="absolute right-2 top-2 flex items-center gap-1 rounded-full border bg-white/95 px-2 py-1 opacity-0 shadow-sm transition-opacity group-hover:opacity-100"
+            onClick={stopImageInteraction}
+            onMouseDown={stopImageInteraction}
+            onPointerDown={stopImageInteraction}
+            onTouchStart={stopImageInteraction}
+          >
+            {IMAGE_SCALE_PRESETS.map((preset) => (
+              <button
+                key={preset.value}
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  updateScale(preset.value);
+                }}
+                className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                style={{
+                  background: scale === preset.value ? 'var(--color-accent)' : 'transparent',
+                  color: scale === preset.value ? '#fff' : 'var(--color-text-secondary)',
+                }}
+              >
+                {preset.label}
+              </button>
+            ))}
+            {(['left', 'center', 'right'] as const).map((value) => (
+              <button key={value} type="button" title={`${value === 'left' ? '左' : value === 'center' ? '中' : '右'}对齐`} onClick={(event) => { event.stopPropagation(); updateLayout({ display_align: value }); }} className="rounded-full px-1.5 py-0.5 text-[10px] font-semibold" style={{ background: alignment === value ? 'var(--color-accent)' : 'transparent', color: alignment === value ? '#fff' : 'var(--color-text-secondary)' }}>{value === 'left' ? '左' : value === 'center' ? '中' : '右'}</button>
+            ))}
+            <input
+              type="range"
+              min={25}
+              max={100}
+              value={scale}
+              onClick={stopImageInteraction}
+              onMouseDown={stopImageInteraction}
+              onPointerDown={stopImageInteraction}
+              onChange={(event) => {
+                event.stopPropagation();
+                updateScale(Number(event.target.value));
+              }}
+              className="w-16"
+              style={{ accentColor: 'var(--color-accent)' }}
+            />
+            <span className="w-8 text-center text-[10px] tabular-nums" style={{ color: 'var(--color-text-secondary)' }}>
+              {scale}%
+            </span>
+            <input value={figure.caption || ''} placeholder="题注" aria-label="图片题注" onClick={stopImageInteraction} onMouseDown={stopImageInteraction} onChange={(event) => updateLayout({ caption: event.target.value })} className="h-6 w-20 rounded border px-1 text-[10px]" />
+          </span>
+        )}
+      </span>
+    </span>
   );
 }

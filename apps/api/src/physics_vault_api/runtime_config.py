@@ -14,9 +14,10 @@ from typing import Any
 
 
 DEFAULT_VL_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_VL_MODEL = "qwen-vl-max"
+DEFAULT_VL_MODEL = "qwen3.5-ocr"
 DEFAULT_LLM_BASE_URL = "https://api.deepseek.com"
 DEFAULT_LLM_MODEL = "deepseek-v4-pro"
+LEGACY_DASHSCOPE_VL_MODELS = {"qwen-vl-max"}
 
 
 @dataclass
@@ -62,6 +63,11 @@ class RuntimeAiConfig:
                 if "openai.com" in lower_base or lower_model.startswith("gpt-"):
                     base_url = defaults.base_url
                     model_name = defaults.model_name
+                if lower_model in LEGACY_DASHSCOPE_VL_MODELS:
+                    base_url = defaults.base_url
+                    model_name = defaults.model_name
+                if lower_model == defaults.model_name.lower() and "dashscope.aliyuncs.com/api/v1" in lower_base:
+                    base_url = defaults.base_url
                 if "qwen" in lower_service:
                     service_type = defaults.service_type
 
@@ -91,23 +97,30 @@ import json
 import logging
 from pathlib import Path
 
+from .paths import data_root
+
 logger = logging.getLogger(__name__)
 
 # Persist config to a file so it survives backend restarts
-_CONFIG_FILE = Path(os.getenv("PHYSICS_RUNTIME_CONFIG_PATH",
-    Path(__file__).resolve().parents[3] / "data" / "runtime_ai_config.json"))
+_CONFIG_FILE = Path(os.getenv("PHYSICS_RUNTIME_CONFIG_PATH") or data_root() / "runtime_ai_config.json")
+_LEGACY_CONFIG_FILE = Path(__file__).resolve().parents[3] / "data" / "runtime_ai_config.json"
 
 
 def _load_from_file() -> RuntimeAiConfig | None:
-    try:
-        if _CONFIG_FILE.exists():
-            data = json.loads(_CONFIG_FILE.read_text("utf-8"))
+    for config_file in dict.fromkeys([_CONFIG_FILE, _LEGACY_CONFIG_FILE]):
+        try:
+            if not config_file.exists():
+                continue
+            data = json.loads(config_file.read_text("utf-8"))
             cfg = RuntimeAiConfig.from_dict(data)
-            if cfg.is_configured():
-                logger.info("Loaded runtime AI config from %s (model=%s)", _CONFIG_FILE, cfg.llm.model_name)
+            if cfg.is_configured("vl") or cfg.is_configured("llm"):
+                logger.info("Loaded runtime AI config from %s (model=%s)", config_file, cfg.llm.model_name)
+                if config_file != _CONFIG_FILE and not _CONFIG_FILE.exists():
+                    _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    _CONFIG_FILE.write_text(json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2), "utf-8")
                 return cfg
-    except Exception:
-        pass
+        except Exception:
+            logger.warning("Failed to load runtime AI config from %s", config_file)
     return None
 
 

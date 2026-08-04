@@ -5,6 +5,7 @@ const BASKET_KEY = 'physics_vault_basket';
 const SETTINGS_KEY = 'physics_vault_settings';
 const MCP_KEY = 'physics_vault_mcp';
 const BASKET_EVENT = 'physics-vault-basket-changed';
+const LEGACY_DASHSCOPE_VL_MODELS = new Set(['qwen-vl-max']);
 
 let basketCache: BasketItem[] | null = null;
 
@@ -13,7 +14,7 @@ export const DEFAULT_AI_CONFIG = {
     service_type: 'Alibaba DashScope',
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     api_key: '',
-    model_name: 'qwen-vl-max',
+    model_name: 'qwen3.5-ocr',
     timeout_seconds: 120,
     max_retries: 2,
     concurrency: 1,
@@ -66,6 +67,18 @@ export function removeFromBasket(questionId: string): BasketItem[] {
   localStorage.setItem(BASKET_KEY, JSON.stringify(updated));
   emitBasketChanged();
   return updated;
+}
+
+export function moveBasketItem(questionId: string, direction: 'up' | 'down'): BasketItem[] {
+  const basket = [...getBasket()];
+  const index = basket.findIndex((item) => item.question_id === questionId);
+  const target = direction === 'up' ? index - 1 : index + 1;
+  if (index < 0 || target < 0 || target >= basket.length) return basket;
+  [basket[index], basket[target]] = [basket[target], basket[index]];
+  basketCache = basket;
+  localStorage.setItem(BASKET_KEY, JSON.stringify(basket));
+  emitBasketChanged();
+  return basket;
 }
 
 export function clearBasket(): void {
@@ -148,10 +161,24 @@ export function getMcpConfig(): McpConfig {
 
   try {
     const stored = JSON.parse(localStorage.getItem(MCP_KEY) || '{}') as Partial<McpConfig>;
+    const storedVl: Partial<McpConfig['vl']> = stored.vl || {};
+    const vlModel = LEGACY_DASHSCOPE_VL_MODELS.has(String(storedVl.model_name || '').toLowerCase())
+      ? DEFAULT_AI_CONFIG.vl.model_name
+      : storedVl.model_name;
+    const vlBaseUrl =
+      String(vlModel || '').toLowerCase() === DEFAULT_AI_CONFIG.vl.model_name &&
+      String(storedVl.base_url || '').toLowerCase().includes('dashscope.aliyuncs.com/api/v1')
+        ? DEFAULT_AI_CONFIG.vl.base_url
+        : storedVl.base_url;
     return {
       ...defaults,
       ...stored,
-      vl: { ...DEFAULT_AI_CONFIG.vl, ...(stored.vl || {}) },
+      vl: {
+        ...DEFAULT_AI_CONFIG.vl,
+        ...storedVl,
+        base_url: vlBaseUrl || DEFAULT_AI_CONFIG.vl.base_url,
+        model_name: vlModel || DEFAULT_AI_CONFIG.vl.model_name,
+      },
       llm: { ...DEFAULT_AI_CONFIG.llm, ...(stored.llm || {}) },
     };
   } catch {
@@ -160,9 +187,17 @@ export function getMcpConfig(): McpConfig {
 }
 
 export function saveMcpConfig(config: McpConfig): void {
+  const vlModel = LEGACY_DASHSCOPE_VL_MODELS.has(String(config.vl.model_name || '').toLowerCase())
+    ? DEFAULT_AI_CONFIG.vl.model_name
+    : config.vl.model_name;
+  const vlBaseUrl =
+    String(vlModel || '').toLowerCase() === DEFAULT_AI_CONFIG.vl.model_name &&
+    String(config.vl.base_url || '').toLowerCase().includes('dashscope.aliyuncs.com/api/v1')
+      ? DEFAULT_AI_CONFIG.vl.base_url
+      : config.vl.base_url;
   localStorage.setItem(MCP_KEY, JSON.stringify({
     ...config,
-    vl: { ...DEFAULT_AI_CONFIG.vl, ...config.vl },
+    vl: { ...DEFAULT_AI_CONFIG.vl, ...config.vl, base_url: vlBaseUrl, model_name: vlModel },
     llm: { ...DEFAULT_AI_CONFIG.llm, ...config.llm },
   }));
 }
@@ -172,7 +207,18 @@ export async function pushMcpConfigToBackend(
 ): Promise<{ ok: boolean; mode: string; vl_configured: boolean; llm_configured: boolean }> {
   const mergedConfig = {
     ...config,
-    vl: { ...DEFAULT_AI_CONFIG.vl, ...config.vl },
+    vl: {
+      ...DEFAULT_AI_CONFIG.vl,
+      ...config.vl,
+      base_url:
+        String(config.vl.model_name || '').toLowerCase() === DEFAULT_AI_CONFIG.vl.model_name &&
+        String(config.vl.base_url || '').toLowerCase().includes('dashscope.aliyuncs.com/api/v1')
+          ? DEFAULT_AI_CONFIG.vl.base_url
+          : config.vl.base_url,
+      model_name: LEGACY_DASHSCOPE_VL_MODELS.has(String(config.vl.model_name || '').toLowerCase())
+        ? DEFAULT_AI_CONFIG.vl.model_name
+        : config.vl.model_name,
+    },
     llm: { ...DEFAULT_AI_CONFIG.llm, ...config.llm },
   };
   return request('/api/mcp/config', {

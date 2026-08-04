@@ -277,12 +277,21 @@ class QuestionSearchRepository:
         except sqlite3.Error:
             return False
 
+    def _refresh_mock_state(self) -> None:
+        if self._mock and self._has_searchable_questions():
+            logger.info(
+                "QuestionSearchRepository: database became available at %s; switching off mock fallback.",
+                self._db_path,
+            )
+            self._mock = False
+
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
 
     def _get_connection(self) -> sqlite3.Connection:
         """Open a new SQLite connection (real or in-memory)."""
+        self._refresh_mock_state()
         if self._mock:
             conn = sqlite3.connect(":memory:")
             conn.row_factory = sqlite3.Row
@@ -324,6 +333,7 @@ class QuestionSearchRepository:
         ``QuestionItem``; *total_count* is the un-paginated match count.
         """
 
+        self._refresh_mock_state()
         if self._mock:
             return self._mock_search(
                 query=query,
@@ -463,24 +473,43 @@ class QuestionSearchRepository:
                 q.question_type,
                 q.status,
                 q.has_media,
+                q.source,
                 q.primary_paper_id,
                 q.primary_question_no,
                 q.vault_markdown_path,
                 qti.stem_text,
+                qti.title_text,
                 qti.answer_text,
                 qti.analysis_text,
                 qti.options_json,
+                qti.figures_json,
                 qti.image_asset_ids_json,
                 qti.image_filenames_json,
+                qti.source_text,
+                qs.source_label,
                 COALESCE(qti.image_count, 0) AS image_count,
                 COALESCE(q.is_mistake, 0) AS is_mistake,
                 q.mistake_marked_at,
+                p.paper_name,
                 p.year AS paper_year,
                 p.region AS paper_region,
                 p.exam_type AS paper_exam_type
             FROM questions q
             LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
-            LEFT JOIN papers p ON p.paper_id = q.primary_paper_id
+            LEFT JOIN question_sources qs
+                ON qs.source_id = (
+                    SELECT qsi.source_id
+                    FROM question_sources qsi
+                    WHERE qsi.question_id = q.question_id
+                    ORDER BY
+                        CASE WHEN qsi.source_role = 'primary' THEN 0 ELSE 1 END,
+                        qsi.is_verified DESC,
+                        qsi.updated_at DESC,
+                        qsi.created_at DESC,
+                        qsi.source_id
+                    LIMIT 1
+                )
+            LEFT JOIN papers p ON p.paper_id = COALESCE(q.primary_paper_id, qs.paper_id, qti.paper_id)
         """
         if use_fts:
             base_sql += """
@@ -553,7 +582,20 @@ class QuestionSearchRepository:
             SELECT COUNT(DISTINCT q.question_id)
             FROM questions q
             LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
-            LEFT JOIN papers p ON p.paper_id = q.primary_paper_id
+            LEFT JOIN question_sources qs
+                ON qs.source_id = (
+                    SELECT qsi.source_id
+                    FROM question_sources qsi
+                    WHERE qsi.question_id = q.question_id
+                    ORDER BY
+                        CASE WHEN qsi.source_role = 'primary' THEN 0 ELSE 1 END,
+                        qsi.is_verified DESC,
+                        qsi.updated_at DESC,
+                        qsi.created_at DESC,
+                        qsi.source_id
+                    LIMIT 1
+                )
+            LEFT JOIN papers p ON p.paper_id = COALESCE(q.primary_paper_id, qs.paper_id, qti.paper_id)
         """
         if use_fts:
             count_sql += """
@@ -611,6 +653,7 @@ class QuestionSearchRepository:
         if not ordered_ids:
             return []
 
+        self._refresh_mock_state()
         if self._mock:
             by_id = {item["question_id"]: item for item in _MOCK_QUESTIONS}
             return [by_id[qid] for qid in ordered_ids if qid in by_id]
@@ -630,24 +673,43 @@ class QuestionSearchRepository:
                 q.question_type,
                 q.status,
                 q.has_media,
+                q.source,
                 q.primary_paper_id,
                 q.primary_question_no,
                 q.vault_markdown_path,
                 qti.stem_text,
+                qti.title_text,
                 qti.answer_text,
                 qti.analysis_text,
                 qti.options_json,
+                qti.figures_json,
                 qti.image_asset_ids_json,
                 qti.image_filenames_json,
+                qti.source_text,
+                qs.source_label,
                 COALESCE(qti.image_count, 0) AS image_count,
                 COALESCE(q.is_mistake, 0) AS is_mistake,
                 q.mistake_marked_at,
+                p.paper_name,
                 p.year AS paper_year,
                 p.region AS paper_region,
                 p.exam_type AS paper_exam_type
             FROM questions q
             LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
-            LEFT JOIN papers p ON p.paper_id = q.primary_paper_id
+            LEFT JOIN question_sources qs
+                ON qs.source_id = (
+                    SELECT qsi.source_id
+                    FROM question_sources qsi
+                    WHERE qsi.question_id = q.question_id
+                    ORDER BY
+                        CASE WHEN qsi.source_role = 'primary' THEN 0 ELSE 1 END,
+                        qsi.is_verified DESC,
+                        qsi.updated_at DESC,
+                        qsi.created_at DESC,
+                        qsi.source_id
+                    LIMIT 1
+                )
+            LEFT JOIN papers p ON p.paper_id = COALESCE(q.primary_paper_id, qs.paper_id, qti.paper_id)
             WHERE q.question_id IN ({placeholders})
             ORDER BY {order_case}
         """
@@ -719,6 +781,7 @@ class QuestionSearchRepository:
 
     def get_facets(self) -> dict[str, Any]:
         """Return distinct filter values across all tables."""
+        self._refresh_mock_state()
         if self._mock:
             return self._mock_facets()
         return self._sqlite_facets()

@@ -80,7 +80,8 @@ export default function TemplatesPage() {
   const [materialPackages, setMaterialPackages] = useState<TemplateMaterialPackage[]>([]);
   const [config, setConfig] = useState<TemplateConfig>({ ...DEFAULT_CONFIG });
   const [loadedName, setLoadedName] = useState<string | null>(null);
-  const [saveName, _setSaveName] = useState('');
+  const [loadedId, setLoadedId] = useState<string | null>(null);
+  const [saveName, setSaveName] = useState('');
   const [saveType, _setSaveType] = useState<TemplateType>('handout');
   const [saved, setSaved] = useState(false);
 
@@ -108,11 +109,15 @@ export default function TemplatesPage() {
   const handleLoad = useCallback((tpl: Template) => {
     setConfig({ ...tpl.config });
     setLoadedName(tpl.name);
+    setLoadedId(tpl.id);
+    setSaveName(tpl.name);
   }, []);
 
   const handleReset = useCallback(() => {
     setConfig({ ...DEFAULT_CONFIG });
     setLoadedName(null);
+    setLoadedId(null);
+    setSaveName('');
   }, []);
 
   const toggleBool = useCallback((field: keyof TemplateConfig) => {
@@ -229,7 +234,7 @@ export default function TemplatesPage() {
 
       {/* ── Right: config editor ── */}
       <main className="flex-1 overflow-y-auto p-6" style={{ background: 'var(--color-bg)' }}>
-        <div className="mx-auto max-w-xl space-y-5">
+        <div className="mx-auto max-w-4xl space-y-5">
           {/* Header */}
           <div className="flex items-center justify-between">
             <div>
@@ -241,6 +246,18 @@ export default function TemplatesPage() {
               </p>
             </div>
             <div className="flex gap-2">
+              <button
+                onClick={() => navigate('/compose', {
+                  state: {
+                    templateConfig: { ...config },
+                    templateName: loadedName || nameHint || '排版模板',
+                  },
+                })}
+                className="cursor-pointer rounded border px-3 py-1.5 text-xs font-semibold transition-colors"
+                style={{ borderColor: 'var(--color-accent)', color: 'var(--color-accent)', background: 'var(--color-accent-light)' }}
+              >
+                应用到组卷工作台
+              </button>
               {loadedName && (
                 <button
                   onClick={handleReset}
@@ -260,16 +277,17 @@ export default function TemplatesPage() {
                   const name = saveName.trim() || nameHint || '未命名模板';
                   const now = new Date().toISOString();
                   const tpl: Template = {
-                    id: `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    id: loadedId || `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                     name,
                     type: saveType,
                     config: { ...config },
-                    created_at: now,
+                    created_at: loadedId ? templates.find((item) => item.id === loadedId)?.created_at : now,
                     updated_at: now,
                   };
                   const updated = saveTemplate(tpl);
                   handleSaved(updated);
                   setLoadedName(name);
+                  setLoadedId(tpl.id);
                 }}
                 className="cursor-pointer rounded-lg border-none px-4 py-1.5 text-xs font-semibold text-white transition-colors"
                 style={{ background: saved ? 'var(--color-green)' : 'var(--color-accent)' }}
@@ -277,6 +295,22 @@ export default function TemplatesPage() {
                 {saved ? '已保存' : '保存模板'}
               </button>
             </div>
+          </div>
+
+          <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <div className="rounded border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
+              <label className="mb-1.5 block text-xs font-medium text-[var(--color-text-muted)]">模板名称</label>
+              <input
+                value={saveName}
+                onChange={(event) => setSaveName(event.target.value)}
+                placeholder={nameHint || '例如：高三一轮复习教师版'}
+                className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-accent)]"
+              />
+              <p className="mt-2 text-xs leading-5 text-[var(--color-text-muted)]">
+                保存后可直接应用到工作台，纸张、字体、题图、答案解析与页眉页脚会一起同步。
+              </p>
+            </div>
+            <TemplateVisualPreview config={config} />
           </div>
 
           {/* ── Section: 排版设置 ── */}
@@ -483,14 +517,13 @@ export default function TemplatesPage() {
                   color: 'var(--color-text)',
                 }}
               >
-                <option value="static">静态标题（使用原题知识点）</option>
+                <option value="static">结构化知识卡（根据题目自动整理）</option>
                 <option value="ai">AI 动态生成（需启用 AI 服务）</option>
               </select>
             </Field>
 
             {config.knowledge_mode === 'ai' && (
-              <>
-                <Field label="知识点风格">
+              <Field label="知识点风格">
                   <div className="flex flex-wrap gap-1.5">
                     {KNOWLEDGE_STYLES.map((ks) => (
                       <button
@@ -507,43 +540,37 @@ export default function TemplatesPage() {
                       </button>
                     ))}
                   </div>
-                </Field>
-
-                <Field label="知识点篇幅">
-                  <div className="flex flex-wrap gap-1.5">
-                    {KNOWLEDGE_LENGTHS.map((kl) => (
-                      <button
-                        key={kl.value}
-                        onClick={() => updateField('knowledge_length', kl.value)}
-                        className="cursor-pointer rounded border px-2.5 py-1 text-xs font-medium transition-colors"
-                        style={{
-                          borderColor: config.knowledge_length === kl.value ? 'var(--color-accent)' : 'var(--color-border)',
-                          background: config.knowledge_length === kl.value ? 'var(--color-accent-light)' : 'var(--color-bg-card)',
-                          color: config.knowledge_length === kl.value ? 'var(--color-accent-dark)' : 'var(--color-text-secondary)',
-                        }}
-                      >
-                        {kl.label}
-                      </button>
-                    ))}
-                  </div>
-                </Field>
-              </>
+              </Field>
             )}
+
+            <Field label="知识点篇幅">
+              <div className="flex flex-wrap gap-1.5">
+                {KNOWLEDGE_LENGTHS.map((kl) => (
+                  <button
+                    key={kl.value}
+                    onClick={() => updateField('knowledge_length', kl.value)}
+                    className="cursor-pointer rounded border px-2.5 py-1 text-xs font-medium transition-colors"
+                    style={{
+                      borderColor: config.knowledge_length === kl.value ? 'var(--color-accent)' : 'var(--color-border)',
+                      background: config.knowledge_length === kl.value ? 'var(--color-accent-light)' : 'var(--color-bg-card)',
+                      color: config.knowledge_length === kl.value ? 'var(--color-accent-dark)' : 'var(--color-text-secondary)',
+                    }}
+                  >
+                    {kl.label}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1.5 text-xs leading-5 text-[var(--color-text-muted)]">静态知识卡同样生效：简短 4 条、适中 6 条、详尽 7 条。</p>
+            </Field>
           </Section>
 
-          {/* ── Section: 当前 JSON 预览 ── */}
-          <Section title="配置预览（JSON）">
-            <pre
-              className="max-h-48 overflow-auto rounded p-3 text-xs leading-relaxed"
-              style={{
-                background: 'var(--color-bg-code)',
-                color: 'var(--color-text-secondary)',
-                fontFamily: 'monospace',
-                whiteSpace: 'pre-wrap',
-              }}
-            >
-              {JSON.stringify(config, null, 2)}
-            </pre>
+          <Section title="模板应用范围">
+            <div className="grid gap-2 text-xs text-[var(--color-text-secondary)] sm:grid-cols-2">
+              <div className="rounded bg-[var(--color-bg-hover)] px-3 py-2">文档：纸张、方向、字体、字号、行距</div>
+              <div className="rounded bg-[var(--color-bg-hover)] px-3 py-2">题目：编号、题图比例、答案与解析</div>
+              <div className="rounded bg-[var(--color-bg-hover)] px-3 py-2">知识卡：生成方式、风格与内容篇幅</div>
+              <div className="rounded bg-[var(--color-bg-hover)] px-3 py-2">页面：页眉、页脚和工作台预览</div>
+            </div>
           </Section>
         </div>
       </main>
@@ -552,6 +579,42 @@ export default function TemplatesPage() {
 }
 
 // ── Small helpers ──────────────────────────────────────────────────
+
+function TemplateVisualPreview({ config }: { config: TemplateConfig }) {
+  const fontSize = Math.max(10, Math.min(20, Number.parseFloat(config.font_size || '13') || 13));
+  const lineHeight = Math.max(1.3, Math.min(2, Number.parseFloat(config.line_height || '1.6') || 1.6));
+  const figureScale = Math.max(0.5, Math.min(1, Number.parseFloat(config.figure_scale || '0.85') || 0.85));
+  return (
+    <div className="rounded border border-[var(--color-border)] bg-[#eef3f8] p-3">
+      <div className="mb-2 flex items-center justify-between text-[11px] text-[var(--color-text-muted)]">
+        <span>实时版式预览</span>
+        <span>{config.page_size || 'A4'} · {config.orientation === 'landscape' ? '横向' : '纵向'}</span>
+      </div>
+      <div
+        className="mx-auto bg-white px-4 py-3 shadow-sm"
+        style={{
+          width: config.orientation === 'landscape' ? 270 : 210,
+          minHeight: config.orientation === 'landscape' ? 150 : 210,
+          fontFamily: config.font_family,
+          fontSize: fontSize * 0.55,
+          lineHeight,
+          color: '#1f2937',
+        }}
+      >
+        <div className="border-b border-[#d8e0ea] pb-2 text-center font-bold">高中物理专题讲义</div>
+        <div className="mt-3 font-semibold">1. 如图所示，完成受力分析并判断物体的运动状态。</div>
+        <div className="my-2 flex justify-center">
+          <div className="flex h-10 items-center justify-center border border-[#cbd5e1] bg-[#f8fafc] text-[#94a3b8]" style={{ width: `${figureScale * 58}%` }}>
+            题图
+          </div>
+        </div>
+        <div>A. 保持静止　 B. 加速运动</div>
+        {config.show_answer && <div className="mt-2 font-semibold text-[#0e7a58]">答案：B</div>}
+        {config.show_analysis && <div className="mt-1 border-l-2 border-[#cbd5e1] pl-2 text-[#64748b]">解析：建立模型，列出关系式并检查方向与单位。</div>}
+      </div>
+    </div>
+  );
+}
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (

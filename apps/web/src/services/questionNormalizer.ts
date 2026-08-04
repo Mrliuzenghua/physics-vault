@@ -1,4 +1,5 @@
 import type { Question } from '../types';
+import { normalizeProjectImagePath } from '../utils/imageUrl';
 
 function safeJsonParse<T>(value: unknown, fallback: T): T {
   if (value == null || value === '') {
@@ -16,9 +17,12 @@ function safeJsonParse<T>(value: unknown, fallback: T): T {
 
 export function normalizeQuestion(raw: Question | Record<string, unknown>): Question {
   const source = raw as Record<string, unknown>;
-  const stemText = String(source.canonical_title ?? source.title ?? '').trim();
+  const titleText = String(source.title ?? source.title_text ?? '').trim();
+  const stemText = titleText || String(source.stem_text ?? source.canonical_title ?? '').trim();
   const answerText = String(source.answer ?? source.answer_text ?? '').trim();
   const analysisText = String(source.analysis ?? source.analysis_text ?? '').trim();
+  const sourceText = String(source.source ?? source.source_text ?? '').trim()
+    || String(source.primary_paper_id ?? source.source_id ?? '').trim();
   const questionType = String(source.question_type ?? source.type ?? '').trim() as Question['question_type'];
   const difficultyValue = source.difficulty;
   const difficulty =
@@ -30,7 +34,7 @@ export function normalizeQuestion(raw: Question | Record<string, unknown>): Ques
     question_id: String(source.question_id ?? ''),
     question_type: questionType,
     title: stemText,
-    options: safeJsonParse(source.options ?? source.options_json, [] as Question['options']),
+    options: normalizeOptions(source.options ?? source.options_json),
     answer: answerText,
     analysis: analysisText,
     sub_questions: safeJsonParse(source.sub_questions ?? source.sub_questions_json, [] as Question['sub_questions']),
@@ -39,7 +43,7 @@ export function normalizeQuestion(raw: Question | Record<string, unknown>): Ques
     knowledge_point: String(source.knowledge_point ?? source.topic3 ?? ''),
     knowledge_points: safeJsonParse(source.knowledge_points, [] as Question['knowledge_points']),
     tags: safeJsonParse(source.tags ?? source.tags_json, [] as Question['tags']),
-    source: String(source.source ?? source.primary_paper_id ?? source.source_id ?? ''),
+    source: sourceText,
     year: source.year != null ? Number(source.year) : undefined,
     import_batch_id: source.import_batch_id ? String(source.import_batch_id) : undefined,
     origin_file: source.origin_file ? String(source.origin_file) : undefined,
@@ -68,19 +72,44 @@ export function normalizeQuestion(raw: Question | Record<string, unknown>): Ques
   };
 }
 
+function normalizeOptions(raw: unknown): Question['options'] {
+  const parsed = safeJsonParse(raw, [] as Array<Record<string, unknown>>);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((item, index) => {
+    const option = item as Record<string, unknown>;
+    const opt = String(option.opt ?? option.label ?? String.fromCharCode(65 + index)).trim();
+    const content = String(option.content ?? option.text ?? '').trim();
+    return { opt, content };
+  });
+}
+
 function normalizeFigures(source: Record<string, unknown>): Question['figures'] {
-  const nameList = safeJsonParse(
-    source.image_filenames ?? source.image_filenames_json ?? source.figures,
-    [] as unknown[],
-  );
+  const directFigures = safeJsonParse(source.figures, [] as unknown[]);
+  const figureList = directFigures.length > 0
+    ? directFigures
+    : safeJsonParse(source.figures_json, [] as unknown[]);
   const idList = safeJsonParse(source.image_asset_ids ?? source.image_asset_ids_json, [] as string[]);
 
-  if (nameList.length > 0 && typeof nameList[0] === 'object' && nameList[0] !== null) {
-    return nameList as Question['figures'];
+  if (figureList.length > 0 && figureList.every((item) => typeof item === 'object' && item !== null)) {
+    return figureList.map((item, index) => {
+      const figure = item as Record<string, unknown>;
+      const localPath = normalizeProjectImagePath(
+        String(figure.local_path ?? figure.file_path ?? figure.path ?? ''),
+      ) || '';
+      return {
+        fig_uuid: String(figure.fig_uuid ?? figure.asset_id ?? idList[index] ?? `img-${index}`),
+        local_path: localPath,
+      };
+    });
   }
+
+  const directNames = safeJsonParse(source.image_filenames, [] as unknown[]);
+  const nameList = directNames.length > 0
+    ? directNames
+    : safeJsonParse(source.image_filenames_json, [] as unknown[]);
 
   return (nameList as string[]).map((filename: string, index: number) => ({
     fig_uuid: idList[index] || `img-${index}`,
-    local_path: `data/assets/questions/${filename}`,
+    local_path: normalizeProjectImagePath(filename) || '',
   }));
 }

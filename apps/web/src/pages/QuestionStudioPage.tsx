@@ -12,6 +12,7 @@ import {
   runImportBatchRecognize,
 } from '../services/api';
 import type { ImportMediaAsset, Question as QuestionRecord } from '../types';
+import { imageFileUrl } from '../utils/imageUrl';
 
 type StudioTab = 'smart' | 'quick' | 'figure' | 'extract';
 type OptionLayout = 'one' | 'single-column' | 'double-column';
@@ -380,11 +381,7 @@ function buildFigureReference(figure: LocalFigure) {
 }
 
 function normalizeFileUrl(path: string) {
-  const trimmed = path.trim();
-  if (!trimmed) return '';
-  if (/^(data:|https?:\/\/)/i.test(trimmed)) return trimmed;
-  if (trimmed.startsWith('/files/')) return trimmed;
-  return `/files/${trimmed.replace(/^\.?\//, '')}`;
+  return imageFileUrl(path) || '';
 }
 
 function mediaAssetToLocalFigure(asset: ImportMediaAsset): LocalFigure {

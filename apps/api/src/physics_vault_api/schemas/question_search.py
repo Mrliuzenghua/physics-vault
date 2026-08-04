@@ -59,7 +59,7 @@ class QuestionItem(BaseModel):
     answer: str | None = None
     analysis: str | None = None
     options: list[dict[str, Any]] = Field(default_factory=list)
-    figures: list[str] = Field(default_factory=list)
+    figures: list[dict[str, Any]] = Field(default_factory=list)
     difficulty: str | None = None
     knowledge_point: str | None = None
     tags: list[str] = Field(default_factory=list)
@@ -127,6 +127,28 @@ class BatchQuestionFetchRequest(BaseModel):
 class BatchQuestionFetchResponse(BaseModel):
     items: list[QuestionItem] = Field(default_factory=list)
     missing_ids: list[str] = Field(default_factory=list)
+
+
+class BatchQuestionDeleteRequest(BaseModel):
+    question_ids: list[str] = Field(..., min_length=1, max_length=200)
+
+
+class BatchQuestionDeleteResponse(BaseModel):
+    requested_count: int = 0
+    deleted_count: int = 0
+    missing_ids: list[str] = Field(default_factory=list)
+
+
+class ReturnQuestionToReviewRequest(BaseModel):
+    reason: str | None = None
+    reviewer: str | None = None
+
+
+class ReturnQuestionToReviewResponse(BaseModel):
+    question_id: str
+    review_id: str | None = None
+    status: Literal["queued", "missing"] = "queued"
+    message: str = ""
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,27 @@ from ..schemas.question_write import QuestionBatchWriteResult, QuestionRecord
 logger = logging.getLogger(__name__)
 
 
+def _build_canonical_title(title: str, max_len: int = 100) -> str:
+    """Create a compact title without cutting through inline LaTeX."""
+
+    cleaned = " ".join(
+        line.strip()
+        for line in title.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if line.strip() and not line.strip().startswith("![fig:")
+    ).strip()
+    if len(cleaned) <= max_len:
+        return cleaned or "Imported question"
+
+    clipped = cleaned[:max_len]
+    if clipped.count("$") % 2 == 1:
+        last_math_start = clipped.rfind("$")
+        if last_math_start > 20:
+            clipped = clipped[:last_math_start]
+
+    clipped = clipped.rstrip("，。；、,.;:： （(").strip()
+    return clipped or cleaned[:max_len].strip() or "Imported question"
+
+
 class QuestionWriteService:
     """Batch-write questions into the SQLite database with validation.
 
@@ -89,6 +110,37 @@ class QuestionWriteService:
             errors=errors,
         )
 
+    def delete_batch(self, question_ids: list[str]) -> dict[str, Any]:
+        """Delete a batch of questions from the database."""
+
+        try:
+            return self._repo.delete_many(question_ids)
+        except FileNotFoundError:
+            return {
+                "requested": len(question_ids),
+                "deleted": 0,
+                "missing_ids": question_ids,
+                "error": "数据库文件不存在，删除失败",
+            }
+
+    def return_to_review(
+        self,
+        question_id: str,
+        reason: str | None = None,
+        reviewer: str | None = None,
+    ) -> dict[str, Any]:
+        """Return one live question to the review queue for rework."""
+
+        try:
+            return self._repo.return_to_review(question_id, reason=reason, reviewer=reviewer)
+        except FileNotFoundError:
+            return {
+                "question_id": question_id,
+                "review_id": None,
+                "status": "missing",
+                "error": "数据库文件不存在，无法送回校对中心",
+            }
+
     # ------------------------------------------------------------------
     # Validation & normalisation
     # ------------------------------------------------------------------
@@ -115,13 +167,28 @@ class QuestionWriteService:
         if difficulty is not None:
             try:
                 difficulty = int(difficulty)
-                if difficulty < 1 or difficulty > 5:
+                if difficulty == 0:
+                    difficulty = None
+                elif difficulty < 1 or difficulty > 5:
                     raise ValueError(
                         f"{prefix} ({question_id}): difficulty 必须在 1-5 之间，当前值 {difficulty}"
                     )
             except (TypeError, ValueError):
                 raise ValueError(
                     f"{prefix} ({question_id}): difficulty 必须是 1-5 的整数"
+                )
+
+        source_page = raw.get("source_page")
+        if source_page is not None:
+            try:
+                source_page = int(source_page)
+                if source_page < 1:
+                    raise ValueError(
+                        f"{prefix} ({question_id}): source_page 必须是正整数"
+                    )
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{prefix} ({question_id}): source_page 必须是正整数"
                 )
 
         # Ensure list fields are lists
@@ -155,6 +222,9 @@ class QuestionWriteService:
             tags=[str(t) for t in tags if t],
             source=str(raw.get("source") or "").strip(),
             import_batch_id=raw.get("import_batch_id"),
+            source_page=source_page,
+            source_region_id=str(raw.get("source_region_id") or "").strip() or None,
+            raw_text=str(raw.get("raw_text") or "").strip() or None,
             review_status=str(raw.get("review_status") or "confirmed"),
         )
 
@@ -169,6 +239,8 @@ class QuestionWriteService:
 
         options_json = json.dumps(record.options or [], ensure_ascii=False)
         sub_questions_json = json.dumps(record.sub_questions or [], ensure_ascii=False)
+        figures_json = json.dumps(record.figures or [], ensure_ascii=False)
+        tags_json = json.dumps(record.tags or [], ensure_ascii=False)
 
         # Extract just the filename from local_path to prevent storing
         # full path prefixes that cause double-path rendering issues.
@@ -204,29 +276,34 @@ class QuestionWriteService:
             text_parts.append(f"【解析】{record.analysis}")
         stem_text = "\n".join(text_parts)
 
-        canonical_title = (
-            record.title[:100] if record.title else "导入题"
-        )
+        canonical_title = _build_canonical_title(record.title)
 
         return {
             "question_id": record.question_id,
             "canonical_title": canonical_title,
             "question_type": record.question_type,
             "status": "已审核",
-            "difficulty": str(record.difficulty) if record.difficulty is not None else None,
+            "difficulty": record.difficulty if record.difficulty is not None else 0,
             "knowledge_point": record.knowledge_point or None,
-            "import_batch_id": record.import_batch_id or "IMPORT",
+            "import_batch_id": record.import_batch_id,
             "options_json": options_json,
             "sub_questions_json": sub_questions_json,
+            "figures_json": figures_json,
             "image_asset_ids_json": json.dumps(image_asset_ids or [], ensure_ascii=False),
             "image_filenames_json": json.dumps(image_filenames or [], ensure_ascii=False),
             "image_count": image_count,
+            "tags_json": tags_json,
             "stem_text": stem_text,
+            "title_text": record.title,
+            "stem_clean_text": record.raw_text,
             "answer_text": record.answer or None,
             "analysis_text": record.analysis or None,
             "content_hash": None,
             "schema_version": "v2",
             "primary_question_no": None,
             "source_id": None,
+            "source_region_id": record.source_region_id,
+            "source_text": record.source or None,
+            "source_page": record.source_page,
             "vault_markdown_path": f"import/{record.question_id}.md",
         }

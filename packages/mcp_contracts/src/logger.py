@@ -92,12 +92,14 @@ class MCPCallLogger:
 
 def _summarize_dict(data: dict[str, Any], max_chars: int) -> dict[str, Any]:
     """Return a redacted + truncated copy suitable for logging."""
-    serialized = json.dumps(data, ensure_ascii=False, default=str)
+    redacted = _redact(data)
+    serialized = json.dumps(redacted, ensure_ascii=False, default=str)
     if len(serialized) <= max_chars:
-        return _redact(json.loads(serialized))
-    truncated = json.loads(serialized[:max_chars])
-    truncated["__truncated__"] = True
-    return _redact(truncated)
+        return json.loads(serialized)
+    return {
+        "__truncated__": True,
+        "preview": serialized[:max_chars],
+    }
 
 
 def _redact(obj: Any) -> Any:

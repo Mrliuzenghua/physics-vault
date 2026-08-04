@@ -1,7 +1,7 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import HandoutDocument from '../components/handout/HandoutDocument';
+import HandoutDocument, { getHandoutPaginationReport } from '../components/handout/HandoutDocument';
 import PrintPreflightPanel from '../components/handout/PrintPreflightPanel';
 import LessonPackageTree from '../components/lesson/LessonPackageTree';
 import { DEFAULT_CONFIG as DEFAULT_HF_CONFIG } from '../components/handout/HandoutHeaderFooterConfigPanel';
@@ -10,7 +10,6 @@ import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Input } from '../components/ui/Input';
 import {
-  buildHandoutItemsFromLessonPackage,
   deleteSavedLessonPackage,
   listSavedLessonPackages,
   loadSavedLessonPackage,
@@ -18,6 +17,8 @@ import {
   saveCurrentLessonPackage,
   saveLessonPackageToLibrary,
 } from '../services/lessonPackage';
+import { layoutModelToHandoutItems, lessonPackageToLayoutModel } from '../services/lessonLayoutModel';
+import { validateLessonPackage } from '../services/lessonExport';
 import type {
   HandoutConfig,
   HandoutItem,
@@ -116,6 +117,7 @@ export default function HandoutPage() {
   const [lessonPackage, setLessonPackage] = useState<LessonPackage | null>(() => loadCurrentLessonPackage());
   const [savedPackages, setSavedPackages] = useState(() => listSavedLessonPackages());
   const [preflightMode, setPreflightMode] = useState(false);
+  const [previewZoom, setPreviewZoom] = useState(82);
   const [config, setConfig] = useState<HandoutConfig>(() => ({
     title: lessonPackage?.title || '物理讲义预览',
     subtitle: lessonPackage?.subtitle || '题目与知识点一体化讲义',
@@ -126,11 +128,12 @@ export default function HandoutPage() {
   }));
 
   const items = useMemo(
-    () => (lessonPackage ? buildHandoutItemsFromLessonPackage(lessonPackage) : []),
+    () => (lessonPackage ? layoutModelToHandoutItems(lessonPackageToLayoutModel(lessonPackage)) : []),
     [lessonPackage],
   );
 
-  const pageCount = useMemo(() => splitIntoPages(items).length, [items]);
+  const paginationReport = useMemo(() => getHandoutPaginationReport(items, config), [items, config]);
+  const pageCount = paginationReport.estimatedPageCount;
   const questionCount = useMemo(
     () => items.filter((item) => item.type === 'question').length,
     [items],
@@ -148,6 +151,11 @@ export default function HandoutPage() {
       styleConfig: config.styleConfig,
       updatedAt: new Date().toISOString(),
     };
+    const exportIssues = validateLessonPackage(nextPackage);
+    if (exportIssues.length > 0) {
+      window.alert(`打印前检查未通过：${exportIssues.slice(0, 3).map((issue) => issue.message).join('；')}`);
+      return;
+    }
     saveCurrentLessonPackage(nextPackage);
     setLessonPackage(nextPackage);
     window.print();
@@ -213,64 +221,46 @@ export default function HandoutPage() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="border-b border-[var(--color-border)] bg-[var(--color-bg-card)] px-4 py-3">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="min-w-[280px] flex-1">
-              <Input
-                label="讲义标题"
-                value={config.title}
-                onChange={(event) => setConfig((prev) => ({ ...prev, title: event.target.value }))}
-                placeholder="输入讲义标题"
-              />
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="min-w-[220px] flex-1">
+              <Input label="讲义标题" value={config.title} onChange={(event) => setConfig((prev) => ({ ...prev, title: event.target.value }))} placeholder="输入讲义标题" />
             </div>
-            <div className="min-w-[240px] flex-1">
-              <Input
-                label="副标题"
-                value={config.subtitle}
-                onChange={(event) => setConfig((prev) => ({ ...prev, subtitle: event.target.value }))}
-                placeholder="输入副标题"
-              />
+            <div className="min-w-[190px] flex-1">
+              <Input label="副标题" value={config.subtitle} onChange={(event) => setConfig((prev) => ({ ...prev, subtitle: event.target.value }))} placeholder="输入副标题" />
             </div>
-            <div className="flex items-end gap-2">
-              <Button variant="outline" onClick={() => setConfig((prev) => ({ ...prev, showAnswers: !prev.showAnswers }))}>
-                {config.showAnswers ? '隐藏答案' : '显示答案'}
-              </Button>
-              <Button variant="outline" onClick={() => setConfig((prev) => ({ ...prev, showAnalysis: !prev.showAnalysis }))}>
-                {config.showAnalysis ? '隐藏解析' : '显示解析'}
-              </Button>
-              <Button variant="secondary" onClick={() => setPreflightMode((prev) => !prev)}>
-                {preflightMode ? '返回预览' : '打印检查'}
-              </Button>
-              <Button variant="outline" onClick={handleSaveCurrent}>保存当前</Button>
-              <Button onClick={handlePrint}>打印 / 导出</Button>
+            <div className="flex items-end gap-1">
+              <button type="button" onClick={() => setConfig((prev) => ({ ...prev, showAnswers: false, showAnalysis: false }))} className={`h-7 rounded px-2.5 text-xs font-semibold ${!config.showAnswers && !config.showAnalysis ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-bg-hover)] text-[var(--color-text-muted)]'}`}>学生版</button>
+              <button type="button" onClick={() => setConfig((prev) => ({ ...prev, showAnswers: true, showAnalysis: true }))} className={`h-7 rounded px-2.5 text-xs font-semibold ${config.showAnswers && config.showAnalysis ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-bg-hover)] text-[var(--color-text-muted)]'}`}>教师版</button>
+              <Button variant="secondary" size="sm" onClick={() => setPreflightMode((prev) => !prev)}>{preflightMode ? '返回预览' : '打印检查'}</Button>
+              <Button variant="outline" size="sm" onClick={handleSaveCurrent}>保存</Button>
+              <Button size="sm" onClick={handlePrint}>打印 / PDF</Button>
             </div>
           </div>
-
-          <div className="mt-3 grid gap-2 md:grid-cols-4">
-            <SummaryCard label="题目数量" value={`${questionCount} 题`} />
-            <SummaryCard label="知识点卡片" value={`${knowledgeCount} 个`} />
-            <SummaryCard label="预计页数" value={`${pageCount} 页`} />
-            <SummaryCard label="当前模式" value={config.showAnalysis ? '教师版' : '学生版'} />
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] pt-2">
+            <div className="flex flex-wrap gap-1.5 text-[11px] text-[var(--color-text-muted)]">
+              <PreviewPill label="题目" value={`${questionCount} 题`} />
+              <PreviewPill label="知识点" value={`${knowledgeCount} 个`} />
+              <PreviewPill label="预估" value={`${pageCount} 页`} />
+              {paginationReport.nearCapacityPageCount > 0 && <PreviewPill label="接近满页" value={`${paginationReport.nearCapacityPageCount} 页`} tone="warning" />}
+            </div>
+            <div className="flex items-center gap-1">
+              <button type="button" onClick={() => setPreviewZoom((value) => Math.max(55, value - 10))} className="h-6 w-6 rounded bg-[var(--color-bg-hover)] text-xs text-[var(--color-text-secondary)]" title="缩小">−</button>
+              <button type="button" onClick={() => setPreviewZoom(82)} className="h-6 min-w-10 rounded px-1 text-[11px] font-semibold tabular-nums text-[var(--color-text-secondary)]">{previewZoom}%</button>
+              <button type="button" onClick={() => setPreviewZoom((value) => Math.min(115, value + 10))} className="h-6 w-6 rounded bg-[var(--color-bg-hover)] text-xs text-[var(--color-text-secondary)]" title="放大">+</button>
+            </div>
           </div>
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto bg-[var(--color-bg-hover)] px-5 py-5">
-          <div className="mx-auto max-w-[1160px]">
-            <div className="mb-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-4 py-3 shadow-sm">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-semibold text-[var(--color-text-main)]">统一教学包驱动</div>
-                  <div className="text-xs text-[var(--color-text-muted)]">
-                    本页与组卷工作台、幻灯预览、课堂授课共用同一份题目与知识点结构。
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2 text-xs text-[var(--color-text-muted)]">
-                  <Badge>{lessonPackage.source === 'compose' ? '来源：组卷工作台' : '来源：当前教学包'}</Badge>
-                  <Badge>{lessonPackage.id}</Badge>
-                </div>
-              </div>
+          <div className="mx-auto w-max min-w-full">
+            <div className="mb-3 flex items-center justify-center gap-2 text-[11px] text-[var(--color-text-subtle)]">
+              <span>{config.showAnswers || config.showAnalysis ? '教师版讲义' : '学生版讲义'}</span>
+              <span>·</span>
+              <span>{lessonPackage.source === 'compose' ? '组卷工作台生成' : '当前教学包'}</span>
             </div>
-
-            <HandoutDocument items={items} config={config} />
+            <div style={{ zoom: previewZoom / 100 } as CSSProperties}>
+              <HandoutDocument items={items} config={config} />
+            </div>
           </div>
         </div>
       </div>
@@ -289,19 +279,10 @@ export default function HandoutPage() {
   );
 }
 
-function SummaryCard({ label, value }: { label: string; value: string }) {
+function PreviewPill({ label, value, tone }: { label: string; value: string; tone?: 'warning' }) {
   return (
-    <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-hover)] px-4 py-3">
-      <div className="text-xs text-[var(--color-text-muted)]">{label}</div>
-      <div className="mt-1 text-lg font-semibold text-[var(--color-text)]">{value}</div>
-    </div>
-  );
-}
-
-function Badge({ children }: { children: string }) {
-  return (
-    <span className="pv-chip">
-      {children}
+    <span className={`rounded border px-2 py-1 ${tone === 'warning' ? 'border-[var(--color-orange)]/30 bg-[var(--color-orange-light)] text-[var(--color-orange)]' : 'border-[var(--color-border)] bg-[var(--color-bg-hover)]'}`}>
+      {label} <b className="ml-0.5 text-[var(--color-text-secondary)]">{value}</b>
     </span>
   );
 }

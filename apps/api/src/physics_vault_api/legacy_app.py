@@ -574,6 +574,7 @@ class QuestionSummary(BaseModel):
     primary_paper_id: str | None = None
     primary_question_no: int | None = None
     vault_markdown_path: str | None = None
+    source: str | None = None
     knowledge_points: list[KnowledgePointLink] = Field(default_factory=list)
 
 
@@ -590,6 +591,7 @@ class UnifiedQuestionSearchItem(QuestionSummary):
 class QuestionDetail(QuestionSummary):
     content_hash: str | None = None
     schema_version: str
+    title_text: str | None = None
     stem_text: str | None = None
     stem_clean_text: str | None = None
     source_id: str | None = None
@@ -753,7 +755,9 @@ def serve_file(file_path: str):
     full_path = VAULT_ROOT / file_path
     if not full_path.exists() or not full_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(str(full_path))
+    response = FileResponse(str(full_path))
+    response.headers.setdefault("Cache-Control", "public, max-age=86400")
+    return response
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1567,8 +1571,10 @@ def get_question(question_id: str) -> QuestionDetail:
             q.created_at,
             q.updated_at,
             qti.stem_text,
+            qti.title_text,
             qti.stem_clean_text,
             qti.source_id,
+            COALESCE(qti.source_text, q.source, q.primary_paper_id) AS source,
             qti.image_asset_ids_json,
             qti.image_filenames_json,
             COALESCE(qti.image_count, 0) AS image_count,
@@ -1645,7 +1651,8 @@ def update_question(question_id: str, payload: dict) -> dict:
             q.difficulty, q.question_type AS type, q.status, q.has_media,
             q.primary_paper_id, q.primary_question_no, q.vault_markdown_path,
             q.content_hash, q.schema_version, q.created_at, q.updated_at,
-            qti.stem_text, qti.stem_clean_text, qti.source_id,
+            qti.stem_text, qti.title_text, qti.stem_clean_text, qti.source_id,
+            COALESCE(qti.source_text, q.source, q.primary_paper_id) AS source,
             qti.image_asset_ids_json, qti.image_filenames_json,
             COALESCE(qti.image_count, 0) AS image_count,
             qti.answer_text, qti.analysis_text, qti.tips_text, qti.options_json

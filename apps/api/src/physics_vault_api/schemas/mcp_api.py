@@ -137,6 +137,9 @@ class McpStatusResponse(BaseModel):
     tools: dict[str, str]
     vl_available: bool = False
     llm_available: bool = False
+    http_mode: bool = False
+    vl_model: str | None = None
+    llm_model: str | None = None
     last_checked_at: str | None = None
 
 

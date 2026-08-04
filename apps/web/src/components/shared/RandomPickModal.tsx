@@ -22,8 +22,9 @@ interface Props {
   onChangeExcludedIdsText: (value: string) => void;
   onStart: () => void;
   onAddAllToBasket: () => void;
-  onViewDetail: (id: string) => void;
+  onReturnToReview?: (id: string) => void;
   onAddToBasket: (id: string) => void;
+  returningReviewIds?: Set<string>;
   inBasketIds: Set<string>;
 }
 
@@ -46,8 +47,9 @@ export default function RandomPickModal({
   onChangeExcludedIdsText,
   onStart,
   onAddAllToBasket,
-  onViewDetail,
+  onReturnToReview,
   onAddToBasket,
+  returningReviewIds = new Set(),
   inBasketIds,
 }: Props) {
   return (
@@ -81,8 +83,9 @@ export default function RandomPickModal({
                   key={`${question.question_id}-${index}`}
                   question={question}
                   index={index + 1}
-                  onViewDetail={onViewDetail}
+                  onReturnToReview={onReturnToReview}
                   onAddToBasket={onAddToBasket}
+                  returningToReview={returningReviewIds.has(question.question_id)}
                   inBasket={inBasketIds.has(question.question_id)}
                 />
               ))}

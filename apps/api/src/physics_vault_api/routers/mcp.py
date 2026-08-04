@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from openai import OpenAI
 from pydantic import BaseModel
 
-from ..runtime_config import RuntimeAiConfig, update_runtime_config
+from ..runtime_config import RuntimeAiConfig, get_runtime_config, update_runtime_config
 from ..schemas.mcp_api import (
     DetectQuestionRegionsRequest,
     GenerateAnalysisRequest,
@@ -29,6 +29,13 @@ class McpConfigPayload(BaseModel):
 class McpConfigResponse(BaseModel):
     ok: bool
     mode: str
+    vl_configured: bool
+    llm_configured: bool
+
+
+class McpRuntimeConfigResponse(BaseModel):
+    vl: dict[str, Any]
+    llm: dict[str, Any]
     vl_configured: bool
     llm_configured: bool
 
@@ -63,6 +70,19 @@ def _http_error(exc: AppError) -> HTTPException:
     )
 
 
+def _provider_error(exc: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=502,
+        detail={
+            "code": "AI_PROVIDER_ERROR",
+            "message": str(exc),
+            "retryable": False,
+            "target": "ai-provider",
+            "details": {},
+        },
+    )
+
+
 def build_mcp_router(service: McpGatewayService) -> APIRouter:
     router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
@@ -70,12 +90,24 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
     async def get_status() -> McpStatusResponse:
         status = service.status()
         # Surface saved runtime configuration without changing the provider mode.
-        from ..runtime_config import get_runtime_config
         cfg = get_runtime_config()
-        if cfg.llm.api_key and status.get("mode") == "http":
-            status["llm_model"] = cfg.llm.model_name or "(configured)"
-            status["vl_model"] = cfg.vl.model_name or "(configured)"
+        if status.get("mode") == "http":
+            if cfg.vl.api_key:
+                status["vl_model"] = cfg.vl.model_name or "(configured)"
+            if cfg.llm.api_key:
+                status["llm_model"] = cfg.llm.model_name or "(configured)"
         return McpStatusResponse.model_validate(status)
+
+    @router.get("/config", response_model=McpRuntimeConfigResponse)
+    async def get_config() -> McpRuntimeConfigResponse:
+        """Return saved AI service configuration for the settings page."""
+        runtime = get_runtime_config()
+        return McpRuntimeConfigResponse(
+            vl=runtime.vl.__dict__,
+            llm=runtime.llm.__dict__,
+            vl_configured=runtime.is_configured("vl"),
+            llm_configured=runtime.is_configured("llm"),
+        )
 
     @router.post("/config", response_model=McpConfigResponse)
     async def update_config(payload: McpConfigPayload) -> McpConfigResponse:
@@ -157,6 +189,8 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
             data = await service.parse_document(request.model_dump())
         except AppError as exc:
             raise _http_error(exc) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise _provider_error(exc) from exc
         return McpTaskResponse(data=data)
 
     @router.post("/detect-question-regions", response_model=McpTaskResponse)
@@ -165,6 +199,8 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
             data = await service.detect_question_regions(request.model_dump())
         except AppError as exc:
             raise _http_error(exc) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise _provider_error(exc) from exc
         return McpTaskResponse(data=data)
 
     @router.post("/parse-question-region", response_model=McpTaskResponse)
@@ -173,6 +209,8 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
             data = await service.parse_question_region(request.model_dump())
         except AppError as exc:
             raise _http_error(exc) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise _provider_error(exc) from exc
         return McpTaskResponse(data=data)
 
     @router.post("/generate-analysis", response_model=McpTaskResponse)
@@ -188,6 +226,8 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
             )
         except AppError as exc:
             raise _http_error(exc) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise _provider_error(exc) from exc
         return McpTaskResponse(data=data)
 
     @router.post("/generate-knowledge", response_model=McpTaskResponse)
@@ -196,6 +236,8 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
             data = await service.generate_knowledge(request.model_dump())
         except AppError as exc:
             raise _http_error(exc) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise _provider_error(exc) from exc
         return McpTaskResponse(data=data)
 
     @router.post("/generate-metadata", response_model=McpTaskResponse)
@@ -204,6 +246,8 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
             data = await service.generate_metadata(request.model_dump())
         except AppError as exc:
             raise _http_error(exc) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise _provider_error(exc) from exc
         return McpTaskResponse(data=data)
 
     return router

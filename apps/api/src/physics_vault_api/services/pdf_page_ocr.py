@@ -63,6 +63,16 @@ async def parse_pdf_by_page(
                 source=str(pdf_path),
                 page_no=page_no,
             )
+            regions = [
+                {
+                    "region_id": question.get("source_region_id"),
+                    "question_id": question.get("question_id"),
+                    "bbox": question.get("source_bbox"),
+                }
+                for question in questions
+                if question.get("source_bbox")
+            ]
+            image_width, image_height = _image_size(image_path)
             return {
                 "page_no": page_no,
                 "status": "completed",
@@ -71,6 +81,9 @@ async def parse_pdf_by_page(
                 "questions": questions,
                 "media_assets": parsed.get("media_assets") or [],
                 "raw_text": str(parsed.get("text") or parsed.get("raw_text") or ""),
+                "image_width": image_width,
+                "image_height": image_height,
+                "regions": regions,
             }
         except Exception as exc:  # noqa: BLE001
             logger.warning("PDF page OCR failed for %s page %d: %s", pdf_path, page_no, exc)
@@ -160,9 +173,9 @@ def _normalize_page_questions(
         normalized.append(
             normalize_question_math({
                 "question_id": str(item.get("question_id") or f"{batch_id}_p{page_no:04d}_q{index:04d}"),
-                "question_type": str(item.get("question_type") or "calculation"),
+                "question_type": _normalize_question_type(item.get("question_type")),
                 "title": str(item.get("title") or item.get("stem") or ""),
-                "options": item.get("options") if isinstance(item.get("options"), list) else [],
+                "options": _normalize_options(item.get("options")),
                 "answer": str(item.get("answer") or ""),
                 "analysis": str(item.get("analysis") or ""),
                 "sub_questions": item.get("sub_questions") if isinstance(item.get("sub_questions"), list) else [],
@@ -173,11 +186,107 @@ def _normalize_page_questions(
                 "source": str(item.get("source") or source),
                 "import_batch_id": str(item.get("import_batch_id") or batch_id),
                 "confidence": item.get("confidence"),
-                "source_page": int(item.get("source_page") or page_no),
+                "source_page": _safe_page_no(item.get("source_page"), page_no),
                 "source_region_id": item.get("source_region_id"),
+                "source_bbox": _normalize_source_bbox(
+                    item.get("source_bbox") or item.get("region_bbox") or item.get("bbox")
+                ),
                 "raw_text": item.get("raw_text"),
             })
         )
+    return normalized
+
+
+def _image_size(path: Path) -> tuple[int | None, int | None]:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return image.size
+    except Exception:  # pragma: no cover - metadata enhancement only
+        return None, None
+
+
+def _normalize_source_bbox(value: Any) -> list[float] | None:
+    """Return a canonical [x, y, width, height] region box."""
+
+    if isinstance(value, dict):
+        try:
+            x = float(value.get("x", value.get("left", value.get("x1"))))
+            y = float(value.get("y", value.get("top", value.get("y1"))))
+            if value.get("width") is not None and value.get("height") is not None:
+                width = float(value["width"])
+                height = float(value["height"])
+            else:
+                width = float(value.get("right", value.get("x2"))) - x
+                height = float(value.get("bottom", value.get("y2"))) - y
+            return [x, y, max(0.0, width), max(0.0, height)]
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        try:
+            x1, y1, third, fourth = [float(item) for item in value]
+        except (TypeError, ValueError):
+            return None
+        # Vision providers commonly return [x1, y1, x2, y2]. Normalized
+        # [x, y, width, height] values are preserved when the last pair does
+        # not look like bottom-right coordinates.
+        if third > x1 and fourth > y1:
+            return [x1, y1, third - x1, fourth - y1]
+        return [x1, y1, max(0.0, third), max(0.0, fourth)]
+    return None
+
+
+def _safe_page_no(value: Any, fallback: int) -> int:
+    try:
+        return int(value or fallback)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _normalize_question_type(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    labels = {
+        "单选": "single_choice",
+        "单选题": "single_choice",
+        "single": "single_choice",
+        "single_choice": "single_choice",
+        "多选": "multi_choice",
+        "多选题": "multi_choice",
+        "multi": "multi_choice",
+        "multi_choice": "multi_choice",
+        "填空": "fill",
+        "填空题": "fill",
+        "fill": "fill",
+        "实验": "experiment",
+        "实验题": "experiment",
+        "experiment": "experiment",
+        "计算": "calculation",
+        "计算题": "calculation",
+        "calculation": "calculation",
+    }
+    return labels.get(raw, "calculation")
+
+
+def _normalize_options(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for index, item in enumerate(value):
+        default_opt = chr(ord("A") + index)
+        if isinstance(item, dict):
+            opt = str(item.get("opt") or default_opt).strip().rstrip(".")
+            content = str(item.get("content") or item.get("text") or "").strip()
+        else:
+            text = str(item).strip()
+            if len(text) >= 2 and text[0].upper() in "ABCDEFG" and text[1] in {".", "、", "．"}:
+                opt = text[0].upper()
+                content = text[2:].strip()
+            else:
+                opt = default_opt
+                content = text
+        if opt and content:
+            normalized.append({"opt": opt.upper(), "content": content})
     return normalized
 
 
