@@ -72,9 +72,11 @@ server = MCPServer(
         "canonical question references, standard knowledge-point cards, teaching text/title blocks, or "
         "change their order. They never alter a canonical question or knowledge point. This is a free-form "
         "workspace: execute directly when the teacher explicitly requests an edit; use dry_run=true only when a preview is requested. "
-        "When asked to generate explanations for selected questions, use one rich knowledge operation per concept with title and "
-        "summary/content or points, then place it next to its related question. Do not add a generic knowledge card plus a separate "
-        "text block. Use topic3_id only for an exact semantic match; otherwise create a workbench-only knowledge card with title. "
+        "When asked to generate explanations for selected questions, use one rich knowledge operation per concept with a concise title, "
+        "question-specific content and related_question_ids, then place it next to its related question. Write natural teaching prose with "
+        "the decisive reasoning, useful formulas and actual misconceptions from the question; never use generic fixed headings or boilerplate. "
+        "Do not add a generic knowledge card plus a separate text block. Use topic3_id only for an exact semantic match; otherwise create a "
+        "workbench-only explanation with title. add_knowledge_to_composition_workbench only references taxonomy and must not be used to generate explanations. "
         "Use create_knowledge_points and batch_update_question_metadata directly to normalize tags, "
         "knowledge bindings, difficulty, question type, and normalized source without asking for approval. "
         "These metadata tools cannot change stems, options, answers, analysis, images, or publication status. "
@@ -514,15 +516,6 @@ def _compose_insert_position(items: list[dict[str, Any]], insert_at: int | None)
     return min(max(int(insert_at), 0), len(items))
 
 
-def _teaching_points(topic_name: str) -> list[str]:
-    return [
-        f"概念与条件：明确“{topic_name}”的研究对象、过程、适用条件和核心物理量。",
-        "规律与表达：写出关键关系式，并结合图像、实验现象或能量变化解释物理意义。",
-        "解题路径：先识别模型，再列关系式与边界条件，最后检查方向、单位与数量级。",
-        "常见误区：警惕条件变化、正负号、临界状态，以及过程量与状态量的混淆。",
-    ]
-
-
 @server.tool()
 def list_composition_workbenches(limit: int = 20) -> dict[str, Any]:
     """列出已保存的组卷工作台草稿。只读；草稿不会修改正式题库。"""
@@ -627,7 +620,7 @@ def add_knowledge_to_composition_workbench(
     insert_at: int | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """把标准三级知识点加入组卷工作台，作为可展示的教学知识卡。仅写草稿。"""
+    """把标准三级知识点作为目录引用加入工作台，不生成教学讲解。仅写草稿。"""
     draft, error = _get_compose_draft_or_error(draft_id)
     if error:
         return error
@@ -647,7 +640,7 @@ def add_knowledge_to_composition_workbench(
     new_items = []
     for topic_id in added:
         topic = _topic_payload(topics[topic_id])
-        display_title = f"{topic['topic2_name']}：{topic['topic3_name']}"
+        display_title = str(topic["topic3_name"])
         new_items.append(
             {
                 "id": f"compose-knowledge-{_short_id()}",
@@ -658,8 +651,8 @@ def add_knowledge_to_composition_workbench(
                     "id": topic_id,
                     "topic3_id": topic_id,
                     "title": display_title,
-                    "summary": f"{topic['topic1_name']} / {topic['topic2_name']}",
-                    "points": _teaching_points(topic['topic3_name']),
+                    "summary": "",
+                    "points": [],
                     "relatedQuestionIds": [],
                     **topic,
                 },
@@ -744,8 +737,9 @@ def apply_composition_workbench_plan(
 ) -> dict[str, Any]:
     """一次完成组卷计划：批量加入题目、完整知识讲解卡或教学文字并排序。
 
-    knowledge 可引用准确的 topic3_id，也可仅提供 title；summary/content 与 points
-    会直接成为工作台可见、可编辑的讲解内容。没有准确目录节点时不要绑定近似节点。
+    knowledge 可引用准确的 topic3_id，也可仅提供 title；必须提供非空 summary/content
+    或 points，内容会直接成为工作台可见、可编辑的讲解。请围绕关联题目的实际判断过程
+    自然组织内容，不要套用固定栏目。没有准确目录节点时不要绑定近似节点。
     ordered_refs 可用 item:<现有item_id> 与 operation.ref 指定最终顺序。仅写组卷草稿。
     """
     draft, error = _get_compose_draft_or_error(draft_id)
@@ -787,13 +781,20 @@ def apply_composition_workbench_plan(
                 return {"ok": False, "error": f"{ref} 的 related_question_ids 必须是题号数组。"}
             if topic3_id:
                 topic_requests.append(topic3_id)
+            summary = str(raw.get("summary") or raw.get("content") or "").strip()
+            points = [str(point).strip() for point in raw_points if str(point).strip()]
+            if not summary and not points:
+                return {
+                    "ok": False,
+                    "error": f"{ref} 缺少实际讲解内容。请根据关联题目填写 content/summary 或 points，不能只传知识点编号。",
+                }
             normalized_ops.append({
                 "ref": ref,
                 "kind": kind,
                 "topic3_id": topic3_id,
                 "title": title,
-                "summary": str(raw.get("summary") or raw.get("content") or "").strip(),
-                "points": [str(point).strip() for point in raw_points if str(point).strip()],
+                "summary": summary,
+                "points": points,
                 "related_question_ids": [
                     str(question_id).strip()
                     for question_id in related_question_ids
@@ -814,11 +815,14 @@ def apply_composition_workbench_plan(
     with _connect_formal_read_db() as conn:
         topics = _fetch_topics(conn, topic_requests)
     existing_question_ids = {str(item.get("question_id") or "") for item in existing_items if item.get("type") == "question"}
-    existing_topic_ids = {
-        str((item.get("payload") or {}).get("topic3_id") or (item.get("payload") or {}).get("id") or "")
-        for item in existing_items if item.get("type") == "knowledge"
+    existing_topic_refs = {
+        str((item.get("payload") or {}).get("topic3_id") or (item.get("payload") or {}).get("id") or ""): f"item:{item['id']}"
+        for item in existing_items
+        if item.get("type") == "knowledge"
+        and str((item.get("payload") or {}).get("topic3_id") or (item.get("payload") or {}).get("id") or "")
     }
     produced: dict[str, dict[str, Any]] = {}
+    replacement_refs: dict[str, str] = {}
     skipped: list[dict[str, str]] = []
     for operation in normalized_ops:
         ref, kind = operation["ref"], operation["kind"]
@@ -835,27 +839,16 @@ def apply_composition_workbench_plan(
             topic3_id = operation["topic3_id"]
             if topic3_id and topic3_id not in topics:
                 return {"ok": False, "error": f"标准知识目录不存在 active topic3_id：{topic3_id}。"}
-            if topic3_id and topic3_id in existing_topic_ids:
-                skipped.append({"ref": ref, "reason": "knowledge_already_present"})
-                continue
             topic = _topic_payload(topics[topic3_id]) if topic3_id else {}
-            default_title = (
-                f"{topic['topic2_name']}：{topic['topic3_name']}"
-                if topic
-                else "知识讲解"
-            )
+            default_title = str(topic["topic3_name"]) if topic else "知识讲解"
             title = operation["title"] or default_title
             knowledge_id = topic3_id or f"ai-knowledge-{_short_id()}"
-            summary = operation["summary"] or (
-                f"{topic['topic1_name']} / {topic['topic2_name']}" if topic else ""
-            )
-            points = operation["points"] or (
-                _teaching_points(str(topic["topic3_name"]))
-                if topic and not operation["summary"]
-                else []
-            )
+            replaced_ref = existing_topic_refs.pop(topic3_id, None) if topic3_id else None
+            replaced_item = existing_refs.pop(replaced_ref, None) if replaced_ref else None
+            if replaced_ref:
+                replacement_refs[replaced_ref] = ref
             produced[ref] = {
-                "id": f"compose-knowledge-{_short_id()}",
+                "id": str((replaced_item or {}).get("id") or f"compose-knowledge-{_short_id()}"),
                 "type": "knowledge",
                 "position": 0,
                 "title": title,
@@ -863,20 +856,26 @@ def apply_composition_workbench_plan(
                     "id": knowledge_id,
                     "topic3_id": topic3_id or None,
                     "title": title,
-                    "summary": summary,
-                    "points": points,
+                    "summary": operation["summary"],
+                    "points": operation["points"],
                     "relatedQuestionIds": operation["related_question_ids"],
                     **topic,
                 },
             }
-            if topic3_id:
-                existing_topic_ids.add(topic3_id)
         else:
             produced[ref] = {"id": f"compose-text-{_short_id()}", "type": "text", "position": 0, "title": operation["title"], "payload": {"id": f"text-{_short_id()}", "title": operation["title"], "content": operation["content"], "blockKind": operation["block_kind"]}}
 
     all_refs = {**existing_refs, **produced}
-    default_order = [*existing_refs.keys(), *produced.keys()]
-    requested_order = [str(ref).strip() for ref in (ordered_refs or default_order) if str(ref).strip()]
+    default_order = [
+        replacement_refs.get(f"item:{item['id']}", f"item:{item['id']}")
+        for item in existing_items
+    ]
+    default_order.extend(ref for ref in produced if ref not in default_order)
+    requested_order = [
+        replacement_refs.get(str(ref).strip(), str(ref).strip())
+        for ref in (ordered_refs or default_order)
+        if str(ref).strip()
+    ]
     if len(requested_order) != len(all_refs) or set(requested_order) != set(all_refs):
         return {"ok": False, "error": "ordered_refs 必须恰好包含每个保留的既有对象 item:<id> 与每个新增对象 ref 各一次。", "available_refs": list(all_refs), "skipped": skipped}
     next_items = [all_refs[ref] for ref in requested_order]

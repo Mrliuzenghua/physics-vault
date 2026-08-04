@@ -1228,10 +1228,10 @@ def _build_question_picker_prompt(
 - `mcp__physics_vault__list_composition_workbenches` / `get_composition_workbench`：读取已保存的组卷工作台草稿；不传 draft_id 时读取最近编辑的一份。
 - `mcp__physics_vault__create_composition_workbench`：新建独立组卷草稿。先 dry_run=true 预览，确认后才 dry_run=false。
 - `mcp__physics_vault__add_questions_to_composition_workbench`：把已入正式题库的 question_id 引用加入组卷工作台；只写草稿，绝不修改题库题目。
-- `mcp__physics_vault__add_knowledge_to_composition_workbench`：仅在老师明确要求加入已有标准知识卡时使用；不要用近似 topic3_id 代替实际考点。
+- `mcp__physics_vault__add_knowledge_to_composition_workbench`：只引用已有知识目录，不生成讲解。老师要求生成知识讲解时不要调用它，也不要用近似 topic3_id 代替实际考点。
 - `mcp__physics_vault__insert_teaching_block_to_composition_workbench`：插入试卷标题、姓名栏、分节标题或教学说明文字；只写草稿。组卷工作台是自由编排区，老师明确要求时可直接执行，不需要审核或二次确认。
 - `mcp__physics_vault__reorder_composition_workbench`：按完整 item id 顺序重排题目、知识卡与教学对象；先读取草稿获得 item id，再 dry_run=true 预览，确认后才执行。
-- `mcp__physics_vault__apply_composition_workbench_plan`：组卷操作的优先接口。老师要求“为工作台题目生成知识讲解”时，每个考点使用一个 knowledge operation，直接填写准确标题及 summary/content 或 points，并通过 related_question_ids 关联题目；不要再生成“通用知识卡 + 独立讲解文本”两块重复内容。只有目录节点语义完全一致时才传 topic3_id，没有准确节点就只传 title 创建工作台专用讲解卡。老师已明确要求编辑工作台时直接 dry_run=false，并用 ordered_refs 将讲解卡排在对应题目后。
+- `mcp__physics_vault__apply_composition_workbench_plan`：组卷操作的优先接口。老师要求“为工作台题目生成知识讲解”时，每个考点使用一个 knowledge operation，填写简洁标题、非空 content/summary 和 related_question_ids。内容必须结合对应题目的实际判断过程，讲清关键规律、必要公式和本题易错点，使用自然段或少量有意义的小标题；禁止套用“概念与条件、规律与表达、解题路径、常见误区”之类固定模板。不要再生成“通用知识卡 + 独立讲解文本”两块重复内容。只有目录节点语义完全一致时才传 topic3_id，没有准确节点就只传 title。已有同 topic3_id 的旧讲解会原位更新。老师已明确要求编辑工作台时直接 dry_run=false，并用 ordered_refs 将讲解排在对应题目后。
 - `mcp__physics_vault__curate_questions_to_composition_workbench`：当老师说“找全部某主题题目并精选 N 道组卷”时优先使用。一次检索正式题库候选题，排除当前工作台已有题，再按题型、难度、来源覆盖度做均衡精选，直接给出组卷预览；先 dry_run=true，确认后再写入草稿。
 - `mcp__physics_vault__list_review_queue`：查看审核库校对队列 review_queue，适合“待校对、回炉、人工复核、打回修复”的任务。
 - `mcp__physics_vault__list_review_tasks`：查看导入/AI 生成后进入校对中心的草稿任务，适合“送审的题目”“那 15 道送审题”“清洗校对中心题目/知识点草稿”的任务；可用 question_count=15 精确定位。

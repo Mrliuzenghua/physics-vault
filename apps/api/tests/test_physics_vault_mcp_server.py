@@ -181,6 +181,15 @@ def test_composition_plan_accepts_rich_workbench_only_knowledge_card(monkeypatch
     monkeypatch.setattr(module, "_paper_draft_service", lambda: service)
     monkeypatch.setattr(module, "_connect_formal_read_db", lambda: nullcontext(None))
 
+    empty = module.apply_composition_workbench_plan(
+        draft_id="draft-1",
+        dry_run=False,
+        operations=[{"ref": "empty", "kind": "knowledge", "title": "Reference frames"}],
+    )
+    assert empty["ok"] is False
+    assert "缺少实际讲解内容" in empty["error"]
+    assert service.saved is None
+
     result = module.apply_composition_workbench_plan(
         draft_id="draft-1",
         dry_run=False,
@@ -204,6 +213,104 @@ def test_composition_plan_accepts_rich_workbench_only_knowledge_card(monkeypatch
     assert payload["summary"].startswith("Choose a reference object")
     assert payload["points"] == ["Motion is relative", "Keep one frame throughout"]
     assert payload["relatedQuestionIds"] == ["q-3"]
+
+
+def test_composition_plan_replaces_existing_template_knowledge_card(monkeypatch) -> None:
+    module = _load_mcp_server()
+    topic_id = "KP-MECH-DYN-NEWTON3"
+    existing_id = "compose-knowledge-old"
+
+    class DraftService:
+        def __init__(self):
+            self.saved = None
+
+        def get(self, draft_id):
+            return {
+                "id": draft_id,
+                "title": "Lesson",
+                "source": "compose",
+                "status": "draft",
+                "items": [
+                    {
+                        "id": "question-1",
+                        "type": "question",
+                        "position": 0,
+                        "question_id": "q-1",
+                        "payload": {},
+                    },
+                    {
+                        "id": existing_id,
+                        "type": "knowledge",
+                        "position": 1,
+                        "title": "Old template",
+                        "payload": {
+                            "id": topic_id,
+                            "topic3_id": topic_id,
+                            "summary": "力学 / 相互作用",
+                            "points": ["概念与条件：旧模板"],
+                        },
+                    },
+                ],
+                "metadata": {},
+                "quality_report": {},
+                "question_count": 1,
+                "item_count": 2,
+                "total_score": 0,
+                "created_at": "v1",
+                "updated_at": "v1",
+            }
+
+        def save(self, request):
+            self.saved = request
+            return {
+                "id": request.id,
+                "title": request.title,
+                "source": request.source,
+                "status": request.status,
+                "items": request.items,
+                "metadata": request.metadata,
+                "quality_report": request.quality_report,
+                "question_count": 1,
+                "item_count": len(request.items),
+                "total_score": 0,
+                "created_at": "v1",
+                "updated_at": "v2",
+            }
+
+    topic = {
+        "topic1_id": "KP-MECH",
+        "topic1_name": "力学",
+        "topic2_id": "KP-MECH-DYN",
+        "topic2_name": "相互作用",
+        "topic3_id": topic_id,
+        "topic3_name": "牛顿第三定律",
+        "source_chapter": "必修一",
+    }
+    service = DraftService()
+    monkeypatch.setattr(module, "_paper_draft_service", lambda: service)
+    monkeypatch.setattr(module, "_connect_formal_read_db", lambda: nullcontext(None))
+    monkeypatch.setattr(module, "_fetch_topics", lambda _conn, _ids: {topic_id: topic})
+
+    result = module.apply_composition_workbench_plan(
+        draft_id="draft-1",
+        dry_run=False,
+        operations=[{
+            "ref": "newton-explanation",
+            "kind": "knowledge",
+            "topic3_id": topic_id,
+            "title": "为什么掰手腕双方受力始终相等",
+            "content": "两只手之间的作用力同时产生，大小相等、方向相反。胜负由其他受力和力矩决定。",
+            "related_question_ids": ["q-1"],
+        }],
+    )
+
+    assert result["ok"] is True
+    assert result["draft"]["item_count"] == 2
+    replacement = service.saved.items[1]
+    assert replacement.id == existing_id
+    assert replacement.title == "为什么掰手腕双方受力始终相等"
+    assert replacement.payload["points"] == []
+    assert "同时产生" in replacement.payload["summary"]
 
 
 def test_word_folder_filter_and_duplicate_preview(tmp_path, monkeypatch) -> None:

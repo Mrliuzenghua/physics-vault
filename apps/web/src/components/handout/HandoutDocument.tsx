@@ -386,42 +386,33 @@ function KnowledgeBlock({ item }: { item: HandoutItem }) {
       style={{
         breakInside: 'avoid',
         pageBreakInside: 'avoid',
-        marginBottom: 20,
-        padding: '2px 0 12px',
+        marginBottom: 18,
+        padding: '1px 0 10px',
         borderBottom: '1px solid #d8dee8',
       }}
     >
-      <div style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span
-          style={{
-            color: '#2563eb',
-            fontSize: 12,
-            fontWeight: 700,
-          }}
-        >
-          知识讲解
-        </span>
-        <span style={{ fontSize: 18, fontWeight: 700, color: '#0f172a' }}>{item.title || '核心知识'}</span>
+      <div style={{ marginBottom: 8, fontSize: 17, fontWeight: 700, lineHeight: 1.6, color: '#0f172a' }}>
+        {item.title || '讲解'}
       </div>
       {item.summary && (
-        <div style={{ marginBottom: 10, fontSize: 13, lineHeight: 1.8, color: '#475569' }}>
+        <div style={{ marginBottom: item.points?.length ? 8 : 0, whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.9, color: '#1e293b' }}>
           <LatexRenderer text={item.summary} />
         </div>
       )}
-      <div style={{ display: 'grid', gap: 8 }}>
+      <div style={{ display: 'grid', gap: 6 }}>
         {(item.points || []).map((point, index) => (
           <div
             key={`${item.title}-${index}`}
             style={{
               display: 'flex',
               alignItems: 'flex-start',
-              gap: 8,
+              gap: 7,
               fontSize: 14,
-              lineHeight: 1.8,
+              lineHeight: 1.9,
               color: '#1e293b',
             }}
           >
-            <span style={{ color: '#2563eb', fontWeight: 700 }}>•</span>
+            <span style={{ color: '#64748b' }}>•</span>
             <LatexRenderer text={point} />
           </div>
         ))}
@@ -728,7 +719,7 @@ export default function HandoutDocument({ items, config, screenPagesPerRow = 1, 
                 columnFill: columnCount > 1 ? 'auto' : undefined,
               }}
             >
-              {pageItems.map((item) => {
+              {pageItems.map((item, itemIndex) => {
                 if (item.type === 'page_break') {
                   return isFlowLayout
                     ? selectable(item, <div className="pv-flow-page-break"><span>分页</span></div>)
@@ -736,11 +727,11 @@ export default function HandoutDocument({ items, config, screenPagesPerRow = 1, 
                 }
 
                 if (item.type === 'knowledge') {
-                  return selectable(item, <KnowledgeBlock key={`knowledge-${pageIndex}-${item.title}`} item={item} />);
+                  return selectable(item, <KnowledgeBlock key={`knowledge-${pageIndex}-${itemIndex}-${item.id || item.title}`} item={item} />);
                 }
 
                 if (item.type === 'text') {
-                  return selectable(item, <TextBlock key={`text-${pageIndex}-${item.title}`} item={item} config={config} />);
+                  return selectable(item, <TextBlock key={`text-${pageIndex}-${itemIndex}-${item.id || item.title}`} item={item} config={config} />);
                 }
 
                 if (!item.question) {

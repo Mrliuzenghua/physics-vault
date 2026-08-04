@@ -150,7 +150,7 @@ export default function ComposeItemRow({
             const subline = item.type === 'question'
               ? item.question?.question_id || item.questionId
               : item.type === 'knowledge'
-                ? `${item.points.length} 个要点`
+                ? (item.summary.trim() || item.points.length > 0 ? '讲解内容' : '等待补充')
                 : item.type === 'text'
                   ? `${item.content.length} 字`
                   : '手动分页';
