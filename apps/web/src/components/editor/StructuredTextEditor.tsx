@@ -321,6 +321,11 @@ export default function StructuredTextEditor({
     if (!editor || !insertFigureRequest || insertedRequestRef.current === insertFigureRequest.requestId) return;
     insertedRequestRef.current = insertFigureRequest.requestId;
     const figure = insertFigureRequest.figure;
+    const reference = `![fig:${figure.fig_uuid}]`;
+    if (editorText(editor.getJSON()).includes(reference)) {
+      onFigureInsertHandled?.(insertFigureRequest.requestId);
+      return;
+    }
     editor.chain().focus().insertContent(figureNode(
       figure.fig_uuid,
       imageFileUrl(figure.local_path) || '',
