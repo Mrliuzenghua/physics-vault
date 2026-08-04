@@ -1,6 +1,7 @@
 import type { ImportPipelineTaskResponse, LessonPackage } from '../types';
 import type { LessonExportOptions } from './lessonExport';
-import { request } from './apiClient';
+import { request, requestResponse } from './apiClient';
+import { downloadResponse } from './fileDownload';
 
 export type ServerLessonExportFormat = 'word' | 'pptx';
 
@@ -9,15 +10,6 @@ const ACTIVE_EXPORT_KEY = 'physics-vault.active-export-task.v1';
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
-function responseFileName(response: Response, fallback: string): string {
-  const disposition = response.headers.get('content-disposition') || '';
-  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
-  if (encoded) {
-    try { return decodeURIComponent(encoded); } catch { /* use the quoted fallback */ }
-  }
-  return disposition.match(/filename="?([^";]+)"?/i)?.[1] || fallback;
-}
-
 async function waitForExportTask(initial: ImportPipelineTaskResponse): Promise<ImportPipelineTaskResponse> {
   let task = initial;
   const deadline = Date.now() + 30 * 60 * 1000;
@@ -34,20 +26,8 @@ async function waitForExportTask(initial: ImportPipelineTaskResponse): Promise<I
 }
 
 async function downloadExportTask(task: ImportPipelineTaskResponse, format: ServerLessonExportFormat): Promise<void> {
-  const response = await fetch(`/api/tasks/${encodeURIComponent(task.task_id)}/download`);
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(String(payload.detail || `下载失败（HTTP ${response.status}）`));
-  }
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = responseFileName(response, format === 'word' ? 'physics-vault.docx' : 'physics-vault.pptx');
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const response = await requestResponse(`/api/tasks/${encodeURIComponent(task.task_id)}/download`);
+  await downloadResponse(response, format === 'word' ? 'physics-vault.docx' : 'physics-vault.pptx');
 }
 
 export async function exportLessonOnServer(

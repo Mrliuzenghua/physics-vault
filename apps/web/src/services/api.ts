@@ -8,8 +8,6 @@
   AgentConfigResponse,
   AgentTestResponse,
   BasketItem,
-  ChangeBatchDetailResponse,
-  ChangeBatchListResponse,
   CleanDocumentRequest,
   CleanDocumentResponse,
   Collection,
@@ -37,21 +35,15 @@
   Question,
   QuestionPickerAgentResponse,
   RecognizeBatchResponse,
-  RestorePackageResponse,
   ReviewLatexCleanupResponse,
-  RollbackChangeBatchResponse,
   SearchFilters,
   SearchResponse,
   SystemSettings,
-  TaskLog,
-  TaskActionResponse,
-  TaskCenterItem,
-  TaskCenterListResponse,
   Template,
   UploadImportFileResponse,
 } from '../types';
 import { extractErrorMessage } from '../utils/error';
-import { API_BASE as BASE, request } from './apiClient';
+import { API_BASE as BASE, request, requestForm } from './apiClient';
 import { normalizeQuestion } from './questionNormalizer';
 
 export {
@@ -81,6 +73,20 @@ export {
   savePersistedImportTasks,
   saveTemplate,
 } from './localPersistence';
+export {
+  cancelTask,
+  downloadTaskResult,
+  fetchProcessingRuns,
+  fetchTask,
+  fetchTasks,
+  retryTask,
+} from './taskApi';
+export {
+  fetchChangeBatch,
+  fetchChangeBatches,
+  rollbackChangeBatch,
+} from './auditApi';
+export { downloadExportPackage, restorePackage } from './systemPackageApi';
 
 function buildSearchParams(filters: SearchFilters): URLSearchParams {
   const params = new URLSearchParams();
@@ -275,7 +281,7 @@ export async function updateQuestion(id: string, data: Partial<Question>): Promi
     };
   }
 
-// 鈹€鈹€ Question Version History 鈹€鈹€
+// Question version history
 
 export async function fetchQuestionVersions(
   questionId: string,
@@ -341,82 +347,6 @@ export async function fetchReviewQueue(): Promise<Question[]> {
   return request('/review-queue');
 }
 
-export async function fetchProcessingRuns(): Promise<TaskLog[]> {
-  return request('/processing-runs');
-}
-
-export async function fetchTasks(params: {
-  status?: string;
-  task_type?: string;
-  created_from?: string;
-  created_to?: string;
-  page?: number;
-  page_size?: number;
-} = {}): Promise<TaskCenterListResponse> {
-  const search = new URLSearchParams();
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== '') search.set(key, String(value));
-  });
-  return request(`/api/tasks?${search.toString()}`);
-}
-
-export async function fetchTask(taskId: string): Promise<TaskCenterItem> {
-  return request(`/api/tasks/${encodeURIComponent(taskId)}`);
-}
-
-export async function retryTask(taskId: string): Promise<TaskActionResponse> {
-  return request(`/api/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' });
-}
-
-export async function cancelTask(taskId: string): Promise<TaskActionResponse> {
-  return request(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' });
-}
-
-export async function downloadTaskResult(taskId: string): Promise<void> {
-  const response = await fetch(`${BASE}/api/tasks/${encodeURIComponent(taskId)}/download`);
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(extractErrorMessage(payload, `HTTP ${response.status}`));
-  }
-  const blob = await response.blob();
-  const disposition = response.headers.get('Content-Disposition') || '';
-  const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
-  const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
-  const filename = utf8Name ? decodeURIComponent(utf8Name) : plainName || `task-${taskId}`;
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-export async function fetchChangeBatches(params: {
-  change_type?: string;
-  status?: string;
-  limit?: number;
-} = {}): Promise<ChangeBatchListResponse> {
-  const search = new URLSearchParams();
-  if (params.change_type) search.set('change_type', params.change_type);
-  if (params.status) search.set('status', params.status);
-  search.set('limit', String(params.limit ?? 50));
-  return request(`/api/audit/batches?${search.toString()}`);
-}
-
-export async function fetchChangeBatch(batchId: string): Promise<ChangeBatchDetailResponse> {
-  return request(`/api/audit/batches/${encodeURIComponent(batchId)}`);
-}
-
-export async function rollbackChangeBatch(
-  batchId: string,
-  body: { dry_run?: boolean; reason?: string; allow_conflicts?: boolean },
-): Promise<RollbackChangeBatchResponse> {
-  return request(`/api/audit/batches/${encodeURIComponent(batchId)}/rollback`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-}
-
 export async function fetchEmbeddingStatus(): Promise<unknown> {
   return request('/embeddings/status');
 }
@@ -425,7 +355,7 @@ export async function healthCheck(): Promise<{ status: string }> {
   return request('/health');
 }
 
-// 鈹€鈹€ MCP Runtime API 鈹€鈹€
+// MCP runtime
 
 export async function fetchMcpStatus(): Promise<import('../types').McpRuntimeStatus> {
   return request('/api/mcp/status');
@@ -460,40 +390,18 @@ export async function sendAiChatTest(
   });
 }
 
-// 鈹€鈹€ Import Pipeline API 鈹€鈹€
+// Import pipeline
 
 export async function uploadImportFile(file: File): Promise<UploadImportFileResponse> {
   const formData = new FormData();
   formData.append('file', file);
-
-  const res = await fetch(`${BASE}/api/import/upload`, {
-    method: 'POST',
-    body: formData,
-  });
-
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(extractErrorMessage(error.detail || `HTTP ${res.status}`));
-  }
-
-  return res.json();
+  return requestForm('/api/import/upload', formData);
 }
 
 export async function createImportBatch(file: File): Promise<ImportBatchResponse> {
   const formData = new FormData();
   formData.append('file', file);
-
-  const res = await fetch(`${BASE}/api/import/batches`, {
-    method: 'POST',
-    body: formData,
-  });
-
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(extractErrorMessage(error.detail || `HTTP ${res.status}`));
-  }
-
-  return res.json();
+  return requestForm('/api/import/batches', formData);
 }
 
 async function waitForImportTask(
@@ -787,17 +695,7 @@ export async function uploadBatchImage(
 ): Promise<import('../types').ImportMediaAsset> {
   const formData = new FormData();
   formData.append('file', file);
-
-  const res = await fetch(`${BASE}/api/import/batches/${encodeURIComponent(batchId)}/images`, {
-    method: 'POST',
-    body: formData,
-  });
-
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(extractErrorMessage(error.detail || `HTTP ${res.status}`));
-  }
-  return res.json();
+  return requestForm(`/api/import/batches/${encodeURIComponent(batchId)}/images`, formData);
 }
 
 export async function convertDocument(body: ConvertDocumentRequest): Promise<ConvertDocumentResponse> {
@@ -859,29 +757,7 @@ export async function aiParseDocument(
   });
 }
 
-// 鈹€鈹€ Export Package 鈹€鈹€
-
-/** Trigger a download of the export package zip file. */
-export async function downloadExportPackage(): Promise<void> {
-  const res = await fetch('/api/system/export-package');
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '瀵煎嚭澶辫触' }));
-    const msg = typeof error.detail === 'object' ? error.detail?.message || JSON.stringify(error.detail) : error.detail || '瀵煎嚭澶辫触';
-    throw new Error(msg);
-  }
-  const blob = await res.blob();
-  const disposition = res.headers.get('Content-Disposition') || '';
-  const match = disposition.match(/filename="?([^";\s]+)"?/);
-  const filename = match?.[1] || 'physics-vault-export.zip';
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-// 鈹€鈹€ Review Save API 鈹€鈹€
+// Review save
 
 export async function saveReviewedQuestions(
   body: import('../types').SaveReviewedQuestionsRequest,
@@ -975,7 +851,7 @@ export async function restoreReviewDraftVersion(
   });
 }
 
-// 鈹€鈹€ Assets Manager API 鈹€鈹€
+// Assets manager
 
 export async function fetchAssetList(
   options: {
@@ -1038,7 +914,7 @@ export async function deleteSingleAsset(filename: string): Promise<import('../ty
   return request(`/api/assets/${encodeURIComponent(filename)}`, { method: 'DELETE' });
 }
 
-// 鈹€鈹€ Image Management API 鈹€鈹€
+// Image management
 
 export async function fetchQuestionImages(id: string): Promise<import('../types').ImageListResponse> {
   return request(`/api/questions/${encodeURIComponent(id)}/images`);
@@ -1085,7 +961,7 @@ export async function fetchAvailableImages(keyword?: string): Promise<{ asset_id
   return request(`/api/questions/images/available${params}`);
 }
 
-// 鈹€鈹€ Favorites API 鈹€鈹€
+// Favorites
 
 export async function fetchFavoriteGroups(): Promise<import('../types').FavoriteGroupItem[]> {
   return request('/api/favorites/groups');
@@ -1117,7 +993,7 @@ export async function batchStarFavorites(
   return request('/api/favorites/batch-star', { method: 'POST', body: JSON.stringify(body) });
 }
 
-// 鈹€鈹€ Mistake (閿欓) API 鈹€鈹€
+// Mistakes
 
 export async function markMistake(questionId: string): Promise<{ question_id: string; status: string; message: string }> {
   return request(`/api/questions/${questionId}/mistake/mark`, { method: 'POST' });
@@ -1167,7 +1043,7 @@ export async function fetchFavoriteIds(): Promise<string[]> {
   return request('/api/favorites/ids');
 }
 
-// 鈹€鈹€ Collections API 鈹€鈹€
+// Collections
 
 export async function fetchCollectionTree(): Promise<import('../types').CollectionNode[]> {
   return request('/api/collections/tree');
@@ -1201,7 +1077,7 @@ export async function fetchQuestionCollections(
   return request(`/api/collections/questions/${encodeURIComponent(questionId)}`);
 }
 
-// 鈹€鈹€ Batch Analysis API 鈹€鈹€
+// Batch analysis
 
 export async function batchGenerateAnalysis(
   body: import('../types').BatchAnalysisRequest,
@@ -1212,7 +1088,7 @@ export async function batchGenerateAnalysis(
   });
 }
 
-// 鈹€鈹€ Metadata Batch API 鈹€鈹€
+// Metadata batch
 
 export async function batchUpdateMetadata(
   body: import('../types').BatchMetadataRequest,
@@ -1223,7 +1099,7 @@ export async function batchUpdateMetadata(
   });
 }
 
-// 鈹€鈹€ Single-Question AI Generation 鈹€鈹€
+// Single-question AI generation
 
 export async function generateSingleAnalysis(
   body: { question: Record<string, unknown>; style?: string; include_extension?: boolean; force_regenerate?: boolean },
@@ -1237,7 +1113,7 @@ export async function generateKnowledge(
   return request('/api/ai/knowledge/generate', { method: 'POST', body: JSON.stringify(body) });
 }
 
-// 鈹€鈹€ Similar Questions API 鈹€鈹€
+// Similar questions
 
 export async function fetchSimilarQuestions(
   questionId: string,
@@ -1282,30 +1158,7 @@ export async function fetchSimilarQuestions(
   }
 }
 
-// 鈹€鈹€ Import Task Persistence (localStorage) 鈹€鈹€
-
-export async function restorePackage(file: File): Promise<RestorePackageResponse> {
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const res = await fetch(`${BASE}/api/system/restore-package`, {
-    method: 'POST',
-    body: formData,
-  });
-
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: '鎭㈠澶辫触' }));
-    const msg =
-      typeof error.detail === 'object'
-        ? error.detail?.message || JSON.stringify(error.detail)
-        : error.detail || '鎭㈠澶辫触';
-    throw new Error(msg);
-  }
-
-  return res.json();
-}
-
-// 鈹€鈹€ Annotation (鎵规敞) API 鈹€鈹€
+// Annotations
 
 export async function fetchAnnotations(questionId: string): Promise<import('../types').QuestionAnnotation[]> {
   return request(`/api/questions/${encodeURIComponent(questionId)}/annotations`);
@@ -1351,6 +1204,5 @@ export type {
   ParseStructuredQuestionsResponse,
   Question as QuestionType,
   SystemSettings,
-  TaskLog,
   Template,
 };
