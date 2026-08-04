@@ -2,6 +2,39 @@ const DISPLAY_MATH_RE = /\$\$([^\n]*?)\$\$/g;
 const MIXED_MATH_RE = /(?<!\$)\$([^\n$]{1,140}?)\$\$(?!\$)|(?<!\$)\$\$([^\n$]{1,140}?)\$(?!\$)/g;
 const BLOCK_HINTS = ['\\begin', '\\end', '\\\\', '\\tag', '\\left.', '\\right.'];
 
+const MATH_HTML_ENTITIES: Record<string, string> = {
+  amp: '&',
+  gt: '>',
+  lt: '<',
+  quot: '"',
+  apos: "'",
+  '#39': "'",
+  '#x27': "'",
+};
+
+export function decodeMathHtmlEntities(value: string): string {
+  let decoded = value;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = decoded.replace(/&(?:amp|gt|lt|quot|apos|#39|#x27);/gi, (entity) => {
+      const key = entity.slice(1, -1).toLowerCase();
+      return MATH_HTML_ENTITIES[key] ?? entity;
+    });
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
+}
+
+export function mathFormulaToEditorHtml(value: string): string {
+  const latex = decodeMathHtmlEntities(value);
+  const escaped = latex
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+  return `<span data-question-formula="${escaped}">$${escaped}$</span>`;
+}
+
 export function normalizeShortInlineDisplayMath(text: string): string {
   if (!text || !text.includes('$$')) return text;
   return text

@@ -20,6 +20,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { QUESTION_EDITOR_NODES, figureNode, formulaNode } from './questionEditorNodes';
 import { imageFileUrl } from '../../utils/imageUrl';
 import { RICH_CONTENT_NODES, richImageNode, richTableNode } from './RichContentNodes';
+import { decodeMathHtmlEntities, mathFormulaToEditorHtml } from '../../utils/mathText';
 
 export interface FigureAsset {
   fig_uuid: string;
@@ -60,7 +61,7 @@ function escapeHtml(value: string): string {
 }
 
 function inlineTextToHtml(value: string, figuresById: Map<string, FigureAsset>): string {
-  return escapeHtml(value).split(/(!\[fig:[^\]]+\]|!\[[^\]]*\]\((?:data:image\/[^)\n]+|\/files\/[^)\n]+)\)|\$\$?[^$\n]+\$\$?)/g).map((part) => {
+  return value.split(/(!\[fig:[^\]]+\]|!\[[^\]]*\]\((?:data:image\/[^)\n]+|\/files\/[^)\n]+)\)|\$\$?[^$\n]+\$\$?)/g).map((part) => {
     const figure = part.match(/^!\[fig:([^\]]+)\]$/);
     if (figure) {
       const asset = figuresById.get(figure[1]);
@@ -73,9 +74,9 @@ function inlineTextToHtml(value: string, figuresById: Map<string, FigureAsset>):
     if (image) return `<img data-rich-image="true" src="${escapeHtml(image[2])}" alt="${escapeHtml(image[1])}" />`;
     const formula = part.match(/^\$\$?([^$\n]+)\$\$?$/);
     if (formula) {
-      return `<span data-question-formula="${escapeHtml(formula[1])}">$${escapeHtml(formula[1])}$</span>`;
+      return mathFormulaToEditorHtml(formula[1]);
     }
-    return part
+    return escapeHtml(part)
       .replace(/`([^`\n]+)`/g, '<code>$1</code>')
       .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
       .replace(/~~([^~\n]+)~~/g, '<s>$1</s>')
@@ -160,7 +161,7 @@ function parseMarkdownTableRow(line: string): string[] {
 
 function serializeInline(node: JSONContent): string {
   if (node.type === 'questionFigure') return `![fig:${String(node.attrs?.figureId || '')}]`;
-  if (node.type === 'questionFormula') return `$${String(node.attrs?.latex || '')}$`;
+  if (node.type === 'questionFormula') return `$${decodeMathHtmlEntities(String(node.attrs?.latex || ''))}$`;
   if (node.type === 'hardBreak') return '\n';
   let value = node.text || (node.content || []).map(serializeInline).join('');
   for (const mark of node.marks || []) {
@@ -221,6 +222,16 @@ function hydrateFigureNodes(document: JSONContent, figures: FigureAsset[]): JSON
   const figuresById = new Map(figures.map((figure) => [figure.fig_uuid, figure]));
   const hydrate = (node: JSONContent): JSONContent => {
     const content = node.content?.map((child) => hydrate(child as JSONContent));
+    if (node.type === 'questionFormula') {
+      return {
+        ...node,
+        ...(content ? { content } : {}),
+        attrs: {
+          ...node.attrs,
+          latex: decodeMathHtmlEntities(String(node.attrs?.latex || '')),
+        },
+      };
+    }
     if (node.type !== 'questionFigure') return { ...node, ...(content ? { content } : {}) };
     const figure = figuresById.get(String(node.attrs?.figureId || ''));
     if (!figure) return { ...node, ...(content ? { content } : {}) };

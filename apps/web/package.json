@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test": "node --experimental-strip-types --test src/services/apiClient.test.ts src/services/fileDownload.test.ts src/services/questionQuality.test.ts src/components/layout/statusBarStatus.test.ts",
+    "test": "node --experimental-strip-types --test src/services/apiClient.test.ts src/services/fileDownload.test.ts src/services/questionQuality.test.ts src/components/layout/statusBarStatus.test.ts src/utils/mathText.test.ts",
     "test:quality": "node --experimental-strip-types --test src/services/questionQuality.test.ts src/components/layout/statusBarStatus.test.ts",
     "preview": "vite preview"
   },

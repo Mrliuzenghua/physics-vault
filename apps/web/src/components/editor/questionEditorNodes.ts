@@ -2,6 +2,7 @@ import { Node } from '@tiptap/core';
 import { ReactNodeViewRenderer } from '@tiptap/react';
 import QuestionFigureView from './QuestionFigureView';
 import QuestionFormulaView from './QuestionFormulaView';
+import { decodeMathHtmlEntities } from '../../utils/mathText';
 
 export const QuestionFigureNode = Node.create({
   name: 'questionFigure',
@@ -67,8 +68,8 @@ export const QuestionFormulaNode = Node.create({
     return {
       latex: {
         default: '',
-        parseHTML: (element) => element.getAttribute('data-question-formula') || '',
-        renderHTML: (attributes) => ({ 'data-question-formula': attributes.latex }),
+        parseHTML: (element) => decodeMathHtmlEntities(element.getAttribute('data-question-formula') || ''),
+        renderHTML: (attributes) => ({ 'data-question-formula': decodeMathHtmlEntities(String(attributes.latex || '')) }),
       },
     };
   },
@@ -82,10 +83,10 @@ export const QuestionFormulaNode = Node.create({
       'span',
       {
         ...HTMLAttributes,
-        'data-question-formula': HTMLAttributes.latex,
+        'data-question-formula': decodeMathHtmlEntities(String(HTMLAttributes.latex || '')),
         class: 'pv-tiptap-formula-node',
       },
-      `$${HTMLAttributes.latex || '公式'}$`,
+      `$${decodeMathHtmlEntities(String(HTMLAttributes.latex || '公式'))}$`,
     ];
   },
 
@@ -101,5 +102,5 @@ export function figureNode(figureId: string, src = '', displayScale = 60, displa
 }
 
 export function formulaNode(latex = '...') {
-  return { type: 'questionFormula', attrs: { latex } };
+  return { type: 'questionFormula', attrs: { latex: decodeMathHtmlEntities(latex) } };
 }
