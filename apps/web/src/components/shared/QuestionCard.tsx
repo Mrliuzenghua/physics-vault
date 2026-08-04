@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Bot, ChevronDown, ChevronUp, Pencil, RotateCcw, ShoppingBasket, Star, Trash2 } from 'lucide-react';
+import { Bot, ChevronDown, ChevronUp, MoreHorizontal, Pencil, RotateCcw, ShoppingBasket, Star, Trash2 } from 'lucide-react';
 
 import type { FavoriteItemView, Question } from '../../types';
 import { imageThumbnailUrl } from '../../utils/imageUrl';
@@ -70,8 +70,10 @@ export default function QuestionCard({
     const kpNames = (question.knowledge_points || [])
       .map((item) => item.topic3_name || item.topic2_name || item.topic1_name)
       .filter(Boolean);
-    return [...new Set([...(kpNames || []), ...(question.tags || [])])].slice(0, 5);
-  }, [question.knowledge_points, question.tags]);
+    return [...new Set([...(kpNames || []), ...(question.tags || [])])]
+      .filter((tag) => tag && tag !== question.module && !/^难度\s*\d/i.test(tag))
+      .slice(0, 3);
+  }, [question.knowledge_points, question.module, question.tags]);
 
   const figures = useMemo(() => question.figures || [], [question.figures]);
   const options = useMemo(() => question.options || [], [question.options]);
@@ -89,15 +91,21 @@ export default function QuestionCard({
   const [showUnreferencedFigures, setShowUnreferencedFigures] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const revealAnswer = showAnswer || detailsOpen;
+  const longestOption = Math.max(0, ...options.map((option) => option.content.replace(/!\[fig:[^\]]+\]/g, '').length));
+  const optionColumns = longestOption <= 18
+    ? 'sm:grid-cols-2 xl:grid-cols-4'
+    : longestOption <= 42
+      ? 'md:grid-cols-2'
+      : 'grid-cols-1';
 
   return (
     <article
-      className={`rounded-md border bg-white px-3 py-3 shadow-sm transition-colors sm:px-4 ${
+      className={`rounded border bg-white px-3 py-2.5 transition-colors sm:px-4 ${
         checked ? 'border-[var(--color-accent)] ring-2 ring-[var(--color-accent)]/10' : 'border-[#d9e0e8] hover:border-[#b9c7d8]'
       }`}
     >
-      <div className="mb-2 flex items-start justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
+      <div className="mb-2 flex items-center gap-2 border-b border-[#e5e9ef] pb-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           <div className="flex items-center gap-2">
             {onCheck && (
               <input
@@ -113,42 +121,38 @@ export default function QuestionCard({
             </span>
           </div>
 
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[#6c7d90]">
               <span
-                className="max-w-[420px] truncate text-left text-xs font-semibold text-[#26384d]"
+                className="max-w-[520px] truncate text-left font-semibold text-[#41566e]"
                 title={`${sourceLabel} · ${question.question_id}`}
               >
                 {sourceLabel}
               </span>
+              <span>{questionType}</span>
+              <span title={`难度 ${question.difficulty || 0}`}>{buildDifficultyStars(question.difficulty)}</span>
               {question.year && (
-                <span className="rounded bg-[#edf7f1] px-1.5 py-0.5 text-[11px] font-semibold text-[#287a4b]">
+                <span>
                   {question.year} 年
                 </span>
               )}
               {question.primary_question_no && (
-                <span className="rounded bg-[#fff5df] px-1.5 py-0.5 text-[11px] font-semibold text-[#9a6400]">
+                <span>
                   第 {question.primary_question_no} 题
                 </span>
               )}
-            </div>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-[#6c7d90]">
-              <span>{questionType}</span>
-              <span>{buildDifficultyStars(question.difficulty)}</span>
               {question.module && <span>{question.module}</span>}
-              <span className="max-w-[180px] truncate font-mono text-[11px] text-[#93a1b2] sm:max-w-[320px]" title={question.question_id}>{question.question_id}</span>
+              {displayTags.map((tag, tagIndex) => (
+                <span key={`${tag}-${tagIndex}`} className="max-w-[180px] truncate rounded bg-[#f1f4f8] px-1.5 py-0.5 text-[#52657b]">{tag}</span>
+              ))}
             </div>
           </div>
         </div>
-
-        <div className="shrink-0 text-[11px] text-[var(--color-text-muted)]">
-          {question.updated_at ? question.updated_at.slice(0, 10) : ''}
-        </div>
       </div>
 
-      <div className="border-t border-[#e5e9ef] pt-3">
-        <div className="text-[14px] leading-7 text-[#111827]">
-          <ImportStemRenderer title={question.title || question.canonical_title || '(无题干)'} figures={figures} maxImageHeight={260} thumbnailWidth={900} questionId={question.question_id} />
+      <div>
+        <div className="text-[14px] leading-6 text-[#111827]">
+          <ImportStemRenderer title={question.title || question.canonical_title || '(无题干)'} figures={figures} maxImageHeight={360} thumbnailWidth={900} questionId={question.question_id} compactImages />
         </div>
 
         {unreferencedFigures.length > 0 && (
@@ -189,12 +193,12 @@ export default function QuestionCard({
         )}
 
         {showChoiceOptions && options.length > 0 && (
-          <div className="mt-3 grid gap-x-6 gap-y-2 text-[14px] leading-6 text-[#111827] sm:grid-cols-2 xl:grid-cols-4">
+          <div className={`mt-2.5 grid gap-x-8 gap-y-1.5 text-[14px] leading-6 text-[#111827] ${optionColumns}`}>
             {options.map((option) => (
               <div key={option.opt} className="flex items-start gap-2">
                 <span className="font-semibold text-[var(--color-text-secondary)]">{option.opt}.</span>
                 <div className="min-w-0 flex-1">
-                  <ImportStemRenderer title={option.content} figures={figures} maxImageHeight={160} thumbnailWidth={520} questionId={question.question_id} />
+                  <ImportStemRenderer title={option.content} figures={figures} maxImageHeight={160} thumbnailWidth={520} questionId={question.question_id} compactImages />
                 </div>
               </div>
             ))}
@@ -202,19 +206,7 @@ export default function QuestionCard({
         )}
       </div>
 
-      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          {displayTags.map((tag, tagIndex) => (
-            <span
-              key={`${tag}-${tagIndex}`}
-              className="rounded bg-[#f1f4f8] px-1.5 py-0.5 text-[11px] text-[#52657b]"
-            >
-              {tag}
-            </span>
-          ))}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-1.5 text-sm text-[var(--color-text-secondary)]">
+      <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5 border-t border-[#edf0f4] pt-2 text-sm text-[var(--color-text-secondary)]">
           {(question.answer || question.analysis) && (
             <button
               type="button"
@@ -224,16 +216,6 @@ export default function QuestionCard({
               {revealAnswer ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
               {revealAnswer ? '收起答案' : '答案与解析'}
             </button>
-          )}
-          {onReturnToReview && (
-            <ActionLink onClick={() => !returningToReview && onReturnToReview(question.question_id)}>
-              <RotateCcw size={14} />{returningToReview ? '送回中...' : '打回校对'}
-            </ActionLink>
-          )}
-          {onToggleFavorite && (
-            <ActionLink onClick={() => onToggleFavorite(question.question_id)}>
-              <Star size={14} />{favorite ? '已收藏' : '收藏'}
-            </ActionLink>
           )}
           <button
             onClick={() => !inBasket && onAddToBasket(question.question_id)}
@@ -252,37 +234,26 @@ export default function QuestionCard({
               type="button"
               onClick={() => onEdit(question)}
               className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md px-2 text-[11px] font-semibold text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent-light)]"
+              title="实时编辑"
+              aria-label="实时编辑"
             >
               <Pencil size={14} />
-              实时编辑
+              <span className="hidden sm:inline">实时编辑</span>
             </button>
           )}
-          {onAddToAiContext && (
-            <button
-              onClick={() => !inAiContext && onAddToAiContext(question)}
-              disabled={inAiContext}
-              className={`inline-flex h-7 cursor-pointer items-center gap-1 rounded-md px-2 text-[11px] font-semibold transition-colors ${
-                inAiContext
-                  ? 'bg-[var(--color-green-light)] text-[var(--color-green)]'
-                  : 'bg-[var(--color-purple-light)] text-[var(--color-purple)] hover:brightness-95'
-              }`}
-            >
-              <Bot size={14} />
-              {inAiContext ? '已在 AI 上下文' : '加入 AI 上下文'}
-            </button>
+          {(onReturnToReview || onToggleFavorite || onAddToAiContext || onDelete) && (
+            <details className="group/more relative">
+              <summary className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-md text-[var(--color-text-secondary)] hover:bg-[#eef3f8]" title="更多操作" aria-label="更多操作">
+                <MoreHorizontal size={16} />
+              </summary>
+              <div className="absolute bottom-9 right-0 z-20 w-40 overflow-hidden rounded-md border border-[var(--color-border)] bg-white p-1 shadow-lg">
+                {onReturnToReview && <MenuAction onClick={() => !returningToReview && onReturnToReview(question.question_id)}><RotateCcw size={14} />{returningToReview ? '送回中...' : '打回校对'}</MenuAction>}
+                {onToggleFavorite && <MenuAction onClick={() => onToggleFavorite(question.question_id)}><Star size={14} />{favorite ? '已收藏' : '收藏'}</MenuAction>}
+                {onAddToAiContext && <MenuAction onClick={() => !inAiContext && onAddToAiContext(question)} disabled={inAiContext}><Bot size={14} />{inAiContext ? '已在 AI 上下文' : '加入 AI 上下文'}</MenuAction>}
+                {onDelete && <MenuAction onClick={() => onDelete(question)} disabled={deleting} danger><Trash2 size={14} />{deleting ? '删除中...' : '删除题目'}</MenuAction>}
+              </div>
+            </details>
           )}
-          {onDelete && (
-            <button
-              type="button"
-              onClick={() => onDelete(question)}
-              disabled={deleting}
-              className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md px-2 text-[11px] font-semibold text-rose-600 transition-colors hover:bg-rose-50 disabled:cursor-wait disabled:opacity-50"
-              title="从题库删除"
-            >
-              <Trash2 size={14} />{deleting ? '删除中...' : '删除'}
-            </button>
-          )}
-        </div>
       </div>
 
       {revealAnswer && (question.answer || question.analysis) && (
@@ -309,17 +280,13 @@ export default function QuestionCard({
   );
 }
 
-function ActionLink({
-  children,
-  onClick,
-}: {
-  children: ReactNode;
-  onClick: () => void;
-}) {
+function MenuAction({ children, onClick, disabled = false, danger = false }: { children: ReactNode; onClick: () => void; disabled?: boolean; danger?: boolean }) {
   return (
     <button
+      type="button"
       onClick={onClick}
-      className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md border-none bg-transparent px-2 text-[11px] font-semibold text-[var(--color-text-secondary)] transition-colors hover:bg-[#eef3f8] hover:text-[var(--color-accent)]"
+      disabled={disabled}
+      className={`flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-xs font-semibold transition-colors disabled:opacity-50 ${danger ? 'text-rose-600 hover:bg-rose-50' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'}`}
     >
       {children}
     </button>

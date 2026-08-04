@@ -13,6 +13,7 @@ interface Props {
   questionId?: string;
   onScaleChange?: (figure: Figure, scale: number) => void;
   onLayoutChange?: (figure: Figure, patch: Pick<Figure, 'display_align' | 'caption'>) => void;
+  compactImages?: boolean;
 }
 
 const STEM_IMAGE_SCALE_KEY = 'physics-vault.stem-image-scale';
@@ -53,7 +54,7 @@ function saveScale(figure: Figure, scale: number) {
  * Render a question stem with ![fig:uuid] placeholders.
  * Each placeholder becomes an image from the import media library.
  */
-export default function ImportStemRenderer({ title, figures, maxImageHeight = 180, thumbnailWidth, questionId, onScaleChange, onLayoutChange }: Props) {
+export default function ImportStemRenderer({ title, figures, maxImageHeight = 180, thumbnailWidth, questionId, onScaleChange, onLayoutChange, compactImages = false }: Props) {
   const safeTitle = String(title ?? '');
   const safeFigures = useMemo(() => figures || [], [figures]);
   const parts = safeTitle.split(/(!\[fig:[^\]]+\])/g);
@@ -75,7 +76,7 @@ export default function ImportStemRenderer({ title, figures, maxImageHeight = 18
               </span>
             );
           }
-          return <ResizableStemFigure key={i} figure={fig} maxImageHeight={maxImageHeight} thumbnailWidth={thumbnailWidth} questionId={questionId} onScaleChange={onScaleChange} onLayoutChange={onLayoutChange} />;
+          return <ResizableStemFigure key={i} figure={fig} maxImageHeight={maxImageHeight} thumbnailWidth={thumbnailWidth} questionId={questionId} onScaleChange={onScaleChange} onLayoutChange={onLayoutChange} compact={compactImages} />;
         }
         if (!part.trim()) return null;
         return <LatexRenderer key={i} text={part} />;
@@ -91,6 +92,7 @@ function ResizableStemFigure({
   questionId,
   onScaleChange,
   onLayoutChange,
+  compact,
 }: {
   figure: Figure;
   maxImageHeight: number;
@@ -98,6 +100,7 @@ function ResizableStemFigure({
   questionId?: string;
   onScaleChange?: (figure: Figure, scale: number) => void;
   onLayoutChange?: (figure: Figure, patch: Pick<Figure, 'display_align' | 'caption'>) => void;
+  compact: boolean;
 }) {
   const [scale, setScale] = useState(() => loadScale(figure));
   const [loaded, setLoaded] = useState(false);
@@ -162,7 +165,8 @@ function ResizableStemFigure({
 
   return (
     <span
-      className="group my-3 block cursor-default"
+      className={`group my-3 cursor-default ${compact ? 'flex max-w-full' : 'block'}`}
+      style={compact ? { justifyContent: alignment === 'left' ? 'flex-start' : alignment === 'right' ? 'flex-end' : 'center' } : undefined}
       onClick={stopImageInteraction}
       onDoubleClick={stopImageInteraction}
       onMouseDown={stopImageInteraction}
@@ -170,11 +174,13 @@ function ResizableStemFigure({
       onTouchStart={stopImageInteraction}
     >
       <span
-        className="relative block rounded-md border bg-white p-2"
-        style={{ borderColor: 'var(--color-border)' }}
+        className={`relative max-w-full bg-white ${compact ? 'inline-block' : 'block rounded-md border p-2'}`}
+        style={compact ? undefined : { borderColor: 'var(--color-border)' }}
       >
         {activeSrc && loaded && !broken && (
-          <span style={{ display: 'block', width: `${scale}%`, marginLeft: alignment === 'left' ? 0 : 'auto', marginRight: alignment === 'right' ? 0 : 'auto', transition: 'width 0.16s ease' }}>
+          <span style={compact
+            ? { display: 'block', maxWidth: '100%' }
+            : { display: 'block', width: `${scale}%`, marginLeft: alignment === 'left' ? 0 : 'auto', marginRight: alignment === 'right' ? 0 : 'auto', transition: 'width 0.16s ease' }}>
             <img
               src={activeSrc}
               alt={figure.caption || figure.fig_uuid}
@@ -183,7 +189,7 @@ function ResizableStemFigure({
               draggable={false}
               onClick={stopImageInteraction}
               onMouseDown={stopImageInteraction}
-              style={{ width: '100%', maxWidth: '100%', maxHeight: maxImageHeight, objectFit: 'contain', borderRadius: 6, display: 'block' }}
+              style={{ width: compact ? 'auto' : '100%', maxWidth: '100%', maxHeight: maxImageHeight, objectFit: 'contain', borderRadius: 4, display: 'block' }}
             />
             {figure.caption && <span style={{ display: 'block', marginTop: 5, textAlign: 'center', fontSize: 11, lineHeight: 1.5, color: 'var(--color-text-muted)' }}>{figure.caption}</span>}
           </span>
@@ -204,7 +210,7 @@ function ResizableStemFigure({
           </span>
         )}
 
-        {loaded && !broken && (
+        {loaded && !broken && !compact && (
           <span
             className="absolute right-2 top-2 flex items-center gap-1 rounded-full border bg-white/95 px-2 py-1 opacity-0 shadow-sm transition-opacity group-hover:opacity-100"
             onClick={stopImageInteraction}

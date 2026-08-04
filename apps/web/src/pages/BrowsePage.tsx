@@ -1082,7 +1082,7 @@ export default function BrowsePage() {
                       data={questions}
                       className="h-full"
                       increaseViewportBy={{ top: 520, bottom: 900 }}
-                      itemContent={(index, question) => <div className="pb-2"><QuestionCard
+                      itemContent={(index, question) => <div className="mx-auto w-full max-w-[1320px] pb-2"><QuestionCard
                         question={question}
                         index={(filters.offset || 0) + index + 1}
                         onReturnToReview={handleReturnToReview}
