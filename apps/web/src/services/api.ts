@@ -9,18 +9,14 @@
   ImportBatch,
   ImportPipelineTaskResponse,
   Layout,
-  LessonPackage,
   McpConfig,
-  PaperDraft,
-  PaperDraftItem,
-  PaperDraftListResponse,
   ParseStructuredQuestionsRequest,
   ParseStructuredQuestionsResponse,
   Question,
   SystemSettings,
   Template,
 } from '../types';
-import { ApiError, request, requestForm } from './apiClient';
+import { request, requestForm } from './apiClient';
 
 export {
   DEFAULT_AI_CONFIG,
@@ -204,6 +200,12 @@ export {
   testClaudeCodeAgent,
   testMcpConnection,
 } from './aiApi';
+export {
+  fetchLatestPaperDraft,
+  fetchPaperDraft,
+  listPaperDrafts,
+  savePaperDraft,
+} from './paperDraftApi';
 
 export interface DatabaseStatus {
   questions_count: number;
@@ -211,111 +213,6 @@ export interface DatabaseStatus {
 
 export async function fetchDatabaseStatus(): Promise<DatabaseStatus> {
   return request('/api/system/db-status');
-}
-
-export async function listPaperDrafts(limit = 30): Promise<PaperDraftListResponse> {
-  return request(`/api/paper-drafts?limit=${limit}`);
-}
-
-export async function fetchLatestPaperDraft(): Promise<PaperDraft | null> {
-  return request('/api/paper-drafts/latest');
-}
-
-export async function fetchPaperDraft(draftId: string): Promise<PaperDraft | null> {
-  try {
-    return await request(`/api/paper-drafts/${encodeURIComponent(draftId)}`);
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) return null;
-    throw error;
-  }
-}
-
-export async function savePaperDraft(
-  pkg: LessonPackage,
-  qualityReport: Record<string, unknown> = {},
-  documentRevision = 0,
-  baseUpdatedAt: string | null = null,
-): Promise<PaperDraft> {
-  const questionMap = new Map(pkg.questions.map((question) => [question.question_id, question]));
-  const textMap = new Map(pkg.textBlocks.map((block) => [block.id, block]));
-  const knowledgeMap = new Map(pkg.knowledgeCards.map((card) => [card.id, card]));
-  const items: PaperDraftItem[] = pkg.nodes.map((node, position) => {
-    if (node.type === 'question') {
-      const question = questionMap.get(node.questionId);
-      return {
-        id: node.id,
-        type: 'question',
-        position,
-        question_id: node.questionId,
-        title: question?.title || question?.canonical_title || node.questionId,
-        score: estimateQuestionScore(question?.question_type),
-        payload: {
-          question_type: question?.question_type,
-          difficulty: question?.difficulty,
-          source: question?.source || question?.origin_file || question?.primary_paper_id,
-          // A composition item is an editable project-level question instance.
-          // Keep the complete snapshot so reopening a draft never replaces
-          // teacher edits with the current question-bank record.
-          question_snapshot: question ? { ...question } : undefined,
-        },
-      };
-    }
-    if (node.type === 'text') {
-      const block = textMap.get(node.textBlockId);
-      return {
-        id: node.id,
-        type: 'text',
-        position,
-        title: block?.title || '文本',
-        payload: block ? { ...block } : {},
-      };
-    }
-    if (node.type === 'knowledge') {
-      const card = knowledgeMap.get(node.knowledgeId);
-      return {
-        id: node.id,
-        type: 'knowledge',
-        position,
-        title: card?.title || '知识点',
-        payload: card ? { ...card } : {},
-      };
-    }
-    return {
-      id: node.id,
-      type: 'page_break',
-      position,
-      title: node.title || '分页',
-      payload: { title: node.title },
-    };
-  });
-
-  return request('/api/paper-drafts', {
-    method: 'POST',
-    body: JSON.stringify({
-      id: pkg.id,
-      base_updated_at: baseUpdatedAt,
-      title: pkg.title,
-      subtitle: pkg.subtitle,
-      source: pkg.source,
-      status: 'draft',
-      items,
-      metadata: {
-        documentRevision,
-        headerFooter: pkg.headerFooter,
-        styleConfig: pkg.styleConfig,
-        formatSpec: pkg.formatSpec,
-        slideTemplate: pkg.slideTemplate,
-      },
-      quality_report: qualityReport,
-    }),
-  });
-}
-
-function estimateQuestionScore(questionType?: string): number {
-  if (questionType === 'calculation') return 12;
-  if (questionType === 'experiment') return 10;
-  if (questionType === 'multi_choice') return 6;
-  return 5;
 }
 
 export async function fetchImages(params: Record<string, string>): Promise<unknown[]> {

@@ -18,7 +18,7 @@ import { Spinner } from '../components/ui/Spinner';
 import { useBasket } from '../hooks/useBasket';
 import { useComposeDraftSession } from '../hooks/compose/useComposeDraftSession';
 import { useComposeWorkbenchStore } from '../stores/useComposeWorkbenchStore';
-import { savePaperDraft } from '../services/api';
+import { savePaperDraft } from '../services/paperDraftApi';
 import { searchQuestions } from '../services/questionApi';
 import { ApiError } from '../services/apiClient';
 import {

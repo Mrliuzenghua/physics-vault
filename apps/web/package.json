@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test": "node --experimental-strip-types --test src/services/apiClient.test.ts src/services/fileDownload.test.ts src/services/questionQuality.test.ts src/services/platformContracts.test.ts src/services/assetsApi.test.ts src/services/favoritesApi.test.ts src/services/collectionsApi.test.ts src/services/annotationsApi.test.ts src/services/metadataApi.test.ts src/services/questionApi.test.ts src/services/reviewDraftApi.test.ts src/services/reviewApi.test.ts src/services/importApi.test.ts src/services/aiApi.test.ts src/components/layout/statusBarStatus.test.ts src/components/tasks/TaskStageTimeline.test.ts src/utils/mathText.test.ts src/utils/composeDraft.test.ts src/services/classroomReflection.test.ts",
+    "test": "node --experimental-strip-types --test src/services/apiClient.test.ts src/services/fileDownload.test.ts src/services/questionQuality.test.ts src/services/platformContracts.test.ts src/services/assetsApi.test.ts src/services/favoritesApi.test.ts src/services/collectionsApi.test.ts src/services/annotationsApi.test.ts src/services/metadataApi.test.ts src/services/questionApi.test.ts src/services/reviewDraftApi.test.ts src/services/reviewApi.test.ts src/services/importApi.test.ts src/services/aiApi.test.ts src/services/paperDraftApi.test.ts src/components/layout/statusBarStatus.test.ts src/components/tasks/TaskStageTimeline.test.ts src/utils/mathText.test.ts src/utils/composeDraft.test.ts src/services/classroomReflection.test.ts",
     "test:quality": "node --experimental-strip-types --test src/services/questionQuality.test.ts src/components/layout/statusBarStatus.test.ts",
     "preview": "vite preview"
   },

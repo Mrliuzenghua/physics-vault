@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 
-import { fetchLatestPaperDraft, fetchPaperDraft } from '../../services/api';
+import { fetchLatestPaperDraft, fetchPaperDraft } from '../../services/paperDraftApi';
 import { fetchQuestion, fetchQuestionsByIds } from '../../services/questionApi';
 import { buildComposeItemsFromPaperDraft, getQuestionSnapshot } from '../../utils/composeDraft';
 import type { BasketItem, ComposeItem, ComposeQuestionItem, PaperDraft, Question, TemplateMaterialPackage } from '../../types';
