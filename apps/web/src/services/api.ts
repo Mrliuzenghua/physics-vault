@@ -211,38 +211,16 @@ export {
   uploadQuestionImageCache,
 } from './imageCacheApi';
 export type { ImageCacheAsset } from './imageCacheApi';
-
-export interface DatabaseStatus {
-  questions_count: number;
-}
-
-export async function fetchDatabaseStatus(): Promise<DatabaseStatus> {
-  return request('/api/system/db-status');
-}
-
-export async function fetchImages(params: Record<string, string>): Promise<unknown[]> {
-  return request(`/images?${new URLSearchParams(params)}`);
-}
-
-export async function fetchPapers(): Promise<unknown[]> {
-  return request('/papers');
-}
-
-export async function fetchPaperQuestions(paperId: string): Promise<Question[]> {
-  return request(`/papers/${paperId}/questions`);
-}
-
-export async function fetchReviewQueue(): Promise<Question[]> {
-  return request('/review-queue');
-}
-
-export async function fetchEmbeddingStatus(): Promise<unknown> {
-  return request('/embeddings/status');
-}
-
-export async function healthCheck(): Promise<{ status: string }> {
-  return request('/health');
-}
+export {
+  fetchDatabaseStatus,
+  fetchEmbeddingStatus,
+  fetchImages,
+  fetchPaperQuestions,
+  fetchPapers,
+  fetchReviewQueue,
+  healthCheck,
+} from './catalogApi';
+export type { DatabaseStatus } from './catalogApi';
 
 /** Confirm user-edited questions 鈫?returns task_id for the review workbench. */
 export async function confirmImportBatch(
