@@ -16,9 +16,7 @@ import {
   type QuestionQualityRuleConfig,
   type QuestionQualitySeverity,
 } from '../services/questionQuality';
-import {
-  fetchImportTask,
-} from '../services/api';
+import { fetchImportTask } from '../services/importApi';
 import { requestResponse } from '../services/apiClient';
 import {
   deleteReviewDraft,

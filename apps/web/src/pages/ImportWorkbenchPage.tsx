@@ -7,12 +7,14 @@ import { analyzeQuestionQuality, findDuplicateQuestionIds, type QuestionQualityC
 import { normalizeShortInlineDisplayMath } from '../utils/mathText';
 import {
   confirmImportBatch,
+} from '../services/api';
+import {
   createImportBatch,
   extractBatchImages,
   fetchImportBatchOverview,
   runImportBatchRecognize,
   type PersistedImportBatchSummary,
-} from '../services/api';
+} from '../services/importApi';
 import type { Figure, ImportMediaAsset, Option, QuestionType } from '../types';
 
 type ImportStrategy = 'auto' | 'document' | 'vision' | 'extract_images';
