@@ -147,10 +147,10 @@ class _CountingDraftRepository(SQLiteReviewDraftRepository):
         super().__init__(*args, **kwargs)
         self.delete_calls = 0
 
-    def delete(self, task_id: str) -> None:
+    def delete_if_version(self, task_id: str, expected_version: int) -> None:
         self.delete_calls += 1
         sleep(0.05)
-        super().delete(task_id)
+        super().delete_if_version(task_id, expected_version)
 
 
 def test_concurrent_confirmation_claims_delete_plan_once(tmp_path) -> None:
@@ -164,3 +164,33 @@ def test_concurrent_confirmation_claims_delete_plan_once(tmp_path) -> None:
     assert drafts.delete_calls == 1
     assert sorted(response.json()["status"] for response in responses) == ["completed", "executing"]
     assert client.post("/api/review/drafts/confirm-operation", json={"operation_id": operation_id}).json()["idempotent"] is True
+
+
+class _ExternalWriteBeforeDeleteRepository(SQLiteReviewDraftRepository):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.inject_external_write = False
+
+    def delete_if_version(self, task_id: str, expected_version: int) -> None:
+        if self.inject_external_write:
+            self.inject_external_write = False
+            current = self.get(task_id)
+            assert current is not None
+            self.save(task_id, current.version, _state("external update"))
+        super().delete_if_version(task_id, expected_version)
+
+
+def test_delete_confirmation_conflicts_when_draft_changes_after_precheck(tmp_path) -> None:
+    client, drafts, plans = _client(tmp_path, repository_type=_ExternalWriteBeforeDeleteRepository)
+    initial = drafts.save("task-cas", 0, _state("first"))
+    operation_id = client.post("/api/review/drafts/task-cas/delete-preview").json()["operation_plan"]["operation_id"]
+
+    drafts.inject_external_write = True
+    response = client.post("/api/review/drafts/confirm-operation", json={"operation_id": operation_id})
+
+    assert response.status_code == 409
+    current = drafts.get("task-cas")
+    assert current is not None
+    assert current.version == initial.version + 1
+    assert current.state["drafts"][0]["title"] == "external update"
+    assert plans.get(operation_id).status == "failed"

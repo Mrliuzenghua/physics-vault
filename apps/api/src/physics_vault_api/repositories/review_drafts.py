@@ -156,6 +156,29 @@ class SQLiteReviewDraftRepository:
             conn.execute("DELETE FROM review_workbench_draft_versions WHERE task_id = ?", (task_id,))
             conn.execute("DELETE FROM review_workbench_drafts WHERE task_id = ?", (task_id,))
 
+    def delete_if_version(self, task_id: str, expected_version: int) -> None:
+        """Delete a current draft only when its version still matches the plan.
+
+        The conditional delete and history cleanup share one immediate SQLite
+        transaction.  A concurrent save therefore either completes before this
+        method (and produces a conflict) or waits until this deletion commits.
+        """
+        with sqlite3.connect(self._db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            deleted = conn.execute(
+                "DELETE FROM review_workbench_drafts WHERE task_id = ? AND version = ?",
+                (task_id, expected_version),
+            )
+            if deleted.rowcount != 1:
+                row = conn.execute(
+                    "SELECT task_id, version, state_json, updated_at "
+                    "FROM review_workbench_drafts WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+                raise ReviewDraftConflictError(_row_to_snapshot(row) if row else None)
+            conn.execute("DELETE FROM review_workbench_draft_versions WHERE task_id = ?", (task_id,))
+
 
 def _dt_to_text(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()

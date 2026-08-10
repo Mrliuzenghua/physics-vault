@@ -193,6 +193,19 @@ def test_operations_profile_and_public_legacy_signatures_are_compatible(monkeypa
         )
 
 
+def test_management_profile_and_public_legacy_signatures_are_compatible(monkeypatch) -> None:
+    monkeypatch.setenv("PHYSICS_MCP_PROFILE", "catalog_maintenance")
+    module = _load_mcp_server()
+    management_names = tuple(module._MCP105_TOOL_NAMES)
+
+    assert set(management_names) == module.profile_tool_names("catalog_maintenance")
+    assert {tool.__name__ for tool in module.server.tools} == set(management_names)
+    for name in management_names:
+        assert inspect.signature(getattr(module, name)) == inspect.signature(
+            getattr(module, f"_legacy_{name}")
+        )
+
+
 def test_mcp_format_diff_reports_changed_sections_and_template_ids() -> None:
     module = _load_mcp_server()
 

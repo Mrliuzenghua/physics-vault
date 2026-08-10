@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { fetchKnowledgePointCounts, fetchKnowledgePoints } from '../../services/api';
+import { fetchKnowledgePointCounts, fetchKnowledgePoints } from '../../services/metadataApi';
 import type { KnowledgePointFlatItem, KnowledgeTreeLevel2, KnowledgeTreeNode } from '../../types';
 
 interface Props {

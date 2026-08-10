@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createAnnotation, deleteAnnotation, fetchAnnotations, updateAnnotation } from '../../services/api';
+import { createAnnotation, deleteAnnotation, fetchAnnotations, updateAnnotation } from '../../services/annotationsApi';
 import type { AnnotationType, QuestionAnnotation } from '../../types';
 import { ANNOTATION_COLORS, ANNOTATION_TYPE_LABELS } from '../../types';
 

@@ -44,10 +44,12 @@ from packages.mcp_contracts.src.operation_plan import build_operation_plan  # no
 from packages.mcp_contracts.src.domains import (  # noqa: E402
     AuthoringDomain,
     ImportReviewDomain,
+    ManagementDomain,
     OperationsDomain,
     SearchKnowledgeDomain,
     register_authoring_tools,
     register_import_review_tools,
+    register_management_tools,
     register_operations_tools,
     register_search_knowledge_tools,
 )
@@ -1853,8 +1855,7 @@ def _legacy_search_method_questions(
     )
 
 
-@server.tool()
-def record_method_retrieval_feedback(
+def _legacy_record_method_retrieval_feedback(
     question_id: str,
     method_query: str,
     verdict: Literal["correct", "incorrect", "missed"],
@@ -3140,8 +3141,7 @@ def _legacy_get_question_knowledge_points(question_id: str) -> dict[str, Any]:
     return {"question_id": clean_question_id, "items": [dict(row) for row in rows]}
 
 
-@server.tool()
-def maintain_question_knowledge_points(
+def _legacy_maintain_question_knowledge_points(
     question_ids: list[str],
     auto_fix: bool = True,
     reason: str | None = None,
@@ -3165,8 +3165,7 @@ def maintain_question_knowledge_points(
         return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
 
 
-@server.tool()
-def create_knowledge_points(points: list[dict[str, Any]]) -> dict[str, Any]:
+def _legacy_create_knowledge_points(points: list[dict[str, Any]]) -> dict[str, Any]:
     """直接新增正式知识树节点。知识目录是智能体可自治维护的元数据，不需要审核。"""
     try:
         return _metadata_management_service().create_knowledge_points(points)
@@ -3174,8 +3173,7 @@ def create_knowledge_points(points: list[dict[str, Any]]) -> dict[str, Any]:
         return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
 
 
-@server.tool()
-def organize_knowledge_tree(
+def _legacy_organize_knowledge_tree(
     assignments: list[dict[str, Any]],
     task_id: str | None = None,
     reason: str | None = None,
@@ -3211,8 +3209,7 @@ def organize_knowledge_tree(
     return result
 
 
-@server.tool()
-def batch_update_question_metadata(
+def _legacy_batch_update_question_metadata(
     updates: list[dict[str, Any]],
     reason: str | None = None,
 ) -> dict[str, Any]:
@@ -5035,8 +5032,7 @@ def _legacy_list_question_tags(
     }
 
 
-@server.tool()
-def diagnose_tag_maintenance(
+def _legacy_diagnose_tag_maintenance(
     query: str | None = None,
     limit: int = 50,
     min_similarity: float = 0.86,
@@ -5053,8 +5049,7 @@ def diagnose_tag_maintenance(
         return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
 
 
-@server.tool()
-def suggest_question_tags(question_ids: list[str]) -> dict[str, Any]:
+def _legacy_suggest_question_tags(question_ids: list[str]) -> dict[str, Any]:
     """根据方法索引和高置信内容规则，为题目建议可补充的教学标签。只读。"""
     try:
         return _suggest_question_tags(
@@ -5065,8 +5060,7 @@ def suggest_question_tags(question_ids: list[str]) -> dict[str, Any]:
         return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
 
 
-@server.tool()
-def maintain_question_tags(
+def _legacy_maintain_question_tags(
     question_ids: list[str] | None = None,
     add_tags: list[str] | None = None,
     remove_tags: list[str] | None = None,
@@ -5102,8 +5096,7 @@ def maintain_question_tags(
         return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
 
 
-@server.tool()
-def list_change_batches(
+def _legacy_list_change_batches(
     change_type: str | None = None,
     status: str | None = None,
     limit: int = 50,
@@ -5116,14 +5109,12 @@ def list_change_batches(
     )
 
 
-@server.tool()
-def get_change_batch(batch_id: str) -> dict[str, Any]:
+def _legacy_get_change_batch(batch_id: str) -> dict[str, Any]:
     """读取一个受控变更批次及逐项 diff。只读。"""
     return _change_audit_service().get_batch(batch_id)
 
 
-@server.tool()
-def rollback_change_batch(
+def _legacy_rollback_change_batch(
     batch_id: str,
     dry_run: bool = True,
     reason: str | None = None,
@@ -5153,8 +5144,7 @@ def rollback_change_batch(
     return result
 
 
-@server.tool()
-def batch_replace_question_tags(
+def _legacy_batch_replace_question_tags(
     updates: list[dict[str, Any]],
     dry_run: bool = True,
     reason: str | None = None,
@@ -5276,8 +5266,7 @@ def batch_replace_question_tags(
     }
 
 
-@server.tool()
-def return_question_to_review(
+def _legacy_return_question_to_review(
     question_id: str,
     reason: str = "题目需要回炉重造",
     dry_run: bool = True,
@@ -5398,8 +5387,7 @@ def return_question_to_review(
     }
 
 
-@server.tool()
-def reconcile_review_queue_outbox(limit: int = 20) -> dict[str, Any]:
+def _legacy_reconcile_review_queue_outbox(limit: int = 20) -> dict[str, Any]:
     """重试投递尚未进入审核库的正式题库回炉操作。不会重复修改正式题目。"""
     safe_limit = min(max(int(limit or 20), 1), 100)
     with _connect_formal_write_db() as conn:
@@ -5424,8 +5412,7 @@ def reconcile_review_queue_outbox(limit: int = 20) -> dict[str, Any]:
     }
 
 
-@server.tool()
-def batch_replace_question_knowledge_points(
+def _legacy_batch_replace_question_knowledge_points(
     updates: list[dict[str, Any]],
     dry_run: bool = True,
     reason: str | None = None,
@@ -5889,8 +5876,7 @@ def _legacy_scan_canonical_duplicate_questions(limit: int = 100) -> dict[str, An
     }
 
 
-@server.tool()
-def backfill_canonical_question_hashes(
+def _legacy_backfill_canonical_question_hashes(
     dry_run: bool = True,
     reason: str = "为正式题库建立重复题内容指纹",
     overwrite_existing: bool = False,
@@ -5940,8 +5926,7 @@ def backfill_canonical_question_hashes(
     return {**preview, "audit_batch_id": batch_id}
 
 
-@server.tool()
-def merge_canonical_duplicate_questions(
+def _legacy_merge_canonical_duplicate_questions(
     primary_question_id: str,
     duplicate_question_ids: list[str],
     dry_run: bool = True,
@@ -6126,8 +6111,7 @@ def merge_canonical_duplicate_questions(
     return {**result, "audit_batch_id": batch_id, "archived_count": len(duplicate_ids)}
 
 
-@server.tool()
-def restore_canonical_duplicate_merge(
+def _legacy_restore_canonical_duplicate_merge(
     merge_batch_id: str,
     dry_run: bool = True,
     reason: str = "恢复重复题合并",
@@ -7172,6 +7156,21 @@ _MCP104_TOOL_NAMES = register_operations_tools(
     server.tool,
     _TOOL_REGISTRY,
     {name: getattr(_OPERATIONS_DOMAIN, name) for name in _MCP104_LEGACY_HANDLERS},
+)
+
+
+_MCP105_LEGACY_HANDLERS = {
+    spec.name: globals()[f"_legacy_{spec.name}"]
+    for spec in _TOOL_REGISTRY.discover(domain="management")
+}
+_MANAGEMENT_DOMAIN = ManagementDomain(_MCP105_LEGACY_HANDLERS)
+for _mcp105_tool_name in _MCP105_LEGACY_HANDLERS:
+    globals()[_mcp105_tool_name] = getattr(_MANAGEMENT_DOMAIN, _mcp105_tool_name)
+
+_MCP105_TOOL_NAMES = register_management_tools(
+    server.tool,
+    _TOOL_REGISTRY,
+    {name: getattr(_MANAGEMENT_DOMAIN, name) for name in _MCP105_LEGACY_HANDLERS},
 )
 
 

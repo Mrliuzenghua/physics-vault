@@ -101,11 +101,8 @@ export {
 export {
   deleteQuestions,
   fetchFacets,
-  fetchKnowledgePointCounts,
-  fetchKnowledgePoints,
   fetchQuestion,
   fetchQuestionAssets,
-  fetchQuestionKnowledgePoints,
   fetchQuestionVersionDetail,
   fetchQuestionVersions,
   fetchQuestionsByIds,
@@ -113,7 +110,6 @@ export {
   rollbackQuestionVersion,
   searchQuestions,
   updateQuestion,
-  updateQuestionKnowledgePoints,
 } from './questionApi';
 export {
   addCachedQuestionImage,
@@ -161,6 +157,20 @@ export {
   fetchQuestionCollections,
   removeFromCollection,
 } from './collectionsApi';
+export {
+  deleteAnnotation,
+  createAnnotation,
+  fetchAnnotations,
+  updateAnnotation,
+} from './annotationsApi';
+export {
+  batchUpdateMetadata,
+  fetchKnowledgePointCounts,
+  fetchKnowledgePoints,
+  fetchQuestionKnowledgePoints,
+  generateKnowledge,
+  updateQuestionKnowledgePoints,
+} from './metadataApi';
 
 export interface DatabaseStatus {
   questions_count: number;
@@ -859,29 +869,12 @@ export async function batchGenerateAnalysis(
   });
 }
 
-// Metadata batch
-
-export async function batchUpdateMetadata(
-  body: import('../types').BatchMetadataRequest,
-): Promise<import('../types').BatchMetadataResponse> {
-  return request('/api/questions/batch-metadata', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-}
-
 // Single-question AI generation
 
 export async function generateSingleAnalysis(
   body: { question: Record<string, unknown>; style?: string; include_extension?: boolean; force_regenerate?: boolean },
 ): Promise<{ question_id: string; analysis_text: string; generated: boolean; warnings: string[] }> {
   return request('/api/ai/analysis/generate', { method: 'POST', body: JSON.stringify(body) });
-}
-
-export async function generateKnowledge(
-  body: { knowledge_points: string[]; style?: string; length?: string; include_formula?: boolean; include_common_mistakes?: boolean; force_regenerate?: boolean },
-): Promise<{ knowledge_key: string; title: string; content: string; outline: string[]; generated: boolean; from_cache: boolean; warnings: string[] }> {
-  return request('/api/ai/knowledge/generate', { method: 'POST', body: JSON.stringify(body) });
 }
 
 // Similar questions
@@ -927,36 +920,6 @@ export async function fetchSimilarQuestions(
     }
     throw error;
   }
-}
-
-// Annotations
-
-export async function fetchAnnotations(questionId: string): Promise<import('../types').QuestionAnnotation[]> {
-  return request(`/api/questions/${encodeURIComponent(questionId)}/annotations`);
-}
-
-export async function createAnnotation(
-  questionId: string,
-  body: Partial<import('../types').QuestionAnnotation>,
-): Promise<import('../types').QuestionAnnotation> {
-  return request(`/api/questions/${encodeURIComponent(questionId)}/annotations`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-}
-
-export async function updateAnnotation(
-  annotationId: string,
-  patch: Partial<import('../types').QuestionAnnotation>,
-): Promise<import('../types').QuestionAnnotation> {
-  return request(`/api/questions/annotations/${encodeURIComponent(annotationId)}`, {
-    method: 'PUT',
-    body: JSON.stringify(patch),
-  });
-}
-
-export async function deleteAnnotation(annotationId: string): Promise<{ status: string; annotation_id: string }> {
-  return request(`/api/questions/annotations/${encodeURIComponent(annotationId)}`, { method: 'DELETE' });
 }
 
 export type {

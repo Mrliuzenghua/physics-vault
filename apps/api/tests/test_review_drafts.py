@@ -67,3 +67,19 @@ def test_review_draft_history_is_bounded():
         version = repository.save("task-1", version, _state(f"第 {index + 1} 版")).version
 
     assert [item.version for item in repository.list_versions("task-1", limit=20)] == [7, 6, 5, 4, 3]
+
+
+def test_review_draft_delete_if_version_is_atomic_and_preserves_newer_draft():
+    repository = _repository()
+    first = repository.save("task-1", 0, _state("第一版"))
+    second = repository.save("task-1", first.version, _state("第二版"))
+
+    with pytest.raises(ReviewDraftConflictError) as exc_info:
+        repository.delete_if_version("task-1", first.version)
+
+    assert exc_info.value.current is not None
+    assert exc_info.value.current.version == second.version
+    assert repository.get("task-1").version == second.version
+    repository.delete_if_version("task-1", second.version)
+    assert repository.get("task-1") is None
+    assert repository.list_versions("task-1") == []

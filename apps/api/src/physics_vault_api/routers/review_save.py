@@ -248,13 +248,14 @@ def _run_review_draft_plan(
 ) -> dict[str, object]:
     task_id = _review_plan_target(plan, "review_draft")
     base_version = int(_review_plan_target(plan, "review_draft_base_version"))
-    current = draft_repository.get(task_id)
-    if current is None or current.version != base_version:
-        raise OperationPlanVersionConflict(
-            f"expected review draft version {base_version}, got {current.version if current else 'missing'}"
-        )
     if plan.action == "review_drafts.delete":
-        draft_repository.delete(task_id)
+        try:
+            draft_repository.delete_if_version(task_id, base_version)
+        except ReviewDraftConflictError as exc:
+            current = exc.current
+            raise OperationPlanVersionConflict(
+                f"expected review draft version {base_version}, got {current.version if current else 'missing'}"
+            ) from exc
         return {"task_id": task_id, "deleted": True}
     if plan.action == "review_drafts.restore":
         restore_version = int(_review_plan_target(plan, "review_draft_restore_version"))
