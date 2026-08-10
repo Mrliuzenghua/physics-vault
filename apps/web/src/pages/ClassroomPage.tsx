@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import SlideViewer from '../components/slides/SlideViewer';
-import TeachingSlidePage from '../components/teaching/TeachingSlidePage';
 import { EmptyState } from '../components/ui/EmptyState';
 import { loadCurrentLessonPackage } from '../services/lessonPackage';
 import { getOrCreateTeachingProject, hydrateTeachingProject } from '../services/teachingProject';
 import { generateClassroomReflectionAdvice, hydrateClassroomReflections, loadLatestClassroomReflection, saveClassroomReflection, syncClassroomReflection, type ClassroomReflection, type ClassroomReflectionAdvice } from '../services/classroomReflection';
 import type { LessonPackage, Question, SlidesDisplayMode } from '../types';
 import type { SlideDeck, SlidePage } from '../types/slides';
+
+const SlideViewer = lazy(() => import('../components/slides/SlideViewer'));
+const TeachingSlidePage = lazy(() => import('../components/teaching/TeachingSlidePage'));
 
 interface MixedPage {
   kind: 'knowledge' | 'question';
@@ -282,19 +283,21 @@ export default function ClassroomPage() {
           ref={stageRef}
           className={`min-h-0 flex-1 bg-[#12213f] ${isFullscreen ? 'flex items-center justify-center overflow-hidden p-0' : 'overflow-auto px-6 py-6'}`}
         >
-          {currentPage.kind === 'knowledge' ? (
-            <TeachingSlidePage data={currentPage.slide} fitToViewport={isFullscreen} />
-          ) : (
-            <SlideViewer
-              question={currentPage.question!}
-              index={pages.slice(0, currentIndex + 1).filter((page) => page.kind === 'question').length - 1}
-              total={questionCount}
-              displayMode={displayMode}
-              zoomLevel={zoomLevel}
-              fitToViewport={isFullscreen}
-              revealStep={revealStep}
-            />
-          )}
+          <Suspense fallback={<SlideLoading />}>
+            {currentPage.kind === 'knowledge' ? (
+              <TeachingSlidePage data={currentPage.slide} fitToViewport={isFullscreen} />
+            ) : (
+              <SlideViewer
+                question={currentPage.question!}
+                index={pages.slice(0, currentIndex + 1).filter((page) => page.kind === 'question').length - 1}
+                total={questionCount}
+                displayMode={displayMode}
+                zoomLevel={zoomLevel}
+                fitToViewport={isFullscreen}
+                revealStep={revealStep}
+              />
+            )}
+          </Suspense>
         </div>
 
         <div className="flex items-center justify-between border-t border-white/10 bg-[#111c35] px-5 py-3">
@@ -443,6 +446,10 @@ export default function ClassroomPage() {
       )}
     </div>
   );
+}
+
+function SlideLoading() {
+  return <div className="grid h-full min-h-72 place-items-center text-sm text-white/70">正在加载课件…</div>;
 }
 
 function ControlChip({

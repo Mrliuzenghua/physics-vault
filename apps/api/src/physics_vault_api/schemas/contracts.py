@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import RootModel
+from pydantic import BaseModel, RootModel
+
+
+class HealthResponse(BaseModel):
+    """Minimal readiness result for browser clients and platform probes."""
+
+    status: str
 
 
 class IntegerMapResponse(RootModel[dict[str, int]]):

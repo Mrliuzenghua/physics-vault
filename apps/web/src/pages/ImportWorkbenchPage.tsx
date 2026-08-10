@@ -1,7 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import StructuredTextEditor from '../components/editor/StructuredTextEditor';
 import { analyzeQuestionQuality, findDuplicateQuestionIds, type QuestionQualityCode } from '../services/questionQuality';
 import { normalizeShortInlineDisplayMath } from '../utils/mathText';
 import {
@@ -15,6 +14,7 @@ import {
 import type { Figure, ImportMediaAsset, Option, QuestionType } from '../types';
 
 const DocumentPreviewModal = lazy(() => import('../components/import/DocumentPreviewModal'));
+const StructuredTextEditor = lazy(() => import('../components/editor/StructuredTextEditor'));
 
 type ImportStrategy = 'auto' | 'document' | 'vision' | 'extract_images';
 type JobStatus = 'queued' | 'running' | 'ready' | 'failed';
@@ -86,6 +86,10 @@ const STRATEGIES: { value: ImportStrategy; title: string; desc: string }[] = [
 
 function PreviewLoading() {
   return <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 text-sm text-white">正在加载文档预览…</div>;
+}
+
+function EditorLoading() {
+  return <div className="min-h-44 rounded-md border border-dashed border-[var(--color-border)] bg-[var(--color-bg-hover)] p-4 text-sm text-[var(--color-text-muted)]">正在加载富文本编辑器…</div>;
 }
 
 function makeJobId(): string {
@@ -225,6 +229,7 @@ export default function ImportWorkbenchPage() {
   const [submittingJobId, setSubmittingJobId] = useState<string | null>(null);
   const [persistedBatches, setPersistedBatches] = useState<PersistedImportBatchSummary[]>([]);
   const [previewFile, setPreviewFile] = useState<File | null>(null);
+  const [richTextEditorOpen, setRichTextEditorOpen] = useState(false);
 
   useEffect(
     () => subscribeImportWorkspace(() => setWorkspace(getImportWorkspaceState())),
@@ -577,15 +582,39 @@ export default function ImportWorkbenchPage() {
             <div className="h-px flex-1 bg-[var(--color-border)]" />
           </div>
 
-          <StructuredTextEditor
-            value={directText}
-            onChange={(value) => {
-              setDirectText(value);
-              if (value.trim()) setFiles([]);
-            }}
-            placeholder="粘贴题目文本；输入 / 可插入标题、列表、公式、表格和图片"
-            minHeight={176}
-          />
+          {richTextEditorOpen ? (
+            <Suspense fallback={<EditorLoading />}>
+              <StructuredTextEditor
+                value={directText}
+                onChange={(value) => {
+                  setDirectText(value);
+                  if (value.trim()) setFiles([]);
+                }}
+                placeholder="粘贴题目文本；输入 / 可插入标题、列表、公式、表格和图片"
+                minHeight={176}
+              />
+            </Suspense>
+          ) : (
+            <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
+              <textarea
+                value={directText}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setDirectText(value);
+                  if (value.trim()) setFiles([]);
+                }}
+                placeholder="粘贴题目文本；需要公式、表格或图片时可启用富文本编辑"
+                className="min-h-44 w-full resize-y bg-transparent text-sm leading-6 text-[var(--color-text)] outline-none placeholder:text-[var(--color-text-muted)]"
+              />
+              <button
+                type="button"
+                onClick={() => setRichTextEditorOpen(true)}
+                className="mt-2 text-xs font-semibold text-[var(--color-accent)]"
+              >
+                启用富文本编辑
+              </button>
+            </div>
+          )}
         </section>
 
         <section className="rounded-lg border border-[var(--color-border)] bg-white p-4 shadow-sm">

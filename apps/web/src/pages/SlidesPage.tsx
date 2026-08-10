@@ -1,10 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import LessonPackageTree from '../components/lesson/LessonPackageTree';
-import SlideViewer from '../components/slides/SlideViewer';
 import SlidesToolbar from '../components/slides/SlidesToolbar';
-import TeachingSlidePage from '../components/teaching/TeachingSlidePage';
 import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import {
@@ -24,6 +22,9 @@ import { layoutModelToSlideDeck, lessonPackageToLayoutModel } from '../services/
 import { getOrCreateTeachingProject, hydrateTeachingProject, isArtifactStale, saveSlideArtifact } from '../services/teachingProject';
 import type { LessonPackage, Question, SlidesDisplayMode } from '../types';
 import type { SlideDeck, SlidePage } from '../types/slides';
+
+const SlideViewer = lazy(() => import('../components/slides/SlideViewer'));
+const TeachingSlidePage = lazy(() => import('../components/teaching/TeachingSlidePage'));
 
 interface MixedPage {
   kind: 'knowledge' | 'question';
@@ -83,6 +84,10 @@ function mergeGeneratedDeck(current: SlideDeck, generated: SlideDeck, previousGe
     if (!generatedIds.has(page.id)) pages.push(page);
   });
   return { ...generated, pages };
+}
+
+function SlideLoading() {
+  return <div className="grid h-full min-h-72 place-items-center text-sm text-[var(--color-text-muted)]">正在加载课件…</div>;
 }
 
 export default function SlidesPage() {
@@ -430,19 +435,21 @@ export default function SlidesPage() {
           )}
 
           <div className={`min-h-0 flex-1 ${isFullscreen ? 'overflow-hidden bg-[#0b1220]' : 'overflow-auto bg-[var(--color-bg-hover)] px-5 py-5'}`}>
-            {currentPage.kind === 'knowledge' ? (
-              <TeachingSlidePage data={currentPage.slide} fitToViewport={isFullscreen} />
-            ) : (
-              <SlideViewer
-                question={currentPage.question!}
-                index={pages.slice(0, currentIndex + 1).filter((page) => page.kind === 'question').length - 1}
-                total={questionCount}
-                displayMode={displayMode}
-                zoomLevel={isFullscreen ? 1 : zoomLevel}
-                fitToViewport={isFullscreen}
-                revealStep={revealStep}
-              />
-            )}
+            <Suspense fallback={<SlideLoading />}>
+              {currentPage.kind === 'knowledge' ? (
+                <TeachingSlidePage data={currentPage.slide} fitToViewport={isFullscreen} />
+              ) : (
+                <SlideViewer
+                  question={currentPage.question!}
+                  index={pages.slice(0, currentIndex + 1).filter((page) => page.kind === 'question').length - 1}
+                  total={questionCount}
+                  displayMode={displayMode}
+                  zoomLevel={isFullscreen ? 1 : zoomLevel}
+                  fitToViewport={isFullscreen}
+                  revealStep={revealStep}
+                />
+              )}
+            </Suspense>
           </div>
         </div>
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from physics_vault_api.application import _build_api_compatibility_router
 from physics_vault_api.database import connect_db
 from physics_vault_api.db_schema import initialize_database
 from physics_vault_api.repositories.papers import PaperRepository
@@ -10,7 +11,7 @@ from physics_vault_api.routers.papers import build_papers_router
 from physics_vault_api.services.papers import PaperService
 
 
-def test_paper_list_and_detail_preserve_legacy_contract(tmp_path) -> None:
+def test_papers_serve_canonical_and_legacy_compatibility_paths(tmp_path) -> None:
     db_path = tmp_path / "papers.sqlite3"
     initialize_database(db_path)
     with connect_db(db_path) as connection:
@@ -27,24 +28,27 @@ def test_paper_list_and_detail_preserve_legacy_contract(tmp_path) -> None:
         )
         connection.commit()
 
+    router = build_papers_router(PaperService(PaperRepository(str(db_path))))
     app = FastAPI()
-    app.include_router(build_papers_router(PaperService(PaperRepository(str(db_path)))))
+    app.include_router(router)
+    app.include_router(_build_api_compatibility_router(router))
     client = TestClient(app)
 
-    listing = client.get("/papers", params={"q": "mock", "year": 2026})
+    listing = client.get("/api/papers", params={"q": "mock", "year": 2026})
     assert listing.status_code == 200
     assert listing.json()[0]["paper_id"] == "P-2026"
     assert listing.json()[0]["question_count"] == 2
 
-    detail = client.get("/papers/P-2026")
+    detail = client.get("/api/papers/P-2026")
     assert detail.status_code == 200
     assert detail.json()["paper_name"] == "Physics mock paper"
     assert detail.json()["question_count"] == 2
 
-    paper_questions = client.get("/papers/P-2026/questions")
+    paper_questions = client.get("/api/papers/P-2026/questions")
     assert paper_questions.status_code == 200
     assert [item["question_id"] for item in paper_questions.json()] == ["Q-1", "Q-2"]
     assert paper_questions.json()[0]["type"] == "single_choice"
     assert paper_questions.json()[0]["knowledge_points"] == []
 
-    assert client.get("/papers/missing").status_code == 404
+    assert client.get("/api/papers/missing").status_code == 404
+    assert client.get("/papers", params={"q": "mock", "year": 2026}).json() == listing.json()

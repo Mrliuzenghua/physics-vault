@@ -64,6 +64,7 @@ from .routers.restore_package import build_restore_package_router
 from .routers.review_queue import build_review_queue_router
 from .routers.review_save import build_review_save_router
 from .routers.system_status import build_system_status_router
+from .routers.tag_maintenance import build_tag_maintenance_router
 from .routers.tasks import build_tasks_router
 from .runtime_config import get_runtime_config
 from .routers.similar_questions import build_similar_questions_router
@@ -102,6 +103,7 @@ from .services.question_write import QuestionWriteService
 from .services.review_save import ReviewSaveService
 from .services.similar_questions import SimilarQuestionsService
 from .services.task_center import TaskCenterService
+from .services.tag_maintenance import TagMaintenanceOperationService
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +278,7 @@ class ApplicationContainer:
                 "assets_manager_service",
                 "mistake_service",
                 "metadata_batch_service",
+                "tag_maintenance_service",
                 "similar_questions_service",
                 "paper_draft_service",
                 "ai_assistant_service",
@@ -324,6 +327,7 @@ class ApplicationContainer:
     assets_manager_service: AssetsManagerService
     mistake_service: MistakeService
     metadata_batch_service: MetadataBatchService
+    tag_maintenance_service: TagMaintenanceOperationService
     similar_questions_service: SimilarQuestionsService
     paper_draft_service: PaperDraftService
     ai_assistant_service: AiAssistantService
@@ -407,6 +411,7 @@ class ApplicationContainer:
             assets_manager_service=AssetsManagerService(),
             mistake_service=MistakeService(question_write_repo),
             metadata_batch_service=MetadataBatchService(question_write_repo, mcp_gateway),
+            tag_maintenance_service=TagMaintenanceOperationService(),
             similar_questions_service=SimilarQuestionsService(),
             paper_draft_service=PaperDraftService(),
             ai_assistant_service=AiAssistantService(question_search_repo),
@@ -482,6 +487,7 @@ class ApplicationContainer:
         yield "system_status", build_system_status_router(self.question_search_repo)
         yield "mistake", build_mistake_router(self.mistake_service)
         yield "metadata_batch", build_metadata_batch_router(self.metadata_batch_service)
+        yield "tag_maintenance", build_tag_maintenance_router(self.tag_maintenance_service)
         yield "paper_drafts", build_paper_drafts_router(self.paper_draft_service)
         yield "change_audit", build_change_audit_router(self.change_audit_service)
 

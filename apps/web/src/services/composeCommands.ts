@@ -1,5 +1,5 @@
 import type { ComposeItem, HandoutTextBlockKind, Question } from '../types';
-import { getComposeWorkbenchSnapshot } from '../stores/useComposeWorkbenchStore';
+import { getComposeWorkbenchSnapshot } from '../stores/useComposeWorkbenchStore.ts';
 
 export type ComposeCommand =
   | { type: 'insert_text'; title?: string; content: string; afterId?: string; blockKind?: HandoutTextBlockKind }

@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from physics_vault_api.application import _build_api_compatibility_router
 from physics_vault_api.database import connect_db
 from physics_vault_api.db_schema import initialize_database
 from physics_vault_api.repositories.embedding_status import EmbeddingStatusRepository
@@ -10,7 +11,7 @@ from physics_vault_api.routers.embedding_status import build_embedding_status_ro
 from physics_vault_api.services.embedding_status import EmbeddingStatusService
 
 
-def test_embedding_status_preserves_legacy_path_and_aggregates_question_vectors(tmp_path) -> None:
+def test_embedding_status_serves_canonical_and_legacy_compatibility_paths(tmp_path) -> None:
     db_path = tmp_path / "embedding-status.sqlite3"
     initialize_database(db_path)
     with connect_db(db_path) as connection:
@@ -29,14 +30,15 @@ def test_embedding_status_preserves_legacy_path_and_aggregates_question_vectors(
         )
         connection.commit()
 
-    app = FastAPI()
-    app.include_router(
-        build_embedding_status_router(
-            EmbeddingStatusService(EmbeddingStatusRepository(str(db_path)))
-        )
+    router = build_embedding_status_router(
+        EmbeddingStatusService(EmbeddingStatusRepository(str(db_path)))
     )
+    app = FastAPI()
+    app.include_router(router)
+    app.include_router(_build_api_compatibility_router(router))
 
-    response = TestClient(app).get("/embeddings/status")
+    client = TestClient(app)
+    response = client.get("/api/embeddings/status")
 
     assert response.status_code == 200
     assert response.json() == [
@@ -48,3 +50,4 @@ def test_embedding_status_preserves_legacy_path_and_aggregates_question_vectors(
             "last_updated_at": "2026-08-02",
         }
     ]
+    assert client.get("/embeddings/status").json() == response.json()

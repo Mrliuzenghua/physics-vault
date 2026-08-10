@@ -3,14 +3,11 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Virtuoso } from 'react-virtuoso';
 import { Eye, EyeOff, LayoutList, List, PanelLeftClose, PanelLeftOpen, RefreshCw } from 'lucide-react';
 
-import BatchMoveDialog from '../components/shared/BatchMoveDialog';
-import BasketWorkbenchDrawer from '../components/shared/BasketWorkbenchDrawer';
 import FilterBar from '../components/shared/FilterBar';
 import KnowledgeTree from '../components/shared/KnowledgeTree';
 import QueryParamsPopover from '../components/shared/QueryParamsPopover';
 import QuestionCard from '../components/shared/QuestionCard';
 import QuestionCompactRow from '../components/shared/QuestionCompactRow';
-import RandomPickModal from '../components/shared/RandomPickModal';
 import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { useBasket } from '../hooks/useBasket';
@@ -30,6 +27,9 @@ type QuickActionGroup = '浏览' | '选题' | '输出' | '整理';
 
 const QuestionEditorModal = lazy(() => import('../components/editor/QuestionEditorModal'));
 const QuestionLiveEditor = lazy(() => import('../components/editor/QuestionLiveEditor'));
+const BasketWorkbenchDrawer = lazy(() => import('../components/shared/BasketWorkbenchDrawer'));
+const RandomPickModal = lazy(() => import('../components/shared/RandomPickModal'));
+const BatchMoveDialog = lazy(() => import('../components/shared/BatchMoveDialog'));
 
 interface QuickAction {
   label: string;
@@ -1274,15 +1274,19 @@ export default function BrowsePage() {
         </div>
       )}
 
-      <BasketWorkbenchDrawer
-        open={basketDrawerOpen}
-        items={basketItems}
-        includedQuestionIds={composedQuestionIds}
-        onClose={() => setBasketDrawerOpen(false)}
-        onRemove={removeFromBasket}
-        onMove={moveBasketItem}
-        onCompose={() => navigate('/compose', { state: { newDraft: true } })}
-      />
+      {basketDrawerOpen && (
+        <Suspense fallback={<WorkspaceLoading />}>
+          <BasketWorkbenchDrawer
+            open
+            items={basketItems}
+            includedQuestionIds={composedQuestionIds}
+            onClose={() => setBasketDrawerOpen(false)}
+            onRemove={removeFromBasket}
+            onMove={moveBasketItem}
+            onCompose={() => navigate('/compose', { state: { newDraft: true } })}
+          />
+        </Suspense>
+      )}
 
       {editingDraft && (
         <Suspense fallback={<EditorLoading overlay />}>
@@ -1296,36 +1300,44 @@ export default function BrowsePage() {
         </Suspense>
       )}
 
-      <RandomPickModal
-        open={randomModalOpen}
-        onClose={() => setRandomModalOpen(false)}
-        previewQuestions={randomQuestions}
-        loading={randomLoading}
-        requestedCount={requestedRandomCount}
-        actualCount={randomQuestions.length}
-        totalCandidates={total}
-        perSet={randomPerSet}
-        copies={randomCopies}
-        allowRepeat={randomAllowRepeat}
-        excludedIdsText={randomExcludedIdsText}
-        conditionSummary={randomConditionSummary}
-        onChangePerSet={(value) => setRandomPerSet(clampNumber(value, 1, 50))}
-        onChangeCopies={(value) => setRandomCopies(clampNumber(value, 1, 20))}
-        onChangeAllowRepeat={setRandomAllowRepeat}
-        onChangeExcludedIdsText={setRandomExcludedIdsText}
-        onStart={() => void runRandomPick()}
-        onAddAllToBasket={handleAddRandomQuestionsToBasket}
-        onReturnToReview={handleReturnToReview}
-        onAddToBasket={addToBasket}
-        returningReviewIds={returningReviewIds}
-        inBasketIds={basketIds}
-      />
+      {randomModalOpen && (
+        <Suspense fallback={<WorkspaceLoading />}>
+          <RandomPickModal
+            open
+            onClose={() => setRandomModalOpen(false)}
+            previewQuestions={randomQuestions}
+            loading={randomLoading}
+            requestedCount={requestedRandomCount}
+            actualCount={randomQuestions.length}
+            totalCandidates={total}
+            perSet={randomPerSet}
+            copies={randomCopies}
+            allowRepeat={randomAllowRepeat}
+            excludedIdsText={randomExcludedIdsText}
+            conditionSummary={randomConditionSummary}
+            onChangePerSet={(value) => setRandomPerSet(clampNumber(value, 1, 50))}
+            onChangeCopies={(value) => setRandomCopies(clampNumber(value, 1, 20))}
+            onChangeAllowRepeat={setRandomAllowRepeat}
+            onChangeExcludedIdsText={setRandomExcludedIdsText}
+            onStart={() => void runRandomPick()}
+            onAddAllToBasket={handleAddRandomQuestionsToBasket}
+            onReturnToReview={handleReturnToReview}
+            onAddToBasket={addToBasket}
+            returningReviewIds={returningReviewIds}
+            inBasketIds={basketIds}
+          />
+        </Suspense>
+      )}
 
-      <BatchMoveDialog
-        questionIds={basketItems.map((item) => item.question_id)}
-        open={moveDialogOpen}
-        onClose={() => setMoveDialogOpen(false)}
-      />
+      {moveDialogOpen && (
+        <Suspense fallback={<WorkspaceLoading />}>
+          <BatchMoveDialog
+            questionIds={basketItems.map((item) => item.question_id)}
+            open
+            onClose={() => setMoveDialogOpen(false)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
@@ -1464,6 +1476,10 @@ function EditorLoading({ overlay = false }: { overlay?: boolean }) {
       正在加载编辑器…
     </div>
   );
+}
+
+function WorkspaceLoading() {
+  return <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/55 text-sm text-white">正在加载工作区…</div>;
 }
 
 function DirectoryRow({

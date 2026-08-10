@@ -210,3 +210,38 @@ def build_batch_metadata_plan(
         execution_payload=payload,
         reversible=True,
     )
+
+
+def build_tag_maintenance_plan(
+    *,
+    question_versions: dict[str, list[str]],
+    question_ids: list[str],
+    add_tags: list[str],
+    remove_tags: list[str],
+    merge_map: dict[str, list[str]],
+    reason: str,
+    create_catalog_tags: bool,
+) -> OperationPlan:
+    """Persist the resolved tag rewrite and its per-question tag snapshot."""
+    if set(question_versions) != set(question_ids):
+        raise ValueError("tag version snapshot must cover every changed question")
+    version_snapshot = {
+        "question_versions": question_versions,
+        "tag_maintenance": {
+            "question_ids": question_ids,
+            "add_tags": add_tags,
+            "remove_tags": remove_tags,
+            "merge_map": merge_map,
+            "reason": reason,
+            "create_catalog_tags": create_catalog_tags,
+        },
+    }
+    return build_operation_plan(
+        action="questions.tag_maintenance",
+        targets=[{"type": "question", "id": question_id, "label": question_id} for question_id in question_ids],
+        summary=f"Normalize search tags for {len(question_ids)} questions.",
+        warnings=["The operation will be rejected if any planned question tags change before confirmation."],
+        expected_version=snapshot_version(version_snapshot),
+        version_snapshot=version_snapshot,
+        reversible=True,
+    )

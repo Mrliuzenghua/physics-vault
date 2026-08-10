@@ -1,8 +1,8 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { lazy, Suspense } from 'react';
 import { CheckCircle2, ChevronLeft, ChevronRight, Cloud, ExternalLink, FileSearch, History, ImagePlus, PanelRightClose, PanelRightOpen, PencilLine, RotateCcw, Send, Sparkles, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-react';
 
-import QuestionLiveEditor from '../components/editor/QuestionLiveEditor';
 import type { FigureInsertRequest } from '../components/editor/StructuredTextEditor';
 import LatexRenderer from '../components/render/LatexRenderer';
 import ReviewQueueSidebar from '../components/review/ReviewQueueSidebar';
@@ -76,6 +76,8 @@ import {
   normalizeKnowledgeDraft,
   normalizeOptions,
 } from '../utils/review/reviewDraft';
+
+const QuestionLiveEditor = lazy(() => import('../components/editor/QuestionLiveEditor'));
 
 type ReviewWorkspaceView = 'edit' | 'source';
 
@@ -1311,6 +1313,7 @@ function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsert
   openImagePicker: () => void;
 }) {
   const [localDraft, setLocalDraft] = useState(draft);
+  const [editorOpen, setEditorOpen] = useState(false);
   const localDraftRef = useRef(draft);
   const dirtyRef = useRef(false);
 
@@ -1382,21 +1385,30 @@ function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsert
         <button type="button" className={`${SOFT_BUTTON_CLASS} inline-flex items-center gap-1.5`} onClick={openImagePicker}><ImagePlus size={14} />新增图片</button>
         <button type="button" className={SOFT_BUTTON_CLASS} onClick={() => updateLocalDraft(buildSafeQuestionPatch(localDraft))} title="整理换行、行尾空格、选项编号和首尾空白，不改写题意">规范格式</button>
       </div>
-      <QuestionLiveEditor
-        question={localDraft as unknown as Question}
-        onChange={(patch) => {
-          const { editor_document: _editorDocument, ...reviewPatch } = patch;
-          if (Object.keys(reviewPatch).length > 0) updateLocalDraft(reviewPatch as Partial<ReviewQuestionDraft>);
-        }}
-        compact={false}
-        showPreview
-        showHeader={false}
-        showImageManager={false}
-        syncDocument={false}
-        insertFigureRequest={insertFigureRequest}
-        onFigureInsertHandled={onFigureInsertHandled}
-        onRequestImage={openImagePicker}
-      />
+      {editorOpen ? (
+        <Suspense fallback={<div className="min-h-72 rounded-md border border-dashed border-[var(--color-border)] bg-[var(--color-bg)] p-4 text-sm text-[var(--color-text-muted)]">正在加载整题编辑器…</div>}>
+          <QuestionLiveEditor
+            question={localDraft as unknown as Question}
+            onChange={(patch) => {
+              const { editor_document: _editorDocument, ...reviewPatch } = patch;
+              if (Object.keys(reviewPatch).length > 0) updateLocalDraft(reviewPatch as Partial<ReviewQuestionDraft>);
+            }}
+            compact={false}
+            showPreview
+            showHeader={false}
+            showImageManager={false}
+            syncDocument={false}
+            insertFigureRequest={insertFigureRequest}
+            onFigureInsertHandled={onFigureInsertHandled}
+            onRequestImage={openImagePicker}
+          />
+        </Suspense>
+      ) : (
+        <div className="rounded-md border border-dashed border-[var(--color-border)] bg-[var(--color-bg)] p-4">
+          <p className="text-sm text-[var(--color-text-secondary)]">整题编辑器会在开始编辑时加载，避免浏览审核任务时下载不需要的富文本功能。</p>
+          <button type="button" className={`${PRIMARY_BUTTON_CLASS} mt-3`} onClick={() => setEditorOpen(true)}>开始整题编辑</button>
+        </div>
+      )}
       <details className="mt-3 border-t border-[var(--color-border)] pt-3">
         <summary className="cursor-pointer text-xs font-semibold text-[var(--color-text-secondary)]">题型、知识点与来源</summary>
         <div className="mt-2 grid gap-2 sm:grid-cols-2">

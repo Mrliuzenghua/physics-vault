@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -14,12 +15,116 @@ from ..paths import default_db_path
 from .embedding_refresh import schedule_question_embedding_refresh
 from .metadata_management import MetadataManagementService
 from .method_feature_index import refresh_question_method_features
+from .operation_plans import OperationPlanService, build_tag_maintenance_plan
+from ..repositories.operation_plans import OperationPlanRepository
+
+from mcp_contracts.src.operation_plan import OperationPlan, snapshot_version
 
 
 MAX_TAG_MAINTENANCE_QUESTIONS = 500
 MAX_TAGS_PER_QUESTION = 8
 _TAG_SPLIT_RE = re.compile(r"[\s_\-:：/\\|]+")
 _TAG_BRACKET_RE = re.compile(r"[()（）【】\[\]{}《》<>]")
+
+
+class TagMaintenanceOperationService:
+    """Confirmation-only adapter for canonical tag normalization writes."""
+
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        operation_plan_service: OperationPlanService | None = None,
+    ) -> None:
+        self._db_path = Path(db_path) if db_path else default_db_path()
+        self._operation_plan_service = operation_plan_service or OperationPlanService(
+            # The application database is initialized by the composition root.
+            # Passing its path here would re-run legacy schema setup on every
+            # startup; only isolated callers that supply a plan service own it.
+            OperationPlanRepository(Path(db_path) if db_path else None)
+        )
+
+    def preview(
+        self,
+        *,
+        question_ids: list[str] | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+        merge_map: dict[str, list[str]] | None = None,
+        reason: str | None = None,
+        create_catalog_tags: bool = True,
+    ) -> dict[str, Any]:
+        """Resolve and persist a bounded tag write before it can be confirmed."""
+        clean_reason = " ".join(str(reason or "").split())[:300]
+        if not clean_reason:
+            return _error("INVALID_ARGUMENT", "预览标签维护操作时必须填写 reason，便于后续审计。")
+        preview = maintain_question_tags(
+            question_ids=question_ids,
+            add_tags=add_tags,
+            remove_tags=remove_tags,
+            merge_map=merge_map,
+            dry_run=True,
+            create_catalog_tags=create_catalog_tags,
+            db_path=self._db_path,
+        )
+        if not preview.get("ok") or not preview.get("changed_count"):
+            return preview
+
+        items = [item for item in preview["items"] if item.get("status") == "changed"]
+        changed_ids = [str(item["question_id"]) for item in items]
+        plan = build_tag_maintenance_plan(
+            question_versions={str(item["question_id"]): list(item["before_tags"]) for item in items},
+            question_ids=changed_ids,
+            add_tags=_normalize_tags(add_tags or []),
+            remove_tags=_normalize_tags(remove_tags or []),
+            merge_map=_clean_merge_map(merge_map),
+            reason=clean_reason,
+            create_catalog_tags=bool(create_catalog_tags),
+        )
+        self._operation_plan_service.save_preview(plan)
+        return {**preview, "operation_plan": plan.model_dump(mode="json")}
+
+    def current_operation_version(self, plan: OperationPlan) -> str:
+        """Rebuild the exact tag-version token from the persisted target set."""
+        snapshot = plan.version_snapshot
+        expected = snapshot.get("question_versions")
+        config = snapshot.get("tag_maintenance")
+        if not isinstance(expected, dict) or not isinstance(config, dict):
+            raise ValueError("invalid tag maintenance operation snapshot")
+        question_ids = list(expected)
+        return snapshot_version(
+            {
+                "question_versions": _load_tag_versions(self._db_path, question_ids),
+                "tag_maintenance": config,
+            }
+        )
+
+    def execute_operation(self, plan: OperationPlan) -> dict[str, Any]:
+        """Execute only the immutable inputs that were stored with the plan."""
+        if plan.action != "questions.tag_maintenance":
+            raise ValueError("unsupported operation action")
+        config = plan.version_snapshot.get("tag_maintenance")
+        if not isinstance(config, dict):
+            raise ValueError("invalid tag maintenance operation payload")
+        result = maintain_question_tags(
+            question_ids=_string_list(config.get("question_ids")),
+            add_tags=_string_list(config.get("add_tags")),
+            remove_tags=_string_list(config.get("remove_tags")),
+            merge_map=_clean_merge_map(config.get("merge_map")),
+            dry_run=False,
+            reason=str(config.get("reason") or ""),
+            create_catalog_tags=bool(config.get("create_catalog_tags", True)),
+            db_path=self._db_path,
+        )
+        if not result.get("ok"):
+            raise ValueError(str(result.get("error_info", {}).get("message") or "tag maintenance failed"))
+        return result
+
+    def confirm(self, operation_id: str):
+        return self._operation_plan_service.execute(
+            operation_id,
+            version_reader=self.current_operation_version,
+            executor=self.execute_operation,
+        )
 
 
 def diagnose_tag_maintenance(
@@ -197,11 +302,7 @@ def maintain_question_tags(
     path = Path(db_path) if db_path else default_db_path()
     additions = _normalize_tags(add_tags or [])
     removals = {_tag_key(tag) for tag in _normalize_tags(remove_tags or [])}
-    clean_merge_map = {
-        _clean_tag(canonical): _normalize_tags(aliases)
-        for canonical, aliases in (merge_map or {}).items()
-        if _clean_tag(canonical) and _normalize_tags(aliases)
-    }
+    clean_merge_map = _clean_merge_map(merge_map)
     if not additions and not removals and not clean_merge_map:
         return _error("INVALID_ARGUMENT", "至少需要 add_tags、remove_tags 或 merge_map 之一。")
     if not dry_run and not str(reason or "").strip():
@@ -229,11 +330,13 @@ def maintain_question_tags(
 
     metadata_result: dict[str, Any] | None = None
     catalog_result: dict[str, Any] | None = None
+    audit_batch_id: str | None = None
     if not dry_run and updates:
         metadata_result = MetadataManagementService(path).batch_update_question_metadata(
             updates,
             reason=str(reason),
         )
+        audit_batch_id = _record_tag_maintenance_audit(path, items, str(reason))
         if create_catalog_tags:
             catalog_result = _maintain_tag_catalog(
                 path,
@@ -251,10 +354,98 @@ def maintain_question_tags(
         "items": items,
         "metadata_result": metadata_result,
         "catalog_result": catalog_result,
+        "audit_batch_id": audit_batch_id,
         "requires_confirmation": dry_run and bool(updates),
         "message": "预览完成，未写入数据库。" if dry_run else "已维护题目标签并刷新检索索引。",
         "database_scope": "canonical" if not dry_run else "canonical_preview",
     }
+
+
+def _load_tag_versions(path: Path, question_ids: list[str]) -> dict[str, list[str]]:
+    """Read only the persisted tag lists used as optimistic-lock versions."""
+    if not question_ids:
+        return {}
+    placeholders = ",".join("?" for _ in question_ids)
+    with connect_db(path, writable=False) as conn:
+        rows = conn.execute(
+            f"SELECT question_id, tags_json FROM question_text_index WHERE question_id IN ({placeholders})",
+            question_ids,
+        ).fetchall()
+    versions = {str(row["question_id"]): _parse_tags(row["tags_json"]) for row in rows}
+    return {question_id: versions.get(question_id, []) for question_id in question_ids}
+
+
+def _record_tag_maintenance_audit(path: Path, items: list[dict[str, Any]], reason: str) -> str | None:
+    """Append reversible tag diffs to the established canonical audit ledger."""
+    changed = [item for item in items if item.get("status") == "changed"]
+    if not changed:
+        return None
+    batch_id = f"CHG-{uuid.uuid4().hex[:12]}"
+    clean_reason = " ".join(str(reason or "").split())[:300] or None
+    with connect_db(path, writable=True) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS change_batches (
+                batch_id TEXT PRIMARY KEY,
+                change_type TEXT NOT NULL,
+                reason TEXT,
+                source TEXT NOT NULL DEFAULT 'physics_vault_mcp',
+                status TEXT NOT NULL DEFAULT 'applied',
+                target_count INTEGER NOT NULL DEFAULT 0,
+                changed_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                applied_at TEXT,
+                rolled_back_at TEXT,
+                rollback_reason TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS change_items (
+                item_id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                field_name TEXT NOT NULL,
+                before_value_json TEXT,
+                after_value_json TEXT,
+                status TEXT NOT NULL DEFAULT 'changed',
+                risk_level TEXT NOT NULL DEFAULT 'medium',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(batch_id) REFERENCES change_batches(batch_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO change_batches (
+                batch_id, change_type, reason, source, status,
+                target_count, changed_count, applied_at
+            ) VALUES (?, 'tag_normalization', ?, 'tag_maintenance_operation',
+                      'applied', ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (batch_id, clean_reason, len(changed), len(changed)),
+        )
+        for item in changed:
+            conn.execute(
+                """
+                INSERT INTO change_items (
+                    item_id, batch_id, entity_type, entity_id, field_name,
+                    before_value_json, after_value_json, status, risk_level
+                ) VALUES (?, ?, 'question', ?, 'question_text_index.tags_json',
+                          ?, ?, 'changed', 'medium')
+                """,
+                (
+                    f"CHI-{uuid.uuid4().hex[:12]}",
+                    batch_id,
+                    str(item["question_id"]),
+                    json.dumps(item["before_tags"], ensure_ascii=False),
+                    json.dumps(item["after_tags"], ensure_ascii=False),
+                ),
+            )
+        conn.commit()
+    return batch_id
 
 
 def _load_tag_inventory(path: Path, *, query: str | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -412,6 +603,19 @@ def _clean_question_ids(question_ids: list[str], *, max_count: int) -> list[str]
     if len(clean) > max_count:
         raise ValueError(f"一次最多处理 {max_count} 道题。")
     return clean
+
+
+def _string_list(value: Any) -> list[str]:
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _clean_merge_map(value: Any) -> dict[str, list[str]]:
+    raw_map = value if isinstance(value, dict) else {}
+    return {
+        _clean_tag(canonical): _normalize_tags(aliases)
+        for canonical, aliases in raw_map.items()
+        if _clean_tag(canonical) and _normalize_tags(aliases)
+    }
 
 
 def _parse_tags(raw: Any) -> list[str]:

@@ -52,6 +52,7 @@ EXPECTED_APPLICATION_ROUTER_MANIFEST = (
     "system_status",
     "mistake",
     "metadata_batch",
+    "tag_maintenance",
     "paper_drafts",
     "change_audit",
 )
