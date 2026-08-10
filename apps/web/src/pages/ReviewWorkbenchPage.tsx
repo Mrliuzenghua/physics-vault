@@ -19,23 +19,25 @@ import {
 import {
   batchGenerateAnalysis,
   completeImportDraftMetadata,
-  deleteReviewDraft,
   deleteReviewTask,
   fetchBatchImages,
   fetchImportTask,
-  fetchReviewDraft,
-  fetchReviewDraftVersions,
   fetchReviewTasks,
   fastCleanReviewLatex,
   generateSingleAnalysis,
-  restoreReviewDraftVersion,
-  ReviewDraftConflictError,
-  saveReviewDraft,
   saveReviewedKnowledge,
   saveReviewedQuestions,
   uploadBatchImage,
 } from '../services/api';
 import { requestResponse } from '../services/apiClient';
+import {
+  deleteReviewDraft,
+  fetchReviewDraft,
+  fetchReviewDraftVersions,
+  restoreReviewDraftVersion,
+  ReviewDraftConflictError,
+  saveReviewDraft,
+} from '../services/reviewDraftApi';
 import {
   clearReviewCache,
   mediaAssetsFromDrafts,
