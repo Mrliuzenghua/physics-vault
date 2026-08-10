@@ -7,8 +7,6 @@ import { analyzeQuestionQuality, findDuplicateQuestionIds, type QuestionQualityC
 import { normalizeShortInlineDisplayMath } from '../utils/mathText';
 import {
   confirmImportBatch,
-} from '../services/api';
-import {
   createImportBatch,
   extractBatchImages,
   fetchImportBatchOverview,

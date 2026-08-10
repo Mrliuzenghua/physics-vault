@@ -1,12 +1,21 @@
 import type {
   AiCleanBatchResponse,
+  AiParseDocumentRequest,
+  AiParseDocumentResponse,
   AiRefineBatchResponse,
   AiStructureBatchResponse,
+  CleanDocumentRequest,
+  CleanDocumentResponse,
+  ConvertDocumentRequest,
+  ConvertDocumentResponse,
   ExtractBatchImagesResponse,
   ImportBatchResponse,
   ImportPipelineTaskResponse,
+  ImportMediaAsset,
   PandocBatchResponse,
   RecognizeBatchResponse,
+  ParseStructuredQuestionsRequest,
+  ParseStructuredQuestionsResponse,
   UploadImportFileResponse,
 } from '../types';
 import { request, requestForm } from './apiClient.ts';
@@ -104,4 +113,40 @@ export async function fetchImportBatchOverview(limit = 80): Promise<PersistedImp
 
 export async function retrySavedImportBatch(batchId: string): Promise<RecognizeBatchResponse> {
   return request(`/api/import/batches/${encodeURIComponent(batchId)}/retry`, { method: 'POST' });
+}
+
+/** Confirm user-edited questions and return the review workbench task. */
+export async function confirmImportBatch(
+  batchId: string,
+  questions: Record<string, unknown>[],
+  inputVersion?: number,
+  mediaAssets: ImportMediaAsset[] = [],
+): Promise<{ task_id: string; batch_id: string; question_count: number }> {
+  return request(`/api/import/batches/${encodeURIComponent(batchId)}/confirm`, {
+    method: 'POST', body: JSON.stringify({ questions, input_version: inputVersion, media_assets: mediaAssets }),
+  });
+}
+
+export async function convertDocument(body: ConvertDocumentRequest): Promise<ConvertDocumentResponse> {
+  return request('/api/import/convert', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function cleanDocument(body: CleanDocumentRequest): Promise<CleanDocumentResponse> {
+  return request('/api/import/clean', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function parseStructuredQuestions(body: ParseStructuredQuestionsRequest): Promise<ParseStructuredQuestionsResponse> {
+  return request('/api/import/parse', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function importQuestion(body: {
+  classification: Record<string, unknown>; source: Record<string, unknown>; content: Record<string, unknown>;
+  images?: Array<Record<string, unknown>>; knowledge_points?: Array<Record<string, unknown>>;
+  metadata?: Record<string, unknown>; reviewer?: string; note?: string;
+}): Promise<{ question_id: string; status: string; knowledge_points_inserted: number; images_linked: number; skipped_knowledge_points: string[]; review_id: string }> {
+  return request('/questions/import', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function aiParseDocument(body: AiParseDocumentRequest): Promise<AiParseDocumentResponse> {
+  return request('/api/import/ai-parse-document', { method: 'POST', body: JSON.stringify(body) });
 }

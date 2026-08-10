@@ -16,7 +16,6 @@
   SystemSettings,
   Template,
 } from '../types';
-import { request } from './apiClient';
 
 export {
   DEFAULT_AI_CONFIG,
@@ -172,11 +171,17 @@ export {
   uploadBatchImage,
 } from './reviewApi';
 export {
+  aiParseDocument,
+  cleanDocument,
+  confirmImportBatch,
+  convertDocument,
   createImportBatch,
   extractBatchImages,
   fetchImportBatchOverview,
   fetchImportBatchStatus,
   fetchImportTask,
+  importQuestion,
+  parseStructuredQuestions,
   retrySavedImportBatch,
   runImportBatchAiClean,
   runImportBatchAiRefine,
@@ -221,74 +226,6 @@ export {
   healthCheck,
 } from './catalogApi';
 export type { DatabaseStatus } from './catalogApi';
-
-/** Confirm user-edited questions 鈫?returns task_id for the review workbench. */
-export async function confirmImportBatch(
-  batchId: string,
-  questions: Record<string, unknown>[],
-  inputVersion?: number,
-  mediaAssets: import('../types').ImportMediaAsset[] = [],
-): Promise<{ task_id: string; batch_id: string; question_count: number }> {
-  return request(`/api/import/batches/${encodeURIComponent(batchId)}/confirm`, {
-    method: 'POST',
-    body: JSON.stringify({ questions, input_version: inputVersion, media_assets: mediaAssets }),
-  });
-}
-
-export async function convertDocument(body: ConvertDocumentRequest): Promise<ConvertDocumentResponse> {
-  return request('/api/import/convert', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-}
-
-export async function cleanDocument(body: CleanDocumentRequest): Promise<CleanDocumentResponse> {
-  return request('/api/import/clean', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-}
-
-export async function parseStructuredQuestions(
-  body: ParseStructuredQuestionsRequest,
-): Promise<ParseStructuredQuestionsResponse> {
-  return request('/api/import/parse', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-}
-
-export async function importQuestion(body: {
-  classification: Record<string, unknown>;
-  source: Record<string, unknown>;
-  content: Record<string, unknown>;
-  images?: Array<Record<string, unknown>>;
-  knowledge_points?: Array<Record<string, unknown>>;
-  metadata?: Record<string, unknown>;
-  reviewer?: string;
-  note?: string;
-}): Promise<{
-  question_id: string;
-  status: string;
-  knowledge_points_inserted: number;
-  images_linked: number;
-  skipped_knowledge_points: string[];
-  review_id: string;
-}> {
-  return request('/questions/import', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-}
-
-export async function aiParseDocument(
-  body: import('../types').AiParseDocumentRequest,
-): Promise<import('../types').AiParseDocumentResponse> {
-  return request('/api/import/ai-parse-document', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-}
 
 export type {
   AiBatchTask,
