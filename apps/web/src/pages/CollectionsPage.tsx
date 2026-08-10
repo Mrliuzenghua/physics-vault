@@ -5,7 +5,7 @@ import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Input } from '../components/ui/Input';
 import { Select } from '../components/ui/Select';
-import { createCollection, fetchCollectionTree } from '../services/api';
+import { createCollection, fetchCollectionTree } from '../services/collectionsApi';
 import type { CollectionNode } from '../types';
 
 type CollectionType = 'directory' | 'topic' | 'subtopic';

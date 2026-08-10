@@ -38,6 +38,7 @@
   UploadImportFileResponse,
 } from '../types';
 import { ApiError, request, requestForm, requestResponse } from './apiClient';
+import { fetchAssetList } from './assetsApi';
 
 export {
   DEFAULT_AI_CONFIG,
@@ -114,6 +115,52 @@ export {
   updateQuestion,
   updateQuestionKnowledgePoints,
 } from './questionApi';
+export {
+  addCachedQuestionImage,
+  addQuestionImage,
+  cleanupImportCache,
+  cleanupUnreferencedAssets,
+  cleanupUnusedCache,
+  deleteQuestionImage,
+  deleteSingleAsset,
+  fetchAssetCleanupPreview,
+  fetchAssetList,
+  fetchAssetStorageAnalysis,
+  fetchAvailableImages,
+  fetchImportCacheCleanupPreview,
+  fetchQuestionImages,
+  fetchUnusedCacheCleanupPreview,
+  reorderQuestionImages,
+  replaceQuestionImage,
+  updateQuestionImage,
+  validateQuestionImages,
+} from './assetsApi';
+export {
+  assignFavorites,
+  batchMarkMistake,
+  batchStarFavorites,
+  batchUnmarkMistake,
+  createFavoriteGroup,
+  deleteFavoriteGroup,
+  fetchFavoriteGroups,
+  fetchFavoriteIds,
+  fetchFavoriteItem,
+  fetchFavoriteItems,
+  fetchMistakeCount,
+  fetchMistakeIds,
+  markMistake,
+  removeFromFavorites,
+  unmarkMistake,
+  updateFavoriteGroup,
+} from './favoritesApi';
+export {
+  batchMoveQuestions,
+  createCollection,
+  fetchCollectionsTree,
+  fetchCollectionTree,
+  fetchQuestionCollections,
+  removeFromCollection,
+} from './collectionsApi';
 
 export interface DatabaseStatus {
   questions_count: number;
@@ -799,254 +846,6 @@ export async function restoreReviewDraftVersion(
     method: 'POST',
     body: JSON.stringify({ version, base_version: baseVersion }),
   });
-}
-
-// Assets manager
-
-export async function fetchAssetList(
-  options: {
-    filterMode?: string;
-    keyword?: string;
-    source?: string;
-    batchId?: string;
-    sortBy?: string;
-    sortOrder?: string;
-    page?: number;
-    pageSize?: number;
-    refresh?: boolean;
-  } = {},
-): Promise<import('../types').AssetListResponse> {
-  const params = new URLSearchParams({
-    filter_mode: options.filterMode ?? 'all',
-    keyword: options.keyword ?? '',
-    source: options.source ?? 'all',
-    batch_id: options.batchId ?? '',
-    sort_by: options.sortBy ?? 'modified_at',
-    sort_order: options.sortOrder ?? 'desc',
-    page: String(options.page ?? 1),
-    page_size: String(options.pageSize ?? 60),
-    refresh: String(options.refresh ?? false),
-  });
-  return request(`/api/assets?${params}`);
-}
-
-export async function fetchAssetCleanupPreview(): Promise<import('../types').CleanupPreviewResponse> {
-  return request('/api/assets/cleanup-preview');
-}
-
-export async function fetchImportCacheCleanupPreview(
-  batchId: string = '',
-): Promise<import('../types').CacheCleanupPreviewResponse> {
-  const params = new URLSearchParams({ batch_id: batchId });
-  return request(`/api/assets/cache-cleanup-preview?${params}`);
-}
-
-export async function cleanupImportCache(batchId: string = ''): Promise<import('../types').CleanupResponse> {
-  return request('/api/assets/cleanup-import-cache', {
-    method: 'POST',
-    body: JSON.stringify({ batch_id: batchId || null }),
-  });
-}
-
-export async function fetchUnusedCacheCleanupPreview(
-  batchId: string = '',
-): Promise<import('../types').CacheCleanupPreviewResponse> {
-  const params = new URLSearchParams({ batch_id: batchId });
-  return request(`/api/assets/unused-cache-preview?${params}`);
-}
-
-export async function cleanupUnusedCache(batchId: string = ''): Promise<import('../types').CleanupResponse> {
-  return request('/api/assets/cleanup-unused-cache', {
-    method: 'POST',
-    body: JSON.stringify({ batch_id: batchId || null }),
-  });
-}
-
-export async function fetchAssetStorageAnalysis(
-  source: string = 'all',
-  refresh: boolean = false,
-): Promise<import('../types').StorageAnalysisResponse> {
-  const params = new URLSearchParams({ source, refresh: String(refresh) });
-  return request(`/api/assets/storage-analysis?${params}`);
-}
-
-export async function cleanupUnreferencedAssets(): Promise<import('../types').CleanupResponse> {
-  return request('/api/assets/cleanup-unreferenced', { method: 'POST' });
-}
-
-export async function deleteSingleAsset(filename: string): Promise<import('../types').DeleteAssetResponse> {
-  return request(`/api/assets/${encodeURIComponent(filename)}`, { method: 'DELETE' });
-}
-
-// Image management
-
-export async function fetchQuestionImages(id: string): Promise<import('../types').ImageListResponse> {
-  return request(`/api/questions/${encodeURIComponent(id)}/images`);
-}
-
-export async function addQuestionImage(id: string, body: {
-  asset_id: string; role?: string; sort_order?: number; placeholder_key?: string; is_primary?: boolean;
-}): Promise<import('../types').QuestionImageDetail> {
-  return request(`/api/questions/${encodeURIComponent(id)}/images`, {
-    method: 'POST', body: JSON.stringify(body),
-  });
-}
-
-export async function addCachedQuestionImage(id: string, body: {
-  relative_path: string; role?: string; sort_order?: number; is_primary?: boolean;
-}): Promise<import('../types').QuestionImageDetail> {
-  return request(`/api/questions/${encodeURIComponent(id)}/images/from-cache`, {
-    method: 'POST', body: JSON.stringify(body),
-  });
-}
-
-export async function replaceQuestionImage(id: string, assetId: string, body: {
-  old_asset_id: string; new_asset_id: string;
-}): Promise<import('../types').QuestionImageDetail> {
-  return request(`/api/questions/${encodeURIComponent(id)}/images/${encodeURIComponent(assetId)}/replace`, {
-    method: 'PUT', body: JSON.stringify(body),
-  });
-}
-
-export async function updateQuestionImage(id: string, assetId: string, body: Record<string, unknown>): Promise<{ updated: boolean }> {
-  return request(`/api/questions/${encodeURIComponent(id)}/images/${encodeURIComponent(assetId)}`, {
-    method: 'PATCH', body: JSON.stringify(body),
-  });
-}
-
-export async function deleteQuestionImage(id: string, assetId: string): Promise<void> {
-  await request(`/api/questions/${encodeURIComponent(id)}/images/${encodeURIComponent(assetId)}`, { method: 'DELETE' });
-}
-
-export async function reorderQuestionImages(id: string, assetIds: string[]): Promise<void> {
-  await request(`/api/questions/${encodeURIComponent(id)}/images/reorder`, {
-    method: 'POST', body: JSON.stringify({ asset_ids: assetIds }),
-  });
-}
-
-export async function validateQuestionImages(id: string): Promise<import('../types').ValidationResponse> {
-  return request(`/api/questions/${encodeURIComponent(id)}/images/validate`);
-}
-
-export async function fetchAvailableImages(keyword?: string): Promise<{ asset_id: string; filename: string; file_path: string; mime_type: string }[]> {
-  const params = keyword ? `?keyword=${encodeURIComponent(keyword)}` : '';
-  return request(`/api/questions/images/available${params}`);
-}
-
-// Favorites
-
-export async function fetchFavoriteGroups(): Promise<import('../types').FavoriteGroupItem[]> {
-  return request('/api/favorites/groups');
-}
-
-export async function createFavoriteGroup(name: string): Promise<import('../types').FavoriteGroupItem> {
-  return request('/api/favorites/groups', { method: 'POST', body: JSON.stringify({ name }) });
-}
-
-export async function updateFavoriteGroup(id: string, name: string): Promise<void> {
-  await request(`/api/favorites/groups/${encodeURIComponent(id)}`, {
-    method: 'PUT', body: JSON.stringify({ name }),
-  });
-}
-
-export async function deleteFavoriteGroup(id: string): Promise<void> {
-  await request(`/api/favorites/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
-}
-
-export async function assignFavorites(
-  body: import('../types').FavoriteAssignRequest,
-): Promise<import('../types').BatchFavoriteResponse> {
-  return request('/api/favorites/assign', { method: 'POST', body: JSON.stringify(body) });
-}
-
-export async function batchStarFavorites(
-  body: { question_ids: string[]; star_rating: number },
-): Promise<import('../types').BatchFavoriteResponse> {
-  return request('/api/favorites/batch-star', { method: 'POST', body: JSON.stringify(body) });
-}
-
-// Mistakes
-
-export async function markMistake(questionId: string): Promise<{ question_id: string; status: string; message: string }> {
-  return request(`/api/questions/${questionId}/mistake/mark`, { method: 'POST' });
-}
-
-export async function unmarkMistake(questionId: string): Promise<{ question_id: string; status: string; message: string }> {
-  return request(`/api/questions/${questionId}/mistake/unmark`, { method: 'POST' });
-}
-
-export async function batchMarkMistake(questionIds: string[]): Promise<{ total: number; updated: number; skipped: number; failed: number }> {
-  return request('/api/questions/mistake/batch-mark', { method: 'POST', body: JSON.stringify({ question_ids: questionIds }) });
-}
-
-export async function batchUnmarkMistake(questionIds: string[]): Promise<{ total: number; updated: number; skipped: number; failed: number }> {
-  return request('/api/questions/mistake/batch-unmark', { method: 'POST', body: JSON.stringify({ question_ids: questionIds }) });
-}
-
-export async function fetchMistakeIds(): Promise<string[]> {
-  return request('/api/questions/mistakes');
-}
-
-export async function fetchMistakeCount(): Promise<{ count: number }> {
-  return request('/api/questions/mistakes/count');
-}
-
-export async function removeFromFavorites(questionIds: string[]): Promise<{ removed: number }> {
-  return request('/api/favorites/remove', { method: 'POST', body: JSON.stringify(questionIds) });
-}
-
-export async function fetchFavoriteItem(questionId: string): Promise<import('../types').FavoriteItemView | null> {
-  return request(`/api/favorites/items/${encodeURIComponent(questionId)}`);
-}
-
-export async function fetchFavoriteItems(
-  groupId?: string, minStar?: number, limit?: number, offset?: number,
-): Promise<import('../types').FavoriteItemView[]> {
-  const params = new URLSearchParams();
-  if (groupId) params.set('group_id', groupId);
-  if (minStar) params.set('min_star', String(minStar));
-  if (limit) params.set('limit', String(limit));
-  if (offset) params.set('offset', String(offset));
-  const qs = params.toString();
-  return request(`/api/favorites/items${qs ? `?${qs}` : ''}`);
-}
-
-export async function fetchFavoriteIds(): Promise<string[]> {
-  return request('/api/favorites/ids');
-}
-
-// Collections
-
-export async function fetchCollectionTree(): Promise<import('../types').CollectionNode[]> {
-  return request('/api/collections/tree');
-}
-
-export async function fetchCollectionsTree(): Promise<import('../types').Collection[]> {
-  return request('/api/collections/tree');
-}
-
-export async function createCollection(
-  body: { name: string; parent_id?: string | null; type?: string },
-): Promise<{ id: string; name: string; parent_id?: string | null; type?: string }> {
-  return request('/api/collections', { method: 'POST', body: JSON.stringify(body) });
-}
-
-export async function batchMoveQuestions(
-  body: import('../types').BatchMoveRequest,
-): Promise<import('../types').BatchMoveResponse> {
-  return request('/api/collections/batch-move', { method: 'POST', body: JSON.stringify(body) });
-}
-
-export async function removeFromCollection(
-  body: { question_ids: string[]; collection_id: string },
-): Promise<{ removed: number }> {
-  return request('/api/collections/remove-questions', { method: 'POST', body: JSON.stringify(body) });
-}
-
-export async function fetchQuestionCollections(
-  questionId: string,
-): Promise<import('../types').CollectionNode[]> {
-  return request(`/api/collections/questions/${encodeURIComponent(questionId)}`);
 }
 
 // Batch analysis

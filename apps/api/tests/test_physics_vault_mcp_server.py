@@ -180,6 +180,19 @@ def test_authoring_profile_and_public_legacy_signatures_are_compatible(monkeypat
         )
 
 
+def test_operations_profile_and_public_legacy_signatures_are_compatible(monkeypatch) -> None:
+    monkeypatch.setenv("PHYSICS_MCP_PROFILE", "operations")
+    module = _load_mcp_server()
+    operation_names = tuple(module._MCP104_TOOL_NAMES)
+
+    assert set(operation_names) == module.profile_tool_names("operations")
+    assert {tool.__name__ for tool in module.server.tools} == set(operation_names)
+    for name in operation_names:
+        assert inspect.signature(getattr(module, name)) == inspect.signature(
+            getattr(module, f"_legacy_{name}")
+        )
+
+
 def test_mcp_format_diff_reports_changed_sections_and_template_ids() -> None:
     module = _load_mcp_server()
 

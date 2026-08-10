@@ -72,6 +72,9 @@ class OperationPlanService:
             return _result(claimed, idempotent=claimed.status == "completed")
         try:
             return _result(self._repository.complete(operation_id, executor(claimed.plan), now=self._now()))
+        except OperationPlanVersionConflict as exc:
+            self._repository.fail(operation_id, str(exc), now=self._now())
+            raise
         except Exception as exc:
             return _result(self._repository.fail(operation_id, str(exc), now=self._now()))
 
@@ -122,3 +125,60 @@ def build_asset_cleanup_plan(
         reversible=False,
     )
     return plan
+
+
+def build_review_draft_plan(
+    *,
+    action: str,
+    task_id: str,
+    current_version: int,
+    restore_version: int | None = None,
+) -> OperationPlan:
+    """Describe a version-bound review-draft delete or restore preview.
+
+    The target and expected base version are part of the persisted plan rather
+    than confirmation input.  This keeps the confirmation endpoint incapable
+    of widening or redirecting the planned draft mutation.
+    """
+    targets: list[dict[str, str]] = [
+        {"type": "review_draft", "id": task_id, "label": task_id},
+        {
+            "type": "review_draft_base_version",
+            "id": str(current_version),
+            "label": f"base version {current_version}",
+        },
+    ]
+    if action == "review_drafts.restore":
+        if restore_version is None:
+            raise ValueError("restore_version is required for review draft restoration")
+        targets.append(
+            {
+                "type": "review_draft_restore_version",
+                "id": str(restore_version),
+                "label": f"restore version {restore_version}",
+            }
+        )
+        summary = f"Restore review draft {task_id} version {restore_version} as a new version."
+        warnings = ["The current draft must still match the previewed version before restoration."]
+        reversible = True
+    elif action == "review_drafts.delete":
+        summary = f"Delete review draft {task_id} and its retained history."
+        warnings = ["Deleting a review draft also removes its retained version history."]
+        reversible = False
+    else:
+        raise ValueError(f"unsupported review draft action: {action}")
+
+    return build_operation_plan(
+        action=action,
+        targets=targets,
+        summary=summary,
+        warnings=warnings,
+        expected_version=str(current_version),
+        version_snapshot={
+            "task_id": task_id,
+            "current_version": current_version,
+            "restore_version": restore_version,
+            "action": action,
+        },
+        reversible=reversible,
+    )

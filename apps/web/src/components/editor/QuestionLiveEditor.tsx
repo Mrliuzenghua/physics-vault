@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { FileText, WandSparkles } from 'lucide-react';
 import type { Option, Question, QuestionImageDetail } from '../../types';
-import { addCachedQuestionImage, completeQuestionAnalysis, refineQuestionFormat } from '../../services/api';
+import { completeQuestionAnalysis, refineQuestionFormat } from '../../services/api';
+import { addCachedQuestionImage } from '../../services/assetsApi';
 import ImportStemRenderer from '../import/ImportStemRenderer';
 import LatexRenderer from '../render/LatexRenderer';
 import ImageManager from '../shared/ImageManager';

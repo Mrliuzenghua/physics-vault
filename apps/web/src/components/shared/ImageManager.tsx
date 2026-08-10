@@ -11,7 +11,7 @@ import {
   reorderQuestionImages,
   updateQuestionImage,
   validateQuestionImages,
-} from '../../services/api';
+} from '../../services/assetsApi';
 import type { QuestionImageDetail, ValidationResponse } from '../../types';
 import { imageFileUrl } from '../../utils/imageUrl';
 

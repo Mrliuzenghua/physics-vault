@@ -44,9 +44,11 @@ from packages.mcp_contracts.src.operation_plan import build_operation_plan  # no
 from packages.mcp_contracts.src.domains import (  # noqa: E402
     AuthoringDomain,
     ImportReviewDomain,
+    OperationsDomain,
     SearchKnowledgeDomain,
     register_authoring_tools,
     register_import_review_tools,
+    register_operations_tools,
     register_search_knowledge_tools,
 )
 from packages.mcp_contracts.src.tool_registry import default_tool_registry, profile_tool_names  # noqa: E402
@@ -6289,8 +6291,7 @@ def _legacy_submit_ai_generated_review(
     }
 
 
-@server.tool()
-def submit_import_job(
+def _legacy_submit_import_job(
     batch_id: str,
     source: str = "physics_vault_mcp",
     session_id: str | None = None,
@@ -6318,8 +6319,7 @@ def submit_import_job(
     }
 
 
-@server.tool()
-def submit_ai_clean_job(
+def _legacy_submit_ai_clean_job(
     batch_id: str,
     source: str = "physics_vault_mcp",
     session_id: str | None = None,
@@ -6347,8 +6347,7 @@ def submit_ai_clean_job(
     }
 
 
-@server.tool()
-def submit_word_export_job(
+def _legacy_submit_word_export_job(
     lesson_package: dict[str, Any],
     include_answers: bool | None = None,
     include_analysis: bool | None = None,
@@ -6375,8 +6374,7 @@ def submit_word_export_job(
     )
 
 
-@server.tool()
-def submit_pptx_export_job(
+def _legacy_submit_pptx_export_job(
     lesson_package: dict[str, Any],
     include_answers: bool = False,
     include_analysis: bool = False,
@@ -6397,8 +6395,7 @@ def submit_pptx_export_job(
     )
 
 
-@server.tool()
-def get_job_status(task_id: str) -> dict[str, Any]:
+def _legacy_get_job_status(task_id: str) -> dict[str, Any]:
     """查询单个后台任务状态。只读。"""
     tid = str(task_id or "").strip()
     if not tid:
@@ -6410,8 +6407,7 @@ def get_job_status(task_id: str) -> dict[str, Any]:
     return {"ok": True, "job": _compact_job(task)}
 
 
-@server.tool()
-def list_jobs(
+def _legacy_list_jobs(
     statuses: list[str] | None = None,
     task_types: list[str] | None = None,
     created_from: str | None = None,
@@ -6442,8 +6438,7 @@ def list_jobs(
     }
 
 
-@server.tool()
-def retry_job(
+def _legacy_retry_job(
     task_id: str,
     confirmed: bool = False,
     source: str = "physics_vault_mcp",
@@ -6485,8 +6480,7 @@ def retry_job(
     }
 
 
-@server.tool()
-def cancel_job(
+def _legacy_cancel_job(
     task_id: str,
     confirmed: bool = False,
     source: str = "physics_vault_mcp",
@@ -7163,6 +7157,21 @@ _MCP103_TOOL_NAMES = register_authoring_tools(
     server.tool,
     _TOOL_REGISTRY,
     {name: getattr(_AUTHORING_DOMAIN, name) for name in _MCP103_LEGACY_HANDLERS},
+)
+
+
+_MCP104_LEGACY_HANDLERS = {
+    spec.name: globals()[f"_legacy_{spec.name}"]
+    for spec in _TOOL_REGISTRY.discover(domain="operations")
+}
+_OPERATIONS_DOMAIN = OperationsDomain(_MCP104_LEGACY_HANDLERS)
+for _mcp104_tool_name in _MCP104_LEGACY_HANDLERS:
+    globals()[_mcp104_tool_name] = getattr(_OPERATIONS_DOMAIN, _mcp104_tool_name)
+
+_MCP104_TOOL_NAMES = register_operations_tools(
+    server.tool,
+    _TOOL_REGISTRY,
+    {name: getattr(_OPERATIONS_DOMAIN, name) for name in _MCP104_LEGACY_HANDLERS},
 )
 
 

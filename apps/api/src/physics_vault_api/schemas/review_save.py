@@ -4,6 +4,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ..bootstrap import configure_workspace_imports
+
+configure_workspace_imports()
+
+from mcp_contracts.src.operation_plan import OperationPlan
+
 
 class ReviewedQuestionPayload(BaseModel):
     """A single question submitted from the review workbench."""
@@ -109,6 +115,34 @@ class SaveReviewDraftRequest(BaseModel):
 class RestoreReviewDraftRequest(BaseModel):
     base_version: int = Field(..., ge=0)
     version: int = Field(..., ge=1)
+
+
+class RestoreReviewDraftPreviewRequest(BaseModel):
+    """The historical version is selected during preview, never confirmation."""
+
+    version: int = Field(..., ge=1)
+
+
+class ConfirmReviewDraftOperationRequest(BaseModel):
+    operation_id: str = Field(..., min_length=1)
+
+
+class ReviewDraftOperationPreviewResponse(BaseModel):
+    task_id: str
+    action: str
+    draft_version: int
+    summary: str
+    expires_at: str
+    reversible: bool
+    operation_plan: OperationPlan
+
+
+class ReviewDraftOperationExecutionResponse(BaseModel):
+    operation_id: str
+    status: str
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    idempotent: bool = False
 
 
 class ReviewDraftResponse(BaseModel):

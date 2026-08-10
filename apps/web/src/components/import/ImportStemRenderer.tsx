@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { SyntheticEvent } from 'react';
 import type { Figure } from '../../types';
-import { updateQuestionImage } from '../../services/api';
+import { updateQuestionImage } from '../../services/assetsApi';
 import { imageFileUrl, imageThumbnailUrl } from '../../utils/imageUrl';
 import LatexRenderer from '../render/LatexRenderer';
 

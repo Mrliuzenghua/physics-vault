@@ -6,6 +6,10 @@ from ..schemas.contracts import ObjectMapResponse
 from ..repositories.review_drafts import ReviewDraftConflictError, ReviewDraftSnapshot, SQLiteReviewDraftRepository
 
 from ..schemas.review_save import (
+    ConfirmReviewDraftOperationRequest,
+    ReviewDraftOperationExecutionResponse,
+    ReviewDraftOperationPreviewResponse,
+    RestoreReviewDraftPreviewRequest,
     SaveReviewedKnowledgeRequest,
     SaveReviewedKnowledgeResponse,
     RestoreReviewDraftRequest,
@@ -16,17 +20,27 @@ from ..schemas.review_save import (
     SaveReviewedQuestionsRequest,
     SaveReviewedQuestionsResponse,
 )
+from ..repositories.operation_plans import OperationPlanRepository
+from ..services.operation_plans import (
+    OperationPlanError,
+    OperationPlanService,
+    OperationPlanVersionConflict,
+    build_review_draft_plan,
+)
 from ..services.review_save import ReviewSaveService
 
 
 def build_review_save_router(
     service: ReviewSaveService | None = None,
     draft_repository: SQLiteReviewDraftRepository | None = None,
+    operation_plan_service: OperationPlanService | None = None,
 ) -> APIRouter:
     if service is None:
         service = ReviewSaveService()
     if draft_repository is None:
         draft_repository = SQLiteReviewDraftRepository()
+    if operation_plan_service is None:
+        operation_plan_service = OperationPlanService(OperationPlanRepository())
 
     router = APIRouter(prefix="/api/review", tags=["review-save"])
 
@@ -64,6 +78,42 @@ def build_review_save_router(
             items=[draft_response(item) for item in draft_repository.list_versions(task_id, limit=limit)]
         )
 
+    @router.post(
+        "/drafts/{task_id}/delete-preview",
+        response_model=ReviewDraftOperationPreviewResponse,
+        summary="Preview review draft deletion",
+    )
+    async def preview_delete_review_draft(task_id: str) -> ReviewDraftOperationPreviewResponse:
+        snapshot = _require_draft(draft_repository, task_id)
+        plan = build_review_draft_plan(
+            action="review_drafts.delete",
+            task_id=task_id,
+            current_version=snapshot.version,
+        )
+        operation_plan_service.save_preview(plan)
+        return _preview_response(plan, snapshot.version)
+
+    @router.post(
+        "/drafts/{task_id}/restore-preview",
+        response_model=ReviewDraftOperationPreviewResponse,
+        summary="Preview review draft version restoration",
+    )
+    async def preview_restore_review_draft(
+        task_id: str,
+        payload: RestoreReviewDraftPreviewRequest,
+    ) -> ReviewDraftOperationPreviewResponse:
+        snapshot = _require_draft(draft_repository, task_id)
+        if not any(item.version == payload.version for item in draft_repository.list_versions(task_id)):
+            raise HTTPException(status_code=404, detail="找不到指定草稿版本")
+        plan = build_review_draft_plan(
+            action="review_drafts.restore",
+            task_id=task_id,
+            current_version=snapshot.version,
+            restore_version=payload.version,
+        )
+        operation_plan_service.save_preview(plan)
+        return _preview_response(plan, snapshot.version)
+
     @router.delete("/drafts/{task_id}", response_model=ObjectMapResponse)
     async def delete_review_draft(task_id: str) -> dict[str, bool | str]:
         draft_repository.delete(task_id)
@@ -78,6 +128,38 @@ def build_review_save_router(
         if snapshot is None:
             raise HTTPException(status_code=404, detail="找不到指定草稿版本")
         return draft_response(snapshot)
+
+    @router.post(
+        "/drafts/confirm-operation",
+        response_model=ReviewDraftOperationExecutionResponse,
+        summary="Confirm a persisted review draft operation",
+    )
+    async def confirm_review_draft_operation(
+        payload: ConfirmReviewDraftOperationRequest,
+    ) -> ReviewDraftOperationExecutionResponse:
+        try:
+            result = operation_plan_service.execute(
+                payload.operation_id,
+                version_reader=lambda plan: _current_review_draft_version(draft_repository, plan),
+                executor=lambda plan: _run_review_draft_plan(draft_repository, plan),
+            )
+            return ReviewDraftOperationExecutionResponse(
+                operation_id=result.operation_id,
+                status=result.status,
+                result=result.result,
+                error=result.error,
+                idempotent=result.idempotent,
+            )
+        except OperationPlanVersionConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "OPERATION_PLAN_VERSION_CONFLICT", "message": str(exc)},
+            ) from exc
+        except OperationPlanError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "OPERATION_PLAN_NOT_FOUND", "message": str(exc)},
+            ) from exc
 
     @router.post(
         "/save",
@@ -123,3 +205,82 @@ def build_review_save_router(
             ) from exc
 
     return router
+
+
+def _require_draft(
+    draft_repository: SQLiteReviewDraftRepository,
+    task_id: str,
+) -> ReviewDraftSnapshot:
+    snapshot = draft_repository.get(task_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="找不到审核草稿")
+    return snapshot
+
+
+def _preview_response(
+    plan: object,
+    draft_version: int,
+) -> ReviewDraftOperationPreviewResponse:
+    operation_plan = plan
+    return ReviewDraftOperationPreviewResponse(
+        task_id=_review_plan_target(operation_plan, "review_draft"),
+        action=operation_plan.action,
+        draft_version=draft_version,
+        summary=operation_plan.summary,
+        expires_at=operation_plan.expires_at.isoformat(),
+        reversible=operation_plan.reversible,
+        operation_plan=operation_plan,
+    )
+
+
+def _current_review_draft_version(
+    draft_repository: SQLiteReviewDraftRepository,
+    plan: object,
+) -> str:
+    task_id = _review_plan_target(plan, "review_draft")
+    snapshot = draft_repository.get(task_id)
+    return str(snapshot.version) if snapshot is not None else "missing"
+
+
+def _run_review_draft_plan(
+    draft_repository: SQLiteReviewDraftRepository,
+    plan: object,
+) -> dict[str, object]:
+    task_id = _review_plan_target(plan, "review_draft")
+    base_version = int(_review_plan_target(plan, "review_draft_base_version"))
+    current = draft_repository.get(task_id)
+    if current is None or current.version != base_version:
+        raise OperationPlanVersionConflict(
+            f"expected review draft version {base_version}, got {current.version if current else 'missing'}"
+        )
+    if plan.action == "review_drafts.delete":
+        draft_repository.delete(task_id)
+        return {"task_id": task_id, "deleted": True}
+    if plan.action == "review_drafts.restore":
+        restore_version = int(_review_plan_target(plan, "review_draft_restore_version"))
+        try:
+            snapshot = draft_repository.restore(task_id, restore_version, base_version)
+        except ReviewDraftConflictError as exc:
+            raise OperationPlanVersionConflict("review draft version changed during restoration") from exc
+        if snapshot is None:
+            raise OperationPlanError("review draft version not found")
+        return draft_response_data(snapshot)
+    raise OperationPlanError("unsupported review draft operation action")
+
+
+def _review_plan_target(plan: object, target_type: str) -> str:
+    if not getattr(plan, "action", "").startswith("review_drafts."):
+        raise OperationPlanError("unsupported review draft operation action")
+    for target in getattr(plan, "targets", []):
+        if target.type == target_type:
+            return target.id
+    raise OperationPlanError(f"review draft operation is missing {target_type}")
+
+
+def draft_response_data(snapshot: ReviewDraftSnapshot) -> dict[str, object]:
+    return {
+        "task_id": snapshot.task_id,
+        "version": snapshot.version,
+        "state": snapshot.state,
+        "updated_at": snapshot.updated_at.isoformat(),
+    }

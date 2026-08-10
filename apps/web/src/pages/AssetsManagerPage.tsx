@@ -23,7 +23,7 @@ import {
   fetchAssetList,
   fetchAssetStorageAnalysis,
   fetchUnusedCacheCleanupPreview,
-} from '../services/api';
+} from '../services/assetsApi';
 import type {
   AssetItem,
   AssetListResponse,

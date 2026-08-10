@@ -4,7 +4,7 @@ import {
   batchMoveQuestions,
   createCollection,
   fetchCollectionTree,
-} from '../../services/api';
+} from '../../services/collectionsApi';
 import type { BatchMoveResponse, CollectionNode } from '../../types';
 
 interface Props {
