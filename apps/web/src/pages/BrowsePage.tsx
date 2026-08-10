@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Virtuoso } from 'react-virtuoso';
 import { Eye, EyeOff, LayoutList, List, PanelLeftClose, PanelLeftOpen, RefreshCw } from 'lucide-react';
@@ -11,8 +11,6 @@ import QueryParamsPopover from '../components/shared/QueryParamsPopover';
 import QuestionCard from '../components/shared/QuestionCard';
 import QuestionCompactRow from '../components/shared/QuestionCompactRow';
 import RandomPickModal from '../components/shared/RandomPickModal';
-import QuestionEditorModal from '../components/editor/QuestionEditorModal';
-import QuestionLiveEditor from '../components/editor/QuestionLiveEditor';
 import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { useBasket } from '../hooks/useBasket';
@@ -29,6 +27,9 @@ const SEARCH_PRESET_KEY = 'physics_vault.question_search_presets';
 type BrowseMode = 'questions' | 'knowledge';
 
 type QuickActionGroup = '浏览' | '选题' | '输出' | '整理';
+
+const QuestionEditorModal = lazy(() => import('../components/editor/QuestionEditorModal'));
+const QuestionLiveEditor = lazy(() => import('../components/editor/QuestionLiveEditor'));
 
 interface QuickAction {
   label: string;
@@ -1173,13 +1174,15 @@ export default function BrowsePage() {
                     关闭
                   </button>
                 </div>
-                <QuestionLiveEditor
-                  question={editingDraft}
-                  compact
-                  onChange={(patch) => setEditingDraft((current) => current ? { ...current, ...patch } : current)}
-                  onSave={handleSaveEditedQuestion}
-                  saving={savingQuestion}
-                />
+                <Suspense fallback={<EditorLoading />}>
+                  <QuestionLiveEditor
+                    question={editingDraft}
+                    compact
+                    onChange={(patch) => setEditingDraft((current) => current ? { ...current, ...patch } : current)}
+                    onSave={handleSaveEditedQuestion}
+                    saving={savingQuestion}
+                  />
+                </Suspense>
               </section>
             )}
             {(['浏览', '选题', '输出', '整理'] as QuickActionGroup[]).map((group) => (
@@ -1282,13 +1285,15 @@ export default function BrowsePage() {
       />
 
       {editingDraft && (
-        <QuestionEditorModal
-          question={editingDraft}
-          onChange={(patch) => setEditingDraft((current) => current ? { ...current, ...patch } : current)}
-          onClose={() => setEditingDraft(null)}
-          onSave={handleSaveEditedQuestion}
-          saving={savingQuestion}
-        />
+        <Suspense fallback={<EditorLoading overlay />}>
+          <QuestionEditorModal
+            question={editingDraft}
+            onChange={(patch) => setEditingDraft((current) => current ? { ...current, ...patch } : current)}
+            onClose={() => setEditingDraft(null)}
+            onSave={handleSaveEditedQuestion}
+            saving={savingQuestion}
+          />
+        </Suspense>
       )}
 
       <RandomPickModal
@@ -1451,6 +1456,14 @@ function buildKnowledgeDirectory(items: KnowledgePointFlatItem[]): KnowledgeDire
   }
 
   return Array.from(topic1Map.values());
+}
+
+function EditorLoading({ overlay = false }: { overlay?: boolean }) {
+  return (
+    <div className={overlay ? 'fixed inset-0 z-[80] grid place-items-center bg-slate-950/55 text-sm text-white' : 'py-8 text-center text-sm text-[var(--color-text-muted)]'}>
+      正在加载编辑器…
+    </div>
+  );
 }
 
 function DirectoryRow({
