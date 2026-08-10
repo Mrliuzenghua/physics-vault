@@ -16,7 +16,7 @@
   SystemSettings,
   Template,
 } from '../types';
-import { request, requestForm } from './apiClient';
+import { request } from './apiClient';
 
 export {
   DEFAULT_AI_CONFIG,
@@ -206,6 +206,11 @@ export {
   listPaperDrafts,
   savePaperDraft,
 } from './paperDraftApi';
+export {
+  fetchQuestionImageCache,
+  uploadQuestionImageCache,
+} from './imageCacheApi';
+export type { ImageCacheAsset } from './imageCacheApi';
 
 export interface DatabaseStatus {
   questions_count: number;
@@ -250,29 +255,6 @@ export async function confirmImportBatch(
     method: 'POST',
     body: JSON.stringify({ questions, input_version: inputVersion, media_assets: mediaAssets }),
   });
-}
-
-export interface ImageCacheAsset {
-  relative_path: string;
-  filename: string;
-  file_path: string;
-  mime_type: string;
-  size: number;
-}
-
-export async function fetchQuestionImageCache(keyword = '', limit = 200): Promise<ImageCacheAsset[]> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (keyword.trim()) params.set('keyword', keyword.trim());
-  return request(`/api/questions/images/cache?${params.toString()}`);
-}
-
-export async function uploadQuestionImageCache(files: File[]): Promise<{
-  images: ImageCacheAsset[];
-  skipped: string[];
-}> {
-  const formData = new FormData();
-  files.forEach((file) => formData.append('files', file));
-  return requestForm('/api/questions/images/cache-upload', formData);
 }
 
 export async function convertDocument(body: ConvertDocumentRequest): Promise<ConvertDocumentResponse> {

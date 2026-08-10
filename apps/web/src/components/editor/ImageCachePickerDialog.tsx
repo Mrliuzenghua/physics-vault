@@ -1,7 +1,7 @@
 import { FileText, ImagePlus, Search, Upload, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { fetchQuestionImageCache, uploadQuestionImageCache } from '../../services/api';
+import { fetchQuestionImageCache, uploadQuestionImageCache } from '../../services/imageCacheApi';
 import type { ImageCacheAsset } from '../../services/api';
 import { imageFileUrl } from '../../utils/imageUrl';
 
