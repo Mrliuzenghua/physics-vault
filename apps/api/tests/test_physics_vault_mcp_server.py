@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sqlite3
 import sys
 import types
@@ -42,9 +43,32 @@ def _load_mcp_server():
 
 
 EXPECTED_MCP_TOOLS = {
+    "list_teaching_projects",
+    "get_teaching_project",
+    "get_teaching_project_status",
+    "duplicate_teaching_project",
+    "publish_teaching_artifact",
+    "preflight_teaching_handout",
+    "sync_teaching_slides",
+    "start_classroom_session",
+    "get_classroom_session",
+    "update_classroom_session",
+    "end_classroom_session",
     "list_filter_facets",
     "search_questions",
+    "search_method_questions",
+    "record_method_retrieval_feedback",
+    "list_method_retrieval_feedback",
+    "method_retrieval_learning_report",
+    "search_topic_questions",
     "get_questions_by_ids",
+    "export_questions_to_typst",
+    "download_question_images",
+    "scan_canonical_duplicate_questions",
+    "backfill_canonical_question_hashes",
+    "merge_canonical_duplicate_questions",
+    "restore_canonical_duplicate_merge",
+    "list_canonical_duplicate_merges",
     "list_composition_workbenches",
     "get_composition_workbench",
     "create_composition_workbench",
@@ -52,12 +76,38 @@ EXPECTED_MCP_TOOLS = {
     "add_knowledge_to_composition_workbench",
     "insert_teaching_block_to_composition_workbench",
     "reorder_composition_workbench",
+    "move_composition_item",
+    "remove_items_from_composition_workbench",
+    "update_composition_item",
+    "lock_composition_workbench",
     "apply_composition_workbench_plan",
+    "preview_composition_workbench",
+    "export_composition_workbench",
+    "list_word_export_templates",
+    "get_word_export_template",
+    "propose_word_export_format",
+    "validate_word_export_format",
+    "save_word_export_template",
+    "rename_word_export_template",
+    "list_saved_handouts",
+    "get_saved_handout",
+    "list_saved_handout_versions",
+    "restore_saved_handout_version",
+    "rename_saved_handout",
+    "apply_word_format_to_saved_handout",
+    "apply_word_format_to_workbench",
+    "export_saved_handout",
     "curate_questions_to_composition_workbench",
     "list_knowledge_tree",
     "search_knowledge_points",
     "get_question_knowledge_points",
+    "maintain_question_knowledge_points",
+    "diagnose_tag_maintenance",
+    "suggest_question_tags",
+    "maintain_question_tags",
     "create_knowledge_points",
+    "associate_questions_to_paper",
+    "create_paper",
     "organize_knowledge_tree",
     "batch_update_question_metadata",
     "database_boundary_report",
@@ -67,6 +117,9 @@ EXPECTED_MCP_TOOLS = {
     "list_review_tasks",
     "get_review_task",
     "get_review_task_full",
+    "validate_review_task",
+    "split_merged_options",
+    "deduplicate_review_task_questions",
     "find_duplicate_review_tasks",
     "delete_review_tasks",
     "suggest_knowledge_points_for_task",
@@ -78,6 +131,7 @@ EXPECTED_MCP_TOOLS = {
     "rollback_change_batch",
     "batch_replace_question_tags",
     "return_question_to_review",
+    "reconcile_review_queue_outbox",
     "batch_replace_question_knowledge_points",
     "find_similar_questions",
     "submit_ai_generated_review",
@@ -98,6 +152,45 @@ def test_mcp_tool_inventory_is_explicit_and_unique() -> None:
 
     assert len(names) == len(set(names))
     assert set(names) == EXPECTED_MCP_TOOLS
+
+
+def test_catalog_profile_exposes_only_catalog_tools(monkeypatch) -> None:
+    monkeypatch.setenv("PHYSICS_MCP_PROFILE", "catalog")
+    module = _load_mcp_server()
+    names = {tool.__name__ for tool in module.server.tools}
+
+    assert "search_questions" in names
+    assert "scan_canonical_duplicate_questions" in names
+    assert "merge_canonical_duplicate_questions" not in names
+    assert "list_review_tasks" not in names
+    assert "apply_composition_workbench_plan" not in names
+
+
+def test_mcp_format_diff_reports_changed_sections_and_template_ids() -> None:
+    module = _load_mcp_server()
+
+    changes = module._format_spec_diff(
+        {
+            "styleConfig": {"fontSize": 12, "figureScale": 60},
+            "output": {"includeAnswers": False},
+        },
+        {
+            "styleConfig": {"fontSize": 14, "figureScale": 60},
+            "output": {"includeAnswers": True},
+        },
+        before_template_id="student_practice",
+        after_template_id="teacher_handout",
+    )
+
+    assert changes == {
+        "changed_sections": ["output", "styleConfig"],
+        "changed_fields": {
+            "output": ["includeAnswers"],
+            "styleConfig": ["fontSize"],
+        },
+        "before_template_id": "student_practice",
+        "after_template_id": "teacher_handout",
+    }
 
 
 def test_mcp_latex_cleanup_does_not_truncate_display_math() -> None:
@@ -135,6 +228,35 @@ def test_mcp_argument_errors_use_stable_shape(monkeypatch) -> None:
     missing = module.get_composition_workbench("missing-draft")
     assert missing["error_info"]["code"] == "DRAFT_NOT_FOUND"
     assert missing["draft_id"] == "missing-draft"
+
+
+def test_create_paper_is_idempotent_and_rejects_conflicts(tmp_path, monkeypatch) -> None:
+    module = _load_mcp_server()
+    db_path = tmp_path / "papers.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE papers (
+                paper_id TEXT PRIMARY KEY,
+                year INTEGER,
+                exam_type TEXT,
+                region TEXT,
+                paper_name TEXT NOT NULL,
+                subject TEXT NOT NULL DEFAULT 'PHY',
+                status TEXT NOT NULL DEFAULT 'structured'
+            )
+            """
+        )
+    monkeypatch.setattr(module, "_formal_db_path", lambda: db_path)
+
+    created = module.create_paper("paper-gd-2026", "2026 Guangdong Physics", 2026, "Guangdong", "Gaokao")
+    same = module.create_paper("paper-gd-2026", "2026 Guangdong Physics", 2026, "Guangdong", "Gaokao")
+    conflict = module.create_paper("paper-gd-2026", "Other paper", 2026, "Guangdong", "Gaokao")
+
+    assert created["ok"] is True and created["created"] is True
+    assert same["ok"] is True and same["created"] is False
+    assert conflict["ok"] is False
+    assert conflict["error_info"]["code"] == "PAPER_CONFLICT"
 
 
 def test_composition_plan_accepts_rich_workbench_only_knowledge_card(monkeypatch) -> None:
@@ -210,6 +332,7 @@ def test_composition_plan_accepts_rich_workbench_only_knowledge_card(monkeypatch
     payload = service.saved.items[0].payload
     assert payload["topic3_id"] is None
     assert payload["title"] == "Reference frames"
+    assert payload["content"] == "Choose a reference object before comparing positions."
     assert payload["summary"].startswith("Choose a reference object")
     assert payload["points"] == ["Motion is relative", "Keep one frame throughout"]
     assert payload["relatedQuestionIds"] == ["q-3"]
@@ -309,8 +432,49 @@ def test_composition_plan_replaces_existing_template_knowledge_card(monkeypatch)
     replacement = service.saved.items[1]
     assert replacement.id == existing_id
     assert replacement.title == "为什么掰手腕双方受力始终相等"
-    assert replacement.payload["points"] == []
+    assert replacement.payload["points"]
+    assert replacement.payload["content"].startswith("\u4e24\u53ea")
     assert "同时产生" in replacement.payload["summary"]
+
+
+def test_composition_item_mutations_support_partial_order_and_rich_updates(monkeypatch) -> None:
+    module = _load_mcp_server()
+
+    class DraftService:
+        def __init__(self):
+            self.current = {
+                "id": "draft-1", "title": "Lesson", "source": "compose", "status": "draft",
+                "items": [
+                    {"id": "a", "type": "text", "title": "A", "payload": {"content": "a"}},
+                    {"id": "b", "type": "knowledge", "title": "B", "payload": {"title": "B", "content": "old", "summary": "old", "points": ["old"]}},
+                    {"id": "c", "type": "question", "title": "C", "question_id": "q-1", "payload": {}},
+                ],
+                "metadata": {}, "quality_report": {}, "question_count": 1, "item_count": 3,
+                "total_score": 0, "created_at": "v1", "updated_at": "v1",
+            }
+
+        def get(self, _draft_id):
+            return self.current
+
+        def save(self, request):
+            self.current = {**self.current, "items": [item.model_dump() for item in request.items], "metadata": request.metadata, "item_count": len(request.items), "updated_at": "v2"}
+            return self.current
+
+    service = DraftService()
+    monkeypatch.setattr(module, "_paper_draft_service", lambda: service)
+
+    updated = module.update_composition_item("b", {"title": "B2", "content": "# New explanation"}, draft_id="draft-1", dry_run=False)
+    assert updated["ok"] is True
+    assert service.current["items"][1]["payload"]["points"] == ["New explanation"]
+    assert service.current["items"][1]["payload"]["content"] == "# New explanation"
+
+    moved = module.move_composition_item("b", after_item_id="c", draft_id="draft-1", dry_run=False)
+    assert moved["ok"] is True
+    assert [item["id"] for item in service.current["items"]] == ["a", "c", "b"]
+
+    removed = module.remove_items_from_composition_workbench(["a"], draft_id="draft-1", dry_run=False)
+    assert removed["ok"] is True
+    assert [item["id"] for item in service.current["items"]] == ["c", "b"]
 
 
 def test_word_folder_filter_and_duplicate_preview(tmp_path, monkeypatch) -> None:
@@ -357,12 +521,16 @@ def _seed_standard_db(path: Path) -> None:
                 review_status TEXT DEFAULT 'confirmed',
                 review_comment TEXT,
                 source TEXT,
+                content_hash TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE question_text_index (
                 question_id TEXT PRIMARY KEY,
                 title_text TEXT,
                 stem_text TEXT NOT NULL DEFAULT '',
+                answer_text TEXT,
+                analysis_text TEXT,
                 options_json TEXT NOT NULL DEFAULT '[]',
                 sub_questions_json TEXT NOT NULL DEFAULT '[]',
                 figures_json TEXT NOT NULL DEFAULT '[]',
@@ -373,6 +541,22 @@ def _seed_standard_db(path: Path) -> None:
                 source_text TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE image_assets (
+                asset_id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                question_id TEXT
+            );
+            CREATE TABLE question_assets (
+                link_id TEXT PRIMARY KEY,
+                question_id TEXT NOT NULL,
+                asset_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'question_figure',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                placeholder_key TEXT,
+                is_primary INTEGER NOT NULL DEFAULT 0,
+                is_verified INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE knowledge_points (
                 topic3_id TEXT PRIMARY KEY,
@@ -396,12 +580,17 @@ def _seed_standard_db(path: Path) -> None:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE question_search_fts (question_id TEXT PRIMARY KEY);
-            CREATE TABLE question_sources (source_id TEXT PRIMARY KEY, question_id TEXT);
+            CREATE TABLE question_sources (
+                source_id TEXT PRIMARY KEY,
+                question_id TEXT NOT NULL,
+                source_label TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE TABLE question_versions (version_id TEXT PRIMARY KEY, question_id TEXT);
             INSERT INTO questions (question_id, canonical_title, question_type, difficulty, module, source)
             VALUES ('q-001', 'Newton second law', 'single_choice', 1, 'mechanics', 'unit');
-            INSERT INTO question_text_index (question_id, title_text, stem_text, tags_json)
-            VALUES ('q-001', 'Newton second law', 'A force acts on a cart.', '["mechanics", "basic", "mechanics"]');
+            INSERT INTO question_text_index (question_id, title_text, stem_text, answer_text, tags_json)
+            VALUES ('q-001', 'Newton second law', 'A force acts on a cart.', 'A', '["mechanics", "basic", "mechanics"]');
             INSERT INTO knowledge_points (
                 topic3_id, topic3_name, topic2_id, topic2_name, topic1_id, topic1_name, source_chapter, status
             ) VALUES (
@@ -438,6 +627,292 @@ def _configure_paths(module, tmp_path: Path, monkeypatch):
     monkeypatch.setattr(module, "default_review_db_path", lambda: review_db)
     _seed_review_db(module, review_db)
     return standard_db, review_db
+
+
+def test_download_question_images_copies_managed_assets_for_agent_use(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    standard_db, _review_db = _configure_paths(module, tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "project_root", lambda: tmp_path)
+    source = tmp_path / "data" / "assets" / "questions" / "force-diagram.png"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"test-image-bytes")
+    with sqlite3.connect(standard_db) as conn:
+        conn.execute(
+            "INSERT INTO image_assets (asset_id, filename, file_path, question_id) VALUES (?, ?, ?, ?)",
+            ("asset-force", source.name, "data/assets/questions/force-diagram.png", "q-001"),
+        )
+        conn.execute(
+            "INSERT INTO question_assets (link_id, question_id, asset_id, sort_order) VALUES (?, ?, ?, ?)",
+            ("qa-force", "q-001", "asset-force", 0),
+        )
+
+    downloaded = module.download_question_images("q-001", destination_subdir="agent-run")
+
+    assert downloaded["ok"] is True
+    assert downloaded["downloaded_count"] == 1
+    image = downloaded["images"][0]
+    assert image["status"] == "downloaded"
+    assert image["reused_existing_file"] is False
+    assert Path(image["local_path"]).read_bytes() == b"test-image-bytes"
+    assert Path(image["local_path"]).is_relative_to(tmp_path / "data" / "mcp-downloads")
+
+    reused = module.download_question_images("q-001", destination_subdir="agent-run")
+    assert reused["images"][0]["reused_existing_file"] is True
+    invalid_destination = module.download_question_images("q-001", destination_subdir="../outside")
+    assert invalid_destination["error_info"]["code"] == "INVALID_ARGUMENT"
+
+
+def test_comprehensive_method_search_uses_structure_analysis_and_source_filters(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    expanded_terms = module._comprehensive_query_terms(
+        "电磁感应 配速法 洛伦兹力 摆线"
+    )
+    assert "速度分解" in expanded_terms
+    assert "法拉第" not in expanded_terms
+    assert "楞次定律" not in expanded_terms
+
+    standard_db, _review_db = _configure_paths(module, tmp_path, monkeypatch)
+    with sqlite3.connect(standard_db) as conn:
+        conn.execute(
+            """
+            INSERT INTO questions (
+                question_id, canonical_title, question_type, difficulty, module, topic3, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Q00000298",
+                "2008 江苏经典带电小球题",
+                "calculation",
+                5,
+                "mechanics",
+                "圆周运动",
+                "2008年高考江苏卷物理",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO question_text_index (
+                question_id, title_text, stem_text, answer_text, analysis_text, tags_json, source_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Q00000298",
+                "带电小球在水平磁场中运动",
+                "水平匀强磁场中，带正电小球从O点静止释放，求运动曲线最低点和最大下降距离。重力加速度为g。",
+                "略",
+                "洛伦兹力不做功，由动能定理和最低点曲率半径求解。",
+                "[]",
+                "2008年高考江苏卷物理",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO questions (
+                question_id, canonical_title, question_type, difficulty, module, topic3, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "q-related",
+                "仅包含部分重力磁场条件的相关题",
+                "calculation",
+                4,
+                "electromagnetism",
+                "带电粒子在复合场中的运动",
+                "2008年江苏模拟题",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO question_text_index (
+                question_id, title_text, stem_text, answer_text, analysis_text, tags_json, source_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "q-related",
+                "复合场中的带电小球",
+                "带正电小球在电场和磁场中运动，重力加速度为g，求最大距离。",
+                "略",
+                "将运动分解后求解，洛伦兹力提供向心力qvB=mv²/R。",
+                "[]",
+                "2008年江苏模拟题",
+            ),
+        )
+        conn.commit()
+
+    result = module.search_questions(
+        query="重力配速法",
+        search_mode="comprehensive",
+        year=2008,
+        region="江苏",
+        limit=10,
+    )
+
+    assert result["method_search"]["scanned_all_filtered_questions"] is True
+    assert result["total"] == 2
+    assert result["items"][0]["question_id"] == "Q00000298"
+    assert result["items"][0]["method_match"]["level"] == "structural"
+    assert "方法结构" in result["items"][0]["search_match"]["matched_sources"]
+    assert "题干" in result["items"][0]["search_match"]["matched_locations"]["静止释放"]
+
+    dedicated = module.search_method_questions(
+        "重力配速法", year=2008, region="江苏", limit=10
+    )
+    assert dedicated["items"][0]["question_id"] == "Q00000298"
+    assert dedicated["total"] == 1
+    assert dedicated["method_search"]["confirmed_count"] == 1
+    assert dedicated["method_search"]["related_candidate_count"] == 1
+    assert dedicated["method_search"]["confirmed_only"] is True
+    assert dedicated["response_mode"] == "compact"
+    assert dedicated["evidence_included"] is False
+    assert dedicated["items"][0]["method_level"] == "structural"
+    assert len(dedicated["items"][0]["title"]) <= 80
+    assert "stem_text" not in dedicated["items"][0]
+    assert "method_match" not in dedicated["items"][0]
+
+    full = module.search_method_questions(
+        "重力配速法",
+        year=2008,
+        region="江苏",
+        limit=10,
+        summary_only=False,
+        include_evidence=True,
+    )
+    assert full["response_mode"] == "full"
+    assert full["evidence_included"] is True
+    assert "stem_text" in full["items"][0]
+    assert full["items"][0]["method_match"]["evidence"]
+    assert full["items"][0]["search_match"]["matched_locations"]
+
+    expanded = module.search_method_questions(
+        "重力配速法",
+        year=2008,
+        region="江苏",
+        limit=10,
+        confirmed_only=False,
+    )
+    assert expanded["total"] == 2
+    assert expanded["items"][1]["question_id"] == "q-related"
+    assert expanded["items"][1]["method_level"] == "related"
+
+
+def test_canonical_duplicate_scan_and_hash_backfill_are_safe(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    standard_db, _review_db = _configure_paths(module, tmp_path, monkeypatch)
+    with sqlite3.connect(standard_db) as conn:
+        conn.execute(
+            "INSERT INTO questions (question_id, canonical_title, question_type, difficulty, module, source) VALUES (?, ?, ?, ?, ?, ?)",
+            ("q-002", "Newton second law", "single_choice", 1, "mechanics", "another paper"),
+        )
+        conn.execute(
+            "INSERT INTO question_text_index (question_id, title_text, stem_text, answer_text, tags_json) VALUES (?, ?, ?, ?, ?)",
+            ("q-002", "Newton second law", "A force acts on a cart.", "A", "[]"),
+        )
+
+    scan = module.scan_canonical_duplicate_questions()
+    assert scan["database_scope"] == "canonical_read_only"
+    assert scan["group_count"] == 1
+    assert scan["groups"][0]["recommended_primary_question_id"] == "q-001"
+    assert scan["groups"][0]["duplicate_question_ids"] == ["q-002"]
+
+    preview = module.backfill_canonical_question_hashes()
+    assert preview["dry_run"] is True
+    assert preview["changed_count"] == 2
+    applied = module.backfill_canonical_question_hashes(dry_run=False)
+    assert applied["audit_batch_id"]
+    with sqlite3.connect(standard_db) as conn:
+        rows = conn.execute("SELECT content_hash FROM questions ORDER BY question_id").fetchall()
+    assert rows[0][0] and rows[0][0] == rows[1][0]
+
+
+def test_canonical_duplicate_merge_archives_and_restores_without_deletion(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    standard_db, _review_db = _configure_paths(module, tmp_path, monkeypatch)
+    with sqlite3.connect(standard_db) as conn:
+        conn.execute(
+            "UPDATE question_text_index SET tags_json = ? WHERE question_id = 'q-001'",
+            ('["mechanics"]',),
+        )
+        conn.execute(
+            "INSERT INTO questions (question_id, canonical_title, question_type, difficulty, module, source) VALUES (?, ?, ?, ?, ?, ?)",
+            ("q-002", "Newton second law", "single_choice", 1, "mechanics", "paper two"),
+        )
+        conn.execute(
+            "INSERT INTO question_text_index (question_id, title_text, stem_text, answer_text, tags_json) VALUES (?, ?, ?, ?, ?)",
+            ("q-002", "Newton second law", "A force acts on a cart.", "A", '["dynamics"]'),
+        )
+        conn.execute(
+            "INSERT INTO question_sources (source_id, question_id, source_label) VALUES (?, ?, ?)",
+            ("source-q2", "q-002", "paper two"),
+        )
+        conn.execute(
+            "INSERT INTO question_knowledge_points (link_id, question_id, topic3_id, rank) VALUES (?, ?, ?, ?)",
+            ("qkp-q2", "q-002", "KP-MECH-DYN-NEWTON2", 1),
+        )
+
+    preview = module.merge_canonical_duplicate_questions("q-001", ["q-002"])
+    assert preview["dry_run"] is True
+    assert preview["merge_plan"]["knowledge_topic3_ids_to_add"] == ["KP-MECH-DYN-NEWTON2"]
+    applied = module.merge_canonical_duplicate_questions("q-001", ["q-002"], dry_run=False)
+    assert applied["archived_count"] == 1
+    listed = module.list_canonical_duplicate_merges()
+    assert listed["items"][0]["merge_batch_id"] == applied["audit_batch_id"]
+    with sqlite3.connect(standard_db) as conn:
+        assert conn.execute("SELECT status FROM questions WHERE question_id = 'q-002'").fetchone()[0] == "archived_duplicate"
+        assert json.loads(conn.execute("SELECT tags_json FROM question_text_index WHERE question_id = 'q-001'").fetchone()[0]) == ["mechanics", "dynamics"]
+        assert conn.execute("SELECT question_id FROM question_sources WHERE source_id = 'source-q2'").fetchone()[0] == "q-001"
+        assert conn.execute("SELECT COUNT(*) FROM question_knowledge_points WHERE question_id = 'q-001'").fetchone()[0] == 1
+
+    restored = module.restore_canonical_duplicate_merge(applied["audit_batch_id"], dry_run=False)
+    assert restored["ok"] is True
+    with sqlite3.connect(standard_db) as conn:
+        assert conn.execute("SELECT status FROM questions WHERE question_id = 'q-002'").fetchone()[0] == "approved"
+        assert json.loads(conn.execute("SELECT tags_json FROM question_text_index WHERE question_id = 'q-001'").fetchone()[0]) == ["mechanics"]
+        assert conn.execute("SELECT question_id FROM question_sources WHERE source_id = 'source-q2'").fetchone()[0] == "q-002"
+        assert conn.execute("SELECT COUNT(*) FROM question_knowledge_points WHERE question_id = 'q-001'").fetchone()[0] == 0
+
+
+def test_topic_search_merges_structured_and_legacy_metadata(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    standard_db, _review_db = _configure_paths(module, tmp_path, monkeypatch)
+    with sqlite3.connect(standard_db) as conn:
+        conn.execute(
+            "UPDATE question_text_index SET tags_json = ? WHERE question_id = ?",
+            (json.dumps(["\u8ffd\u53ca"], ensure_ascii=False), "q-001"),
+        )
+        conn.execute(
+            """
+            INSERT INTO questions (question_id, canonical_title, question_type, difficulty, module, source)
+            VALUES ('q-002', 'kinematics item', 'single_choice', 2, 'mechanics', 'unit')
+            """
+        )
+        conn.execute(
+            "INSERT INTO question_text_index (question_id, title_text, stem_text, tags_json) VALUES ('q-002', 'kinematics item', '', '[]')"
+        )
+        conn.execute(
+            """
+            UPDATE knowledge_points SET topic3_name = ? WHERE topic3_id = 'KP-MECH-DYN-NEWTON2'
+            """,
+            ("\u5300\u53d8\u901f\u76f4\u7ebf\u8fd0\u52a8",),
+        )
+        conn.execute(
+            """
+            INSERT INTO question_knowledge_points (link_id, question_id, topic3_id)
+            VALUES ('link-002', 'q-002', 'KP-MECH-DYN-NEWTON2')
+            """
+        )
+    monkeypatch.setattr(
+        module,
+        "_fetch_formal_question_summaries",
+        lambda ids: {question_id: {"question_id": question_id} for question_id in ids},
+    )
+
+    result = module.search_topic_questions("\u5300\u53d8\u901f")
+
+    by_id = {item["question_id"]: item for item in result["items"]}
+    assert set(by_id) == {"q-001", "q-002"}
+    assert by_id["q-001"]["search_match"]["metadata_quality"] == "legacy_only"
+    assert by_id["q-002"]["search_match"]["metadata_quality"] == "structured"
+    assert result["unbound_legacy_question_ids"] == ["q-001"]
 
 
 def test_tag_normalization_is_dry_run_first_and_audited(tmp_path, monkeypatch):
@@ -503,10 +978,16 @@ def test_return_to_review_updates_canonical_status_but_writes_queue_to_review_db
     applied = module.return_question_to_review("q-001", reason="needs rework", dry_run=False)
     assert applied["dry_run"] is False
     assert applied["audit_batch_id"]
+    assert applied["operation_id"]
+    assert applied["delivery_status"] == "delivered"
 
     with sqlite3.connect(standard_db) as conn:
         assert conn.execute("SELECT status, review_status FROM questions WHERE question_id='q-001'").fetchone() == ("待校对", "reviewing")
         assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='review_queue'").fetchone() is None
+        assert conn.execute(
+            "SELECT delivery_status FROM review_queue_outbox WHERE operation_id = ?",
+            (applied["operation_id"],),
+        ).fetchone()[0] == "delivered"
 
     with sqlite3.connect(review_db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 1
@@ -521,6 +1002,57 @@ def test_return_to_review_updates_canonical_status_but_writes_queue_to_review_db
         assert conn.execute("SELECT status, review_status FROM questions WHERE question_id='q-001'").fetchone() == ("approved", "confirmed")
     with sqlite3.connect(review_db) as conn:
         assert conn.execute("SELECT status FROM review_queue WHERE entity_id='q-001'").fetchone()[0] == "rolled_back"
+
+
+def test_review_queue_outbox_reconciles_pending_delivery(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+
+    applied = module.return_question_to_review("q-001", reason="needs rework", dry_run=False)
+    with sqlite3.connect(standard_db) as conn:
+        conn.execute(
+            "UPDATE review_queue_outbox SET delivery_status = 'pending' WHERE operation_id = ?",
+            (applied["operation_id"],),
+        )
+    with sqlite3.connect(review_db) as conn:
+        conn.execute("DELETE FROM review_queue WHERE review_id = ?", (applied["item"]["review_id"],))
+
+    reconciled = module.reconcile_review_queue_outbox()
+
+    assert reconciled["delivered_count"] == 1
+    with sqlite3.connect(review_db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 1
+
+
+def test_rollback_cancels_pending_review_queue_outbox(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+
+    applied = module.return_question_to_review("q-001", reason="needs rework", dry_run=False)
+    with sqlite3.connect(standard_db) as conn:
+        conn.execute(
+            "UPDATE review_queue_outbox SET delivery_status = 'pending' WHERE operation_id = ?",
+            (applied["operation_id"],),
+        )
+
+    rollback = module.rollback_change_batch(
+        applied["audit_batch_id"],
+        dry_run=False,
+        reason="undo pending return to review",
+    )
+    assert rollback["ok"] is True
+    assert rollback["cancelled_outbox_count"] == 1
+
+    reconciled = module.reconcile_review_queue_outbox()
+    assert reconciled["ok"] is True
+    assert reconciled["attempted_count"] == 0
+    with sqlite3.connect(standard_db) as conn:
+        assert conn.execute(
+            "SELECT delivery_status FROM review_queue_outbox WHERE operation_id = ?",
+            (applied["operation_id"],),
+        ).fetchone()[0] == "cancelled"
+    with sqlite3.connect(review_db) as conn:
+        assert conn.execute("SELECT status FROM review_queue WHERE entity_id = 'q-001'").fetchone()[0] == "rolled_back"
 
 
 def test_knowledge_binding_normalization_is_audited(tmp_path, monkeypatch):
@@ -610,6 +1142,330 @@ def test_review_tools_use_review_db_with_legacy_task_migration(tmp_path, monkeyp
 
     with sqlite3.connect(standard_db) as conn:
         assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='import_pipeline_tasks'").fetchone() is None
+
+
+def test_validate_review_task_returns_structured_risks(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, _review_db = _configure_paths(module, tmp_path, monkeypatch)
+
+    result = module.validate_review_task("task-review-001")
+
+    assert result["ok"] is True
+    assert result["question_count"] == 1
+    assert result["risk_question_count"] == 1
+    assert result["summary"]["warning"] >= 1
+    risks = result["items"][0]["risks"]
+    codes = {risk["code"] for risk in risks}
+    assert "missing_options" not in codes
+    assert "missing_knowledge" in codes
+    assert "missing_source" in codes
+    assert result["task_warnings"] == ["needs answer check"]
+    assert result["workflow"]["state"] == "needs_cleanup"
+    assert "organize_knowledge_tree" in result["workflow"]["next_tools"]
+    assert all({"code", "severity", "field", "message", "suggestion"} <= set(risk) for risk in risks)
+
+
+def test_validate_review_task_detects_answer_image_and_latex_mismatches(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+    payload = {
+        "questions": [
+            {
+                "question_id": "draft-risk-001",
+                "question_type": "single_choice",
+                "title": "题干 image:fig-missing $x",
+                "options": [{"label": "A", "text": "甲"}, {"label": "B", "text": "乙"}],
+                "answer": "C",
+                "figures": [{"asset_id": "fig-unused"}],
+            }
+        ]
+    }
+    with sqlite3.connect(review_db) as conn:
+        conn.execute(
+            "UPDATE import_pipeline_tasks SET result_json = ? WHERE task_id = 'task-review-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+    result = module.validate_review_task("task-review-001", require_knowledge=False, require_source=False)
+    codes = {risk["code"] for risk in result["items"][0]["risks"]}
+
+    assert {"answer_option_mismatch", "missing_figure", "unused_figure", "unbalanced_latex"} <= codes
+
+
+def test_validate_review_task_does_not_treat_successful_metadata_extraction_as_risk(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+    payload = {
+        "questions": [
+            {
+                "question_id": "draft-import-note",
+                "question_type": "calculation",
+                "title": "已知物体受恒力作用，求其加速度。",
+                "answer": "a=F/m",
+                "validation_warnings": [
+                    "已从答案中提取难度元数据。",
+                    "题干具有明确的多步骤实验结构，题型已修正为实验题。",
+                ],
+            }
+        ]
+    }
+    with sqlite3.connect(review_db) as conn:
+        conn.execute(
+            "UPDATE import_pipeline_tasks SET result_json = ? WHERE task_id = 'task-review-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+    result = module.validate_review_task(
+        "task-review-001", require_knowledge=False, require_source=False, risks_only=True
+    )
+
+    assert result["risk_question_count"] == 0
+    assert result["items"] == []
+
+
+def test_validate_review_task_supports_risks_only_and_legal_display_math(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+    payload = {
+        "questions": [
+            {
+                "question_id": "draft-clean",
+                "question_type": "calculation",
+                "title": "计算题",
+                "stem": "$$F=ma$$ 且 $v=at$。",
+                "answer": "正确",
+            },
+            {
+                "question_id": "draft-risk",
+                "question_type": "single_choice",
+                "title": "选择题",
+                "options": [{"label": "A", "text": "只有一个选项"}],
+                "answer": "B",
+            },
+        ]
+    }
+    with sqlite3.connect(review_db) as conn:
+        conn.execute(
+            "UPDATE import_pipeline_tasks SET result_json = ? WHERE task_id = 'task-review-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+    all_items = module.validate_review_task("task-review-001", require_knowledge=False, require_source=False)
+    result = module.validate_review_task(
+        "task-review-001", require_knowledge=False, require_source=False, risks_only=True
+    )
+
+    assert all_items["clean"] is False
+    assert all_items["question_count"] == 2
+    assert all_items["items"][0]["risk_count"] == 0
+    assert result["risks_only"] is True
+    assert result["question_count"] == 2
+    assert result["returned_question_count"] == 1
+    assert [item["question_id"] for item in result["items"]] == ["draft-risk"]
+
+
+def test_validate_review_task_reports_latex_and_choice_type_mismatch(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+    payload = {
+        "questions": [
+            {
+                "question_id": "draft-format-risk",
+                "question_type": "single_choice",
+                "title": "检查格式",
+                "stem": "$$F=ma$",
+                "options": [
+                    {"label": "A", "text": "选项 A"},
+                    {"label": "B", "text": "选项 B"},
+                ],
+                "answer": "A、B",
+            }
+        ]
+    }
+    with sqlite3.connect(review_db) as conn:
+        conn.execute(
+            "UPDATE import_pipeline_tasks SET result_json = ? WHERE task_id = 'task-review-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+    result = module.validate_review_task(
+        "task-review-001", require_knowledge=False, require_source=False, risks_only=True
+    )
+    codes = {risk["code"] for risk in result["items"][0]["risks"]}
+
+    assert {"malformed_latex", "choice_type_mismatch"} <= codes
+    assert "split_merged_options" in result["workflow"]["next_tools"]
+
+
+def test_latex_risk_workflow_guides_mcp_to_manually_standardize_draft(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+    payload = {
+        "questions": [
+            {
+                "question_id": "draft-manual-latex",
+                "question_type": "calculation",
+                "title": "公式格式待修复",
+                "stem": "由 $$F=ma$ 可知 $a=F/m。",
+                "answer": "见解析",
+            }
+        ]
+    }
+    with sqlite3.connect(review_db) as conn:
+        conn.execute(
+            "UPDATE import_pipeline_tasks SET result_json = ? WHERE task_id = 'task-review-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+    result = module.validate_review_task(
+        "task-review-001", require_knowledge=False, require_source=False, risks_only=True
+    )
+
+    action = next(item for item in result["workflow"]["actions"] if item["mode"] == "manual_standardization")
+    assert action["tool"] == "update_review_task_draft"
+    assert "get_review_task_full" in result["workflow"]["next_tools"]
+    assert "行内公式用 $...$" in action["message"]
+
+
+def test_deduplicate_review_task_questions_removes_only_exact_content_duplicates(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+    payload = {
+        "questions": [
+            {
+                "question_id": "draft-keep",
+                "question_type": "single_choice",
+                "title": "已知电阻 R 接入电路后的电流变化如图所示。![fig:one]",
+                "options": [{"label": "A", "text": "增大"}, {"label": "B", "text": "减小"}],
+                "answer": "A",
+                "analysis": "由欧姆定律可得。",
+                "source": "2026 模拟卷",
+            },
+            {
+                "question_id": "draft-remove",
+                "question_type": "single_choice",
+                "title": "已知电阻 R 接入电路后的电流变化如图所示。![fig:two]",
+                "options": [{"label": "A", "text": "增大"}, {"label": "B", "text": "减小"}],
+                "answer": "A",
+                "analysis": "由欧姆定律可得。",
+                "source": "2026 模拟卷",
+            },
+            {
+                "question_id": "draft-distinct",
+                "question_type": "single_choice",
+                "title": "已知电阻 R 接入电路后的电流变化如图所示，求功率变化。",
+                "options": [{"label": "A", "text": "增大"}, {"label": "B", "text": "减小"}],
+                "answer": "B",
+                "analysis": "由功率公式可得。",
+                "source": "2026 模拟卷",
+            },
+        ]
+    }
+    with sqlite3.connect(review_db) as conn:
+        conn.execute(
+            "UPDATE import_pipeline_tasks SET result_json = ? WHERE task_id = 'task-review-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+    preview = module.deduplicate_review_task_questions("task-review-001")
+    assert preview["dry_run"] is True
+    assert preview["duplicate_group_count"] == 1
+    assert preview["removed_count"] == 1
+    assert preview["items"] == [{"kept_question_id": "draft-keep", "removed_question_ids": ["draft-remove"], "count": 2}]
+
+    applied = module.deduplicate_review_task_questions("task-review-001", dry_run=False, reason="删除重复导入题")
+    assert applied["remaining_question_count"] == 2
+    saved = module.get_review_task_full("task-review-001", include_knowledge=False)
+    assert [item["question_id"] for item in saved["questions"]] == ["draft-keep", "draft-distinct"]
+
+
+def test_review_draft_write_rejects_stale_updated_at(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, _review_db = _configure_paths(module, tmp_path, monkeypatch)
+
+    result = module.update_review_task_draft(
+        "task-review-001",
+        [{"question_id": "draft-001", "source": "new source"}],
+        dry_run=False,
+        expected_updated_at="stale-version",
+    )
+
+    assert result["ok"] is False
+    assert result["error_info"]["code"] == "REVIEW_TASK_CONFLICT"
+    assert result["next_tools"] == ["get_review_task_full", "validate_review_task"]
+
+
+def test_split_merged_options_uses_raw_text_and_writes_back(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+    payload = {
+        "questions": [
+            {
+                "question_id": "draft-merged",
+                "question_type": "single_choice",
+                "title": "合并选项题",
+                "raw_text": "A．0.13 B．0.3 C．3.33 D．7.5",
+                "options": [{"opt": "A", "content": "0.13 B．0.3 C．3.33 D．7.5"}],
+                "answer": "D",
+            }
+        ]
+    }
+    with sqlite3.connect(review_db) as conn:
+        conn.execute(
+            "UPDATE import_pipeline_tasks SET result_json = ? WHERE task_id = 'task-review-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+    preview = module.split_merged_options("task-review-001")
+    assert preview["dry_run"] is True
+    assert preview["changed_count"] == 1
+    assert [item["label"] for item in preview["items"][0]["options"]] == ["A", "B", "C", "D"]
+
+    applied = module.split_merged_options("task-review-001", dry_run=False, reason="修复 OCR 合并选项")
+    assert applied["changed_count"] == 1
+    assert applied["validation"]["ok"] is True
+    assert applied["manual_action_required"] is True
+    assert applied["validation"]["workflow"]["state"] == "needs_cleanup"
+    with sqlite3.connect(review_db) as conn:
+        saved = json.loads(conn.execute(
+            "SELECT result_json FROM import_pipeline_tasks WHERE task_id = 'task-review-001'"
+        ).fetchone()[0])
+    assert [option["opt"] for option in saved["questions"][0]["options"]] == ["A", "B", "C", "D"]
+
+
+def test_split_merged_options_expands_two_ocr_rows_using_the_quoted_option_block(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+    payload = {
+        "questions": [
+            {
+                "question_id": "draft-two-rows",
+                "question_type": "single_choice",
+                "title": "选择题",
+                "raw_text": "题干\n\n> A．甲 B．乙\n> C．丙 D．丁\n\n【答案】B\n【解析】B 正确",
+                "options": [
+                    {"opt": "A", "content": "甲 B．乙"},
+                    {"opt": "C", "content": "丙 D．丁"},
+                ],
+                "answer": "B",
+            }
+        ]
+    }
+    with sqlite3.connect(review_db) as conn:
+        conn.execute(
+            "UPDATE import_pipeline_tasks SET result_json = ? WHERE task_id = 'task-review-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+    preview = module.split_merged_options("task-review-001")
+
+    assert preview["changed_count"] == 1
+    assert preview["items"][0]["options"] == [
+        {"label": "A", "text": "甲"},
+        {"label": "B", "text": "乙"},
+        {"label": "C", "text": "丙"},
+        {"label": "D", "text": "丁"},
+    ]
 
 
 def test_review_queue_is_read_from_review_db_and_enriched_from_canonical_db(tmp_path, monkeypatch):

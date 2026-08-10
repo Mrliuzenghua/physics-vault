@@ -16,6 +16,9 @@ from typing import Any
 
 from ..repositories.question_write import QuestionWriteRepository
 from ..schemas.question_write import QuestionBatchWriteResult, QuestionRecord
+from .embedding_refresh import schedule_question_embedding_refresh
+from .method_feature_index import refresh_question_method_features
+from .question_fingerprint import canonical_question_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +63,10 @@ class QuestionWriteService:
     def save_batch(
         self,
         questions: list[dict[str, Any]],
+        *,
+        version_modified_by: str = "system",
+        version_source: str = "manual",
+        version_change_summary: str | None = None,
     ) -> QuestionBatchWriteResult:
         """Validate, normalise and persist a batch of questions.
 
@@ -86,8 +93,40 @@ class QuestionWriteService:
         # Serialise to repo-compatible dicts
         rows = [self._to_repo_row(r) for r in valid]
 
+        existing_by_hash = self._repo.find_question_ids_by_content_hashes(
+            [str(row["content_hash"]) for row in rows if row.get("content_hash")]
+        )
+        seen_in_batch: dict[str, str] = {}
+        rows_to_save: list[dict[str, Any]] = []
+        for row in rows:
+            question_id = str(row["question_id"])
+            content_hash = str(row.get("content_hash") or "")
+            existing_ids = [item for item in existing_by_hash.get(content_hash, []) if item != question_id]
+            prior_in_batch = seen_in_batch.get(content_hash) if content_hash else None
+            if existing_ids:
+                errors.append(f"{question_id}: 与正式题库题目 {existing_ids[0]} 内容完全重复，未写入。")
+                continue
+            if prior_in_batch and prior_in_batch != question_id:
+                errors.append(f"{question_id}: 与本批题目 {prior_in_batch} 内容完全重复，未写入。")
+                continue
+            if content_hash:
+                seen_in_batch[content_hash] = question_id
+            rows_to_save.append(row)
+
+        if not rows_to_save:
+            return QuestionBatchWriteResult(
+                received_count=len(questions),
+                saved_count=0,
+                errors=errors,
+            )
+
         try:
-            counts = self._repo.upsert_many(rows)
+            counts = self._repo.upsert_many(
+                rows_to_save,
+                version_modified_by=version_modified_by,
+                version_source=version_source,
+                version_change_summary=version_change_summary,
+            )
         except FileNotFoundError:
             return QuestionBatchWriteResult(
                 received_count=len(questions),
@@ -101,6 +140,15 @@ class QuestionWriteService:
                 saved_count=0,
                 errors=[f"数据库写入异常: {exc}"] + errors,
             )
+
+        schedule_question_embedding_refresh(
+            [str(row["question_id"]) for row in rows_to_save],
+            db_path=self._repo.db_path,
+        )
+        refresh_question_method_features(
+            [str(row["question_id"]) for row in rows_to_save],
+            db_path=self._repo.db_path,
+        )
 
         return QuestionBatchWriteResult(
             received_count=len(questions),
@@ -299,7 +347,13 @@ class QuestionWriteService:
             "stem_clean_text": record.raw_text,
             "answer_text": record.answer or None,
             "analysis_text": record.analysis or None,
-            "content_hash": None,
+            "content_hash": canonical_question_fingerprint(
+                question_type=record.question_type,
+                title=record.title,
+                stem=record.raw_text or record.title,
+                options=record.options,
+                answer=record.answer,
+            ),
             "schema_version": "v2",
             "primary_question_no": None,
             "source_id": None,

@@ -549,6 +549,7 @@ class ClaudeCodeAgentService:
 
 
 _REVIEW_CENTER_RE = re.compile(
+    r"(检验页|检验中心|全部风险|修复.*风险|消除.*风险)|"
     r"(校对中心|待校对|审核任务|审核队列|回炉|复核|送审|已送审|草稿任务|清洗.*校对|校对.*清洗)"
 )
 _REVIEW_LATEX_REQUEST_RE = re.compile(
@@ -1216,11 +1217,13 @@ def _build_question_picker_prompt(
     page_context = _build_system_context(request)
     conversation_digest = _build_conversation_digest(request)
     context_json = [item.model_dump() for item in context]
+    quality_instruction = "如果当前页面上下文包含前端校验诊断，清洗时必须逐题反馈 question_id、字段、规则 code、严重程度、原问题和修改建议；不要只说存在风险。题目已被用户编辑时，依据最新诊断和完整题目重新判断，已解决的问题不要重复报告。"
     return f"""你是 Physics Vault 的本地选题智能体，负责帮高中物理老师从本地题库选题、改编题目和准备送审内容。
 
 你可以主动使用 MCP 数据库工具查库：
 - `mcp__physics_vault__search_questions`：按关键词、题型、难度、章节、知识点等检索正式题库。
 - `mcp__physics_vault__search_knowledge_points` / `mcp__physics_vault__list_knowledge_tree`：先找标准考点名和 topic id，再查题。
+- `mcp__physics_vault__maintain_question_knowledge_points`：当检索结果的题干/解析与现有知识点明显冲突、知识点缺失或只标了一个但还有明确辅助考点时调用。每题采用 1 个主知识点加最多 2 个辅助三级知识点；auto_fix=true 只会自动落库高置信度修复，疑难项保留待复核并返回可回滚审计批次。不要为了凑满三个而添加弱相关知识点。
 - `mcp__physics_vault__get_questions_by_ids`：按题号回读完整题目。
 - `mcp__physics_vault__find_similar_questions`：围绕某道题查同类题。
 - `mcp__physics_vault__submit_ai_generated_review`：只在用户要求生成、改编或送审 AI 内容时使用，把内容送入审核草稿，禁止写正式题库。
@@ -1237,8 +1240,10 @@ def _build_question_picker_prompt(
 - `mcp__physics_vault__list_review_tasks`：查看导入/AI 生成后进入校对中心的草稿任务，适合“送审的题目”“那 15 道送审题”“清洗校对中心题目/知识点草稿”的任务；可用 question_count=15 精确定位。
 - `mcp__physics_vault__get_review_task`：快速读取某个校对中心任务的草稿摘要。
 - `mcp__physics_vault__get_review_task_full`：需要检查长题干、LaTeX 或完整字段时读取完整草稿；不要只依赖 preview。
-- `mcp__physics_vault__clean_review_task_latex`：清理当前校对草稿中的 Markdown 斜体公式；先 dry_run=true，确认后才写入当前草稿。
-- `mcp__physics_vault__update_review_task_draft`：按 question_id 直接更新当前校对草稿字段；先 dry_run=true。当前草稿的修改不能通过 submit_ai_generated_review 伪装成新任务。
+- `mcp__physics_vault__validate_review_task`：在解释、清洗或提交校对题目前先调用，按 question_id 读取结构化风险、字段、规则 code、严重程度、原问题和修改建议；只关心问题题目时使用 risks_only=true；题目修改后重新调用，不要继续使用旧诊断。工具支持唯一 task_id 前缀，但后续必须改用返回的完整 task_id。老师明确要求“消除/修复风险”时，必须继续调用修改工具，不能只返回建议；若仍有风险，必须继续由 MCP 读取完整题目、逐字段生成补丁并写回草稿，不能让老师自行处理。
+- `mcp__physics_vault__split_merged_options`：从 raw_text 中识别并拆分被 OCR 合并的 A/B/C/D 选项；先 dry_run=true 预览，老师明确要求修复时再 dry_run=false 写回当前 task。
+- `mcp__physics_vault__clean_review_task_latex`：清理当前校对草稿中的 Markdown 斜体公式；先 dry_run=true，确认后才写入当前草稿。若清洗后仍有 LaTeX 风险，不能止步于提示。
+- `mcp__physics_vault__update_review_task_draft`：按 question_id 直接更新当前校对草稿字段；默认先 dry_run=true，老师明确要求消除/修复风险时可直接 dry_run=false。处理残留 LaTeX 风险时，必须先用 get_review_task_full 读取题目，再为受影响的 title、stem、options、answer 或 analysis 逐题写回补丁：行内公式统一为 $...$，独立块公式统一为 $$...$$，分隔符开闭成对且不能混用。写回后必须再次 validate_review_task。当前草稿的修改不能通过 submit_ai_generated_review 伪装成新任务。
 - `mcp__physics_vault__database_boundary_report`：不确定该查正式库还是审核库时先用它；它会返回正式库/审核库路径、职责边界、遗留污染和推荐工具路由。
 - `mcp__physics_vault__database_health_report`：盘点正式题库健康度，并附带审核库摘要；不要用正式库里的历史 review_queue 判断校对中心。
 - `mcp__physics_vault__list_question_tags`：盘点题目标签和标签频次，适合先发现标签混乱、重复、口径不一致的问题。
@@ -1254,7 +1259,8 @@ def _build_question_picker_prompt(
 下方 JSON 只包含用户固定到对话里的上下文题，可能为空；它不是系统替你预检索出的候选集。你需要先判断用户任务是否必须查询正式题库：如果需要找题、组卷、换题、查同类题或核对题号，请你自己选择检索词/知识点并调用 MCP 查库；如果只是解释固定上下文或整理已给内容，可以不查库。最终不要编造题号，question_ids 只能来自固定上下文 JSON 或 MCP 查询结果。
 
 元数据自治规则（优先于上方旧工具兼容说明）：
-- 标签、知识点绑定、难度、题型、规范化来源、年份、地区和试卷类型属于检索元数据。使用 `mcp__physics_vault__batch_update_question_metadata` 直接整理，不需要 dry_run、审计或再次询问用户。
+- 标签、知识点绑定、难度、题型、规范化来源、年份、地区和试卷类型属于检索元数据。使用 `mcp__physics_vault__batch_update_question_metadata` 直接整理，不需要 dry_run 或再次询问用户；知识点变更会自动记录可回滚审计批次。
+- 正式题目应优先维护 1 个主三级知识点，并在题干或解析有明确证据时补充最多 2 个辅助三级知识点。检索到疑似错标题时，先调用 `maintain_question_knowledge_points`；高置信度错误直接修复，needs_review 项不得强行改写。
 - 导入后优先使用 `mcp__physics_vault__organize_knowledge_tree` 一次完成已有节点复用、缺失节点创建和题目绑定；处理校对草稿时必须传当前 task_id。不得创建同名重复节点，也不要要求老师手工维护目录。
 - `mcp__physics_vault__suggest_knowledge_points_for_task` 仅用于只读诊断；只有用户明确要求查看候选结果时才单独调用。
 - 导入文件夹时默认 `skip_if_duplicate=true`；需要清理历史重复任务时，先用 `find_duplicate_review_tasks`，删除必须通过 `delete_review_tasks(confirmed=true)`。
@@ -1265,6 +1271,7 @@ def _build_question_picker_prompt(
 
 当前页面上下文：
 {page_context}
+{quality_instruction}
 
 最近对话摘要：
 {conversation_digest}

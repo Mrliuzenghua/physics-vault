@@ -27,7 +27,7 @@ _EXPORT_MIME_TYPES = {
     "word": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
-_LESSON_EXPORT_SNAPSHOT_SCHEMA = "physics-vault/lesson-export-snapshot/v3"
+_LESSON_EXPORT_SNAPSHOT_SCHEMA = "physics-vault/lesson-export-snapshot/v4"
 _WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -354,7 +354,11 @@ class LessonExportService:
         warnings: list[str] = []
         document = Document()
         section = document.sections[0]
-        style = lesson.get("styleConfig") if isinstance(lesson.get("styleConfig"), dict) else {}
+        format_spec = lesson.get("formatSpec") if isinstance(lesson.get("formatSpec"), dict) else {}
+        style = format_spec.get("styleConfig") if isinstance(format_spec.get("styleConfig"), dict) else {}
+        if not style:
+            style = lesson.get("styleConfig") if isinstance(lesson.get("styleConfig"), dict) else {}
+        content_styles = format_spec.get("contentStyles") if isinstance(format_spec.get("contentStyles"), dict) else {}
         page_size = str(style.get("pageSize") or "A4")
         width_mm, height_mm = ((297, 420) if page_size == "A3" else (210, 297))
         if str(style.get("pageOrientation") or "portrait") == "landscape":
@@ -364,28 +368,36 @@ class LessonExportService:
         section.page_height = Mm(height_mm)
         section.top_margin = Mm(float(style.get("pageMarginTop") or 18))
         section.bottom_margin = Mm(float(style.get("pageMarginBottom") or 18))
-        section.left_margin = Mm(float(style.get("pageMarginLeft") or 20))
-        section.right_margin = Mm(float(style.get("pageMarginRight") or 20))
+        section.left_margin = Mm(max(24, float(style.get("pageMarginLeft") or 24)))
+        section.right_margin = Mm(max(24, float(style.get("pageMarginRight") or 24)))
 
-        # Server Word export follows the standard printable exam style:
-        # SimSun body text at 5 hao (10.5 pt), regardless of screen preview scale.
-        font_name = "SimSun"
-        answer_font = "KaiTi"
-        body_size = 10.5
-        title_size = 16
-        small_title_size = 14
-        word_color = "000000"
-        answer_position = str(options.get("answer_position") or "after_question")
+        body_style = _content_style(content_styles, "questionStem")
+        answer_style = _content_style(content_styles, "answer")
+        analysis_style = _content_style(content_styles, "analysis")
+        title_style = _content_style(content_styles, "documentTitle")
+        section_style = _content_style(content_styles, "sectionTitle")
+        font_name = _word_font(str(body_style.get("fontFamily") or style.get("fontFamily") or "songti"))
+        answer_font = _word_font(str(answer_style.get("fontFamily") or "kaiti"))
+        # Keep legacy exports at the established 5-hao body size unless a formatSpec explicitly changes it.
+        body_size = _style_number(body_style, "fontSize", 10.5, 10.5)
+        title_size = _style_number(title_style, "fontSize", body_size + 5.5, 16)
+        small_title_size = _style_number(section_style, "fontSize", body_size + 3.5, 14)
+        word_color = str(body_style.get("color") or "000000")
+        output_spec = format_spec.get("output") if isinstance(format_spec.get("output"), dict) else {}
+        answer_position = str(options.get("answer_position") or output_spec.get("answerPosition") or "after_question")
         trailing_answer_blocks: list[tuple[int, dict[str, Any]]] = []
         normal = document.styles["Normal"]
         normal.font.name = font_name
         normal.font.size = Pt(body_size)
         normal.font.color.rgb = RGBColor.from_string(word_color)
         normal._element.rPr.rFonts.set(qn("w:eastAsia"), font_name)
-        normal.paragraph_format.line_spacing = float(style.get("lineHeight") or 1.55)
-        normal.paragraph_format.space_after = Pt(float(style.get("paragraphSpacing") or 4))
+        export_line_height = min(1.55, max(1.35, float(style.get("lineHeight") or 1.45)))
+        normal.paragraph_format.line_spacing = export_line_height
+        normal.paragraph_format.space_after = Pt(0)
 
-        header_footer = lesson.get("headerFooter") if isinstance(lesson.get("headerFooter"), dict) else {}
+        header_footer = format_spec.get("headerFooter") if isinstance(format_spec.get("headerFooter"), dict) else {}
+        if not header_footer:
+            header_footer = lesson.get("headerFooter") if isinstance(lesson.get("headerFooter"), dict) else {}
         if header_footer.get("headerEnabled"):
             paragraph = section.header.paragraphs[0]
             paragraph.alignment = _docx_alignment(str(header_footer.get("headerAlign") or "center"))
@@ -433,13 +445,26 @@ class LessonExportService:
                     warnings.append(f"Missing knowledge card for node {node.get('id')}")
                     continue
                 heading = document.add_paragraph()
-                heading.paragraph_format.space_before = Pt(10)
-                heading.paragraph_format.space_after = Pt(4)
+                knowledge_title_style = _content_style(content_styles, "knowledgeTitle")
+                _apply_docx_paragraph_style(heading, knowledge_title_style)
+                heading.paragraph_format.space_before = Pt(float(knowledge_title_style.get("spaceBefore", 8)))
+                heading.paragraph_format.space_after = Pt(float(knowledge_title_style.get("spaceAfter", 3)))
                 heading.paragraph_format.keep_with_next = True
-                _add_docx_text(heading, str(card.get("title") or "知识梳理"), font_name, small_title_size, bold=True, color=word_color)
-                _add_docx_text(document.add_paragraph(), str(card.get("summary") or ""), font_name, body_size, color=word_color)
+                _add_docx_text(heading, str(card.get("title") or "知识梳理"), _word_font(str(knowledge_title_style.get("fontFamily") or ("heiti" if knowledge_title_style else font_name))), _style_number(knowledge_title_style, "fontSize", small_title_size, small_title_size), bold=bool(knowledge_title_style.get("bold", True)), color=str(knowledge_title_style.get("color") or word_color))
+                knowledge_body = _content_style(content_styles, "knowledgeBody")
+                summary = document.add_paragraph()
+                _apply_docx_paragraph_style(summary, knowledge_body)
+                summary.paragraph_format.line_spacing = export_line_height
+                summary.paragraph_format.space_after = Pt(3)
+                _add_docx_text(summary, str(card.get("summary") or ""), _word_font(str(knowledge_body.get("fontFamily") or font_name)), _style_number(knowledge_body, "fontSize", body_size, body_size), color=str(knowledge_body.get("color") or word_color))
                 for point in card.get("points") or []:
-                    _add_docx_text(document.add_paragraph(style="List Bullet"), str(point), font_name, body_size, color=word_color)
+                    point_paragraph = document.add_paragraph(style="List Bullet")
+                    _apply_docx_paragraph_style(point_paragraph, knowledge_body)
+                    point_paragraph.paragraph_format.left_indent = Pt(18)
+                    point_paragraph.paragraph_format.first_line_indent = Pt(-8)
+                    point_paragraph.paragraph_format.line_spacing = export_line_height
+                    point_paragraph.paragraph_format.space_after = Pt(2)
+                    _add_docx_text(point_paragraph, str(point), _word_font(str(knowledge_body.get("fontFamily") or font_name)), _style_number(knowledge_body, "fontSize", body_size, body_size), color=str(knowledge_body.get("color") or word_color))
                 continue
             if node_type == "text":
                 block = text_map.get(str(node.get("textBlockId") or ""))
@@ -449,22 +474,29 @@ class LessonExportService:
                 block_kind = str(block.get("blockKind") or "body")
                 paragraph = document.add_paragraph()
                 block_style = block.get("style") if isinstance(block.get("style"), dict) else {}
+                configured_block_style = title_style if block_kind == "exam_title" else section_style if block_kind == "section_title" else body_style
+                _apply_docx_paragraph_style(paragraph, configured_block_style)
                 if block_style.get("textAlign"):
                     paragraph.alignment = _docx_alignment(str(block_style["textAlign"]))
                 elif block_kind == "exam_title":
                     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 is_heading = block_kind in {"exam_title", "section_title"}
-                paragraph.paragraph_format.keep_with_next = is_heading
-                paragraph.paragraph_format.space_before = Pt(10 if is_heading else 4)
-                paragraph.paragraph_format.space_after = Pt(6 if is_heading else 4)
-                block_size = title_size if block_kind == "exam_title" else small_title_size if block_kind == "section_title" else body_size
+                paragraph.paragraph_format.keep_with_next = bool(configured_block_style.get("keepWithNext", is_heading))
+                if block_kind == "exam_title":
+                    paragraph.paragraph_format.space_before = Pt(0)
+                    paragraph.paragraph_format.space_after = Pt(6)
+                elif block_kind == "section_title":
+                    paragraph.paragraph_format.space_before = Pt(14)
+                    paragraph.paragraph_format.space_after = Pt(6)
+                block_size = _style_number(configured_block_style, "fontSize", title_size if block_kind == "exam_title" else small_title_size if block_kind == "section_title" else body_size, body_size)
                 _add_docx_text(
                     paragraph,
                     str(block.get("content") or block.get("title") or ""),
-                    font_name,
+                    _word_font(str(configured_block_style.get("fontFamily") or font_name)),
                     block_size,
-                    bold=is_heading or block_style.get("fontWeight") == "bold",
-                    color=word_color,
+                    bold=bool(configured_block_style.get("bold", is_heading)) or block_style.get("fontWeight") == "bold",
+                    italic=bool(configured_block_style.get("italic")),
+                    color=str(configured_block_style.get("color") or word_color),
                 )
                 continue
             if node_type != "question":
@@ -475,10 +507,17 @@ class LessonExportService:
                 continue
             question_number += 1
             paragraph = document.add_paragraph()
-            paragraph.paragraph_format.keep_with_next = True
-            paragraph.paragraph_format.space_before = Pt(float(style.get("questionSpacing") or 10))
-            _format_run(paragraph.add_run(f"{question_number}. "), font_name, body_size)
-            _add_docx_text(paragraph, str(question.get("title") or question.get("stem_text") or ""), font_name, body_size)
+            _apply_docx_paragraph_style(paragraph, body_style)
+            paragraph.paragraph_format.keep_with_next = bool(body_style.get("keepWithNext", True))
+            paragraph.paragraph_format.keep_together = True
+            paragraph.paragraph_format.left_indent = Pt(18)
+            paragraph.paragraph_format.first_line_indent = Pt(-18)
+            paragraph.paragraph_format.line_spacing = export_line_height
+            paragraph.paragraph_format.space_before = Pt(min(10, float(style.get("questionSpacing") or 8)))
+            paragraph.paragraph_format.space_after = Pt(4)
+            number_style = _content_style(content_styles, "questionNumber")
+            _format_run(paragraph.add_run(f"{question_number}. "), _word_font(str(number_style.get("fontFamily") or font_name)), _style_number(number_style, "fontSize", body_size, body_size), bold=bool(number_style.get("bold", False)), color=str(number_style.get("color") or word_color))
+            _add_docx_text(paragraph, str(question.get("title") or question.get("stem_text") or ""), font_name, body_size, color=word_color)
 
             figures = [item for item in question.get("figures") or [] if isinstance(item, dict)]
             for figure in figures:
@@ -492,28 +531,40 @@ class LessonExportService:
                 width_inches = min(available_inches * scale / 100, image_width / 96)
                 picture = document.add_paragraph()
                 picture.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                picture.paragraph_format.space_before = Pt(2)
+                picture.paragraph_format.space_after = Pt(6)
+                picture.paragraph_format.keep_with_next = bool(question.get("options"))
                 picture.add_run().add_picture(image_stream, width=int(width_inches * 914400))
                 if figure.get("caption"):
                     caption = document.add_paragraph()
                     caption.alignment = picture.alignment
-                    _add_docx_text(caption, str(figure["caption"]), font_name, max(9, body_size - 2), italic=True, color=word_color)
+                    caption_style = _content_style(content_styles, "figureCaption")
+                    _apply_docx_paragraph_style(caption, caption_style)
+                    if caption_style.get("textAlign"):
+                        caption.alignment = _docx_alignment(str(caption_style["textAlign"]))
+                    _add_docx_text(caption, str(figure["caption"]), _word_font(str(caption_style.get("fontFamily") or font_name)), _style_number(caption_style, "fontSize", max(9, body_size - 2), max(9, body_size - 2)), italic=bool(caption_style.get("italic", True)), color=str(caption_style.get("color") or word_color))
 
             options_list = [item for item in question.get("options") or [] if isinstance(item, dict)]
             option_layout = str(style.get("optionLayout") or "auto")
-            use_two_columns = option_layout == "double" or (
-                option_layout == "auto"
-                and len(options_list) in {4, 6}
-                and all(len(_office_text(str(item.get("content") or ""))) <= 32 for item in options_list)
-            )
+            use_two_columns = option_layout == "double"
             if use_two_columns and options_list:
                 table = document.add_table(rows=(len(options_list) + 1) // 2, cols=2)
                 table.autofit = False
+                available_width = section.page_width - section.left_margin - section.right_margin
+                for column in table.columns:
+                    for cell in column.cells:
+                        cell.width = int(available_width / 2)
                 for index, option in enumerate(options_list):
                     cell = table.cell(index // 2, index % 2)
                     cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
                     label = str(option.get("opt") or chr(65 + index))
-                    _format_run(cell.paragraphs[0].add_run(f"{label}. "), font_name, body_size)
-                    _add_docx_text(cell.paragraphs[0], str(option.get("content") or ""), font_name, body_size)
+                    option_style = _content_style(content_styles, "options")
+                    _apply_docx_paragraph_style(cell.paragraphs[0], option_style)
+                    cell.paragraphs[0].paragraph_format.left_indent = Pt(18)
+                    cell.paragraphs[0].paragraph_format.line_spacing = export_line_height
+                    cell.paragraphs[0].paragraph_format.space_after = Pt(2)
+                    _format_run(cell.paragraphs[0].add_run(f"{label}. "), _word_font(str(option_style.get("fontFamily") or font_name)), _style_number(option_style, "fontSize", body_size, body_size), color=str(option_style.get("color") or word_color))
+                    _add_docx_text(cell.paragraphs[0], str(option.get("content") or ""), _word_font(str(option_style.get("fontFamily") or font_name)), _style_number(option_style, "fontSize", body_size, body_size), color=str(option_style.get("color") or word_color))
                 borders = OxmlElement("w:tblBorders")
                 for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
                     element = OxmlElement(f"w:{edge}")
@@ -524,12 +575,20 @@ class LessonExportService:
                 for index, option in enumerate(options_list):
                     label = str(option.get("opt") or chr(65 + index))
                     option_paragraph = document.add_paragraph()
-                    _format_run(option_paragraph.add_run(f"{label}. "), font_name, body_size)
-                    _add_docx_text(option_paragraph, str(option.get("content") or ""), font_name, body_size)
+                    option_style = _content_style(content_styles, "options")
+                    _apply_docx_paragraph_style(option_paragraph, option_style)
+                    option_paragraph.paragraph_format.left_indent = Pt(28)
+                    option_paragraph.paragraph_format.first_line_indent = Pt(-10)
+                    option_paragraph.paragraph_format.line_spacing = export_line_height
+                    option_paragraph.paragraph_format.space_after = Pt(3)
+                    option_font = _word_font(str(option_style.get("fontFamily") or font_name))
+                    option_size = _style_number(option_style, "fontSize", body_size, body_size)
+                    _format_run(option_paragraph.add_run(f"{label}. "), option_font, option_size, color=str(option_style.get("color") or word_color))
+                    _add_docx_text(option_paragraph, str(option.get("content") or ""), option_font, option_size, color=str(option_style.get("color") or word_color))
             if answer_position == "end":
                 trailing_answer_blocks.append((question_number, question))
             else:
-                _add_docx_answer_block(document, question, None, options, answer_font, body_size)
+                _add_docx_answer_block(document, question, None, options, answer_font, body_size, answer_style=answer_style, analysis_style=analysis_style)
 
         if trailing_answer_blocks and (options.get("include_answers") or options.get("include_analysis")):
             document.add_page_break()
@@ -538,7 +597,7 @@ class LessonExportService:
             heading_text = "参考答案与解析" if options.get("include_analysis") else "参考答案"
             _format_run(heading.add_run(heading_text), font_name, small_title_size, bold=True, color=word_color)
             for item_number, question in trailing_answer_blocks:
-                _add_docx_answer_block(document, question, item_number, options, answer_font, body_size)
+                _add_docx_answer_block(document, question, item_number, options, answer_font, body_size, answer_style=answer_style, analysis_style=analysis_style)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         document.save(output_path)
@@ -820,24 +879,63 @@ def _add_docx_answer_block(
     options: dict[str, Any],
     font_name: str,
     body_size: float,
+    *,
+    answer_style: dict[str, Any] | None = None,
+    analysis_style: dict[str, Any] | None = None,
 ) -> None:
     from docx.shared import Pt
 
+    answer_style = answer_style or {}
+    analysis_style = analysis_style or {}
     if options.get("include_answers") and question.get("answer"):
         answer = document.add_paragraph()
-        answer.paragraph_format.space_before = Pt(4)
-        prefix = f"{question_number}. 答案：" if question_number is not None else "答案："
-        _format_run(answer.add_run(prefix), font_name, body_size, color="000000")
-        _add_docx_text(answer, str(question["answer"]), font_name, body_size, color="000000")
+        _apply_docx_paragraph_style(answer, answer_style)
+        _shade_docx_paragraph(answer)
+        answer.paragraph_format.left_indent = Pt(0)
+        answer.paragraph_format.right_indent = Pt(0)
+        answer.paragraph_format.line_spacing = 1.45
+        answer.paragraph_format.space_before = Pt(float(answer_style.get("spaceBefore", 5)))
+        answer.paragraph_format.space_after = Pt(2)
+        prefix = f"{question_number}. 【答案】" if question_number is not None else "【答案】"
+        answer_font = _word_font(str(answer_style.get("fontFamily") or font_name)) if answer_style.get("fontFamily") else font_name
+        answer_size = _style_number(answer_style, "fontSize", body_size, body_size)
+        answer_color = str(answer_style.get("color") or "000000")
+        _format_run(answer.add_run(prefix), answer_font, answer_size, bold=True, color=answer_color)
+        _format_run(answer.add_run(" "), answer_font, answer_size, color=answer_color)
+        _add_docx_text(answer, str(question["answer"]), answer_font, answer_size, italic=bool(answer_style.get("italic", False)), color=answer_color)
     if options.get("include_analysis") and question.get("analysis"):
         analysis = document.add_paragraph()
-        prefix = f"{question_number}. 解析：" if question_number is not None and not question.get("answer") else "解析："
-        _format_run(analysis.add_run(prefix), font_name, body_size, color="000000")
-        _add_docx_text(analysis, str(question["analysis"]), font_name, body_size, color="000000")
+        _apply_docx_paragraph_style(analysis, analysis_style)
+        _shade_docx_paragraph(analysis)
+        analysis.paragraph_format.left_indent = Pt(0)
+        analysis.paragraph_format.right_indent = Pt(0)
+        analysis.paragraph_format.line_spacing = 1.45
+        analysis.paragraph_format.space_before = Pt(0)
+        analysis.paragraph_format.space_after = Pt(5)
+        analysis_style = analysis_style or {}
+        analysis_font = _word_font(str(analysis_style.get("fontFamily") or font_name)) if analysis_style.get("fontFamily") else font_name
+        analysis_size = _style_number(analysis_style, "fontSize", body_size, body_size)
+        analysis_color = str(analysis_style.get("color") or "000000")
+        prefix = f"{question_number}. 【详解】" if question_number is not None and not question.get("answer") else "【详解】"
+        _format_run(analysis.add_run(prefix), analysis_font, analysis_size, bold=True, color=analysis_color)
+        _format_run(analysis.add_run(" "), analysis_font, analysis_size, color=analysis_color)
+        _add_docx_text(analysis, str(question["analysis"]), analysis_font, analysis_size, italic=bool(analysis_style.get("italic", False)), color=analysis_color)
+
+
+def _shade_docx_paragraph(paragraph: Any, fill: str = "F2F2F2") -> None:
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    p_pr = paragraph._p.get_or_add_pPr()
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:fill"), fill)
+    shading.set(qn("w:val"), "clear")
+    p_pr.append(shading)
 
 
 def _office_text(value: str) -> str:
     text = _FIGURE_RE.sub("", str(value or ""))
+    text = _normalize_docx_text(text)
 
     def replace_formula(match: re.Match[str]) -> str:
         formula = next((group for group in match.groups() if group is not None), "")
@@ -852,6 +950,7 @@ def _office_text(value: str) -> str:
 
 def _office_text_parts(value: str) -> list[tuple[str, str]]:
     text = _FIGURE_RE.sub("", str(value or ""))
+    text = _normalize_docx_text(text)
     text = re.sub(r"^#{1,4}\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
     text = re.sub(r"`([^`\n]+)`", r"\1", text)
@@ -873,6 +972,13 @@ def _office_text_parts(value: str) -> list[tuple[str, str]]:
     if tail:
         parts.append(("text", tail))
     return parts
+
+
+def _normalize_docx_text(value: str) -> str:
+    """Remove accidental blank lines while preserving intentional single breaks."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    return re.sub(r"\n[ \t]*\n+", "\n", text).strip()
 
 
 def _add_docx_text(
@@ -1148,7 +1254,35 @@ def _docx_alignment(value: str) -> Any:
         "left": WD_ALIGN_PARAGRAPH.LEFT,
         "right": WD_ALIGN_PARAGRAPH.RIGHT,
         "center": WD_ALIGN_PARAGRAPH.CENTER,
+        "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
     }.get(value, WD_ALIGN_PARAGRAPH.CENTER)
+
+
+def _content_style(content_styles: dict[str, Any], name: str) -> dict[str, Any]:
+    value = content_styles.get(name)
+    return value if isinstance(value, dict) else {}
+
+
+def _style_number(style: dict[str, Any], key: str, fallback: Any, default: float) -> float:
+    try:
+        return float(style.get(key, fallback if fallback is not None else default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _apply_docx_paragraph_style(paragraph: Any, style: dict[str, Any]) -> None:
+    from docx.shared import Pt
+
+    if style.get("textAlign"):
+        paragraph.alignment = _docx_alignment(str(style["textAlign"]))
+    if style.get("lineHeight") is not None:
+        paragraph.paragraph_format.line_spacing = float(style["lineHeight"])
+    if style.get("spaceBefore") is not None:
+        paragraph.paragraph_format.space_before = Pt(float(style["spaceBefore"]))
+    if style.get("spaceAfter") is not None:
+        paragraph.paragraph_format.space_after = Pt(float(style["spaceAfter"]))
+    if style.get("keepWithNext") is not None:
+        paragraph.paragraph_format.keep_with_next = bool(style["keepWithNext"])
 
 
 def _word_font(value: str) -> str:

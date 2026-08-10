@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from ..schemas.image_management import (
     AddImageRequest,
+    AddCachedImageRequest,
+    CachedImageAsset,
+    CacheUploadResponse,
     ImageListResponse,
     QuestionImageDetail,
     ReorderRequest,
@@ -22,6 +25,21 @@ def build_image_management_router(
 
     router = APIRouter(prefix="/api/questions", tags=["image-management"])
 
+    @router.get("/images/cache", response_model=list[CachedImageAsset], summary="列出临时图片缓存")
+    async def list_cache_images(keyword: str = "", limit: int = 200) -> list[CachedImageAsset]:
+        return service.list_cache_images(keyword=keyword, limit=limit)
+
+    @router.post("/images/cache-upload", response_model=CacheUploadResponse, summary="上传图片或从 Word 提取图片")
+    async def upload_cache_images(files: list[UploadFile] = File(...)) -> CacheUploadResponse:
+        try:
+            uploads = [(file.filename or "upload", await file.read()) for file in files]
+            return service.upload_cache_files(uploads)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            for file in files:
+                await file.close()
+
     @router.get("/{question_id}/images", response_model=ImageListResponse, summary="列出题目所有图片")
     async def list_images(question_id: str) -> ImageListResponse:
         try:
@@ -33,6 +51,13 @@ def build_image_management_router(
     async def add_image(question_id: str, req: AddImageRequest) -> QuestionImageDetail:
         try:
             return service.add_image(question_id, req)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/{question_id}/images/from-cache", response_model=QuestionImageDetail, summary="从图片缓存绑定")
+    async def add_cached_image(question_id: str, req: AddCachedImageRequest) -> QuestionImageDetail:
+        try:
+            return service.add_cached_image(question_id, req)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

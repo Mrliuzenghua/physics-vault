@@ -7,6 +7,7 @@ from physics_vault_api.app import create_app
 from physics_vault_api.config import McpSettings
 from physics_vault_api.routers import mcp as mcp_router
 from physics_vault_api.runtime_config import AiServiceConfig, RuntimeAiConfig
+from physics_vault_api.services.ai_http_client import AiHttpClient
 from physics_vault_api.services.mcp_gateway import McpGatewayService
 
 
@@ -137,6 +138,161 @@ def test_chat_test_validates_role_and_temperature_before_provider_call() -> None
     # Empty body
     response = client.post("/api/mcp/test-connection")
     assert response.status_code == 422
+
+
+def test_refine_question_format_endpoint_uses_dedicated_gateway_method(monkeypatch) -> None:
+    received: dict[str, object] = {}
+
+    async def fake_refine(self, question):  # type: ignore[no-untyped-def]
+        received.update(question)
+        return {
+            "question_id": question["question_id"],
+            "title": r"已规范的 $\varphi_0$",
+            "options": question["options"],
+            "answer": question["answer"],
+            "analysis": question["analysis"],
+        }
+
+    monkeypatch.setattr(McpGatewayService, "refine_question_format", fake_refine)
+    response = TestClient(create_app()).post(
+        "/api/mcp/refine-question-format",
+        json={
+            "question": {
+                "question_id": "q-format",
+                "title": r"$\varphi_0$",
+                "options": [{"opt": "A", "content": "$x$"}],
+                "answer": "A",
+                "analysis": "",
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert received["question_id"] == "q-format"
+    assert response.json()["data"]["title"] == r"已规范的 $\varphi_0$"
+
+
+def test_format_refinement_preserves_option_identity_and_extra_data(monkeypatch) -> None:
+    client = AiHttpClient("https://example.com/v1", "secret", "deepseek-chat")
+    monkeypatch.setattr(
+        client,
+        "_call",
+        lambda *_args, **_kwargs: {
+            "title": "规范 $x$",
+            "options": [
+                {"opt": "B", "content": "规范 B"},
+                {"opt": "A", "content": "规范 A"},
+            ],
+            "answer": "A",
+            "analysis": "规范解析",
+        },
+    )
+
+    result = client.refine_question_format(
+        {
+            "question_id": "q-format",
+            "title": "原题 $x$",
+            "options": [
+                {"opt": "A", "content": "原 A", "asset_id": "asset-a"},
+                {"opt": "B", "content": "原 B", "asset_id": "asset-b"},
+            ],
+            "answer": "原答案",
+            "analysis": "原解析",
+        }
+    )
+
+    assert result["title"] == "规范 $x$"
+    assert result["options"] == [
+        {"opt": "A", "content": "规范 A", "asset_id": "asset-a"},
+        {"opt": "B", "content": "规范 B", "asset_id": "asset-b"},
+    ]
+
+
+def test_format_refinement_asks_model_to_reflow_ocr_soft_wraps(monkeypatch) -> None:
+    client = AiHttpClient("https://example.com/v1", "secret", "deepseek-chat")
+    captured: dict[str, object] = {}
+
+    def fake_call(messages, **_kwargs):  # type: ignore[no-untyped-def]
+        captured["messages"] = messages
+        return {
+            "title": r"持续时间为$\Delta t$，经过狭缝后……",
+            "options": [],
+            "answer": "",
+            "analysis": "",
+        }
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    result = client.refine_question_format(
+        {
+            "question_id": "soft-wrap",
+            "title": "持续时间为\n$\\Delta t$\n，经过狭缝后……",
+            "options": [],
+            "answer": "",
+            "analysis": "",
+        }
+    )
+
+    system_prompt = captured["messages"][0]["content"]  # type: ignore[index]
+    assert "不能因为原文换行就保留它" in system_prompt
+    assert "删除没有语义作用的空白行" in system_prompt
+    assert "禁止输出连续空行" in system_prompt
+    assert r"$\text{\Omega}$" in system_prompt
+    assert r"$300.0\,\Omega$" in system_prompt
+    assert r"\[10]" in system_prompt
+    assert "孤立连续数字行" in system_prompt
+    assert result["title"] == r"持续时间为$\Delta t$，经过狭缝后……"
+
+
+def test_format_refinement_uses_deepseek_flash_for_fast_formatting(monkeypatch) -> None:
+    client = AiHttpClient("https://api.deepseek.com", "secret", "deepseek-v4-pro")
+    captured: dict[str, object] = {}
+
+    def fake_call(_messages, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return {"title": "规范题干", "options": [], "answer": "", "analysis": ""}
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    client.refine_question_format(
+        {"question_id": "fast", "title": "短题干", "options": [], "answer": "", "analysis": ""}
+    )
+
+    assert captured["model_name"] == "deepseek-v4-flash"
+    assert captured["max_tokens"] == 1200
+    assert captured["timeout_seconds"] == 60
+    assert captured["thinking"] == "disabled"
+
+
+def test_format_refinement_accepts_empty_options_for_experiment_steps(monkeypatch) -> None:
+    client = AiHttpClient("https://example.com/v1", "secret", "deepseek-chat")
+    captured: dict[str, object] = {}
+
+    def fake_call(messages, **_kwargs):  # type: ignore[no-untyped-def]
+        captured["messages"] = messages
+        return {
+            "title": "实验步骤：\n\n（1）调节装置。\n\n（2）记录数据。",
+            "options": [],
+            "answer": "",
+            "analysis": "",
+        }
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    result = client.refine_question_format(
+        {
+            "question_id": "experiment-steps",
+            "question_type": "experiment",
+            "title": "实验步骤如下：",
+            "options": [
+                {"opt": "A", "content": "调节装置。"},
+                {"opt": "B", "content": "记录数据。"},
+            ],
+            "answer": "",
+            "analysis": "",
+        }
+    )
+
+    system_prompt = captured["messages"][0]["content"]  # type: ignore[index]
+    assert "实验题绝不能保留选择题选项" in system_prompt
+    assert result["options"] == []
 
 
 def test_test_connection_stdio_unconfigured() -> None:

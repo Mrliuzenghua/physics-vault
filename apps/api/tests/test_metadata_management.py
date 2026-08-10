@@ -117,6 +117,55 @@ def test_metadata_update_rejects_question_content_and_bad_enums(tmp_path: Path) 
     assert invalid_paper["summary"]["failed"] == 1
 
 
+def test_metadata_update_can_associate_paper_and_set_paper_fields_in_one_call(tmp_path: Path) -> None:
+    db_path = _database(tmp_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO papers (paper_id, year, exam_type, region, paper_name) VALUES (?, ?, ?, ?, ?)",
+            ("paper-2026-gd", None, None, None, "2026 Guangdong Physics"),
+        )
+        conn.execute(
+            "INSERT INTO questions (question_id, canonical_title, question_type, difficulty, source) VALUES (?, ?, ?, ?, ?)",
+            ("q-unlinked", "Unlinked question", "single_choice", 2, "imported"),
+        )
+        conn.execute(
+            "INSERT INTO question_text_index (question_id, stem_text, source_text, tags_json) VALUES (?, ?, ?, ?)",
+            ("q-unlinked", "stem", "source", "[]"),
+        )
+
+    result = MetadataManagementService(db_path).batch_update_question_metadata(
+        [{
+            "question_id": "q-unlinked",
+            "primary_paper_id": "paper-2026-gd",
+            "year": 2026,
+            "region": "Guangdong",
+            "exam_type": "Gaokao",
+        }],
+        reason="associate imported questions",
+    )
+
+    assert result["ok"] is True
+    assert result["summary"] == {"received": 1, "updated": 1, "skipped": 0, "failed": 0}
+    assert result["updated"][0]["changes"]["primary_paper_id"] == "paper-2026-gd"
+    with sqlite3.connect(db_path) as conn:
+        question = conn.execute("SELECT primary_paper_id FROM questions WHERE question_id = ?", ("q-unlinked",)).fetchone()
+        index_row = conn.execute("SELECT paper_id FROM question_text_index WHERE question_id = ?", ("q-unlinked",)).fetchone()
+        paper = conn.execute("SELECT year, region, exam_type FROM papers WHERE paper_id = ?", ("paper-2026-gd",)).fetchone()
+    assert question == ("paper-2026-gd",)
+    assert index_row == ("paper-2026-gd",)
+    assert paper == (2026, "Guangdong", "Gaokao")
+
+
+def test_metadata_update_rejects_unknown_paper_id(tmp_path: Path) -> None:
+    result = MetadataManagementService(_database(tmp_path)).batch_update_question_metadata(
+        [{"question_id": "q-1", "primary_paper_id": "missing-paper"}],
+    )
+
+    assert result["ok"] is False
+    assert result["summary"]["failed"] == 1
+    assert "missing-paper" in result["failed"][0]["error"]
+
+
 def test_knowledge_suggestions_return_only_existing_topic_ids(tmp_path: Path) -> None:
     service = MetadataManagementService(_database(tmp_path))
     created = service.create_knowledge_points(
@@ -180,6 +229,77 @@ def test_organize_knowledge_tree_creates_reuses_and_binds(tmp_path: Path) -> Non
     assert binding == (topic3_id,)
 
 
+def test_metadata_supports_three_ranked_knowledge_points_and_audits_change(tmp_path: Path) -> None:
+    db_path = _database(tmp_path)
+    service = MetadataManagementService(db_path)
+    created = service.create_knowledge_points(
+        [
+            {"topic1_id": "KP-MECH", "topic1_name": "力学", "topic2_name": "动量", "topic3_name": name}
+            for name in ("动量守恒定律", "碰撞模型", "动量定理")
+        ]
+    )
+    topic3_ids = [item["topic3_id"] for item in created["created"]]
+
+    result = service.batch_update_question_metadata(
+        [{
+            "question_id": "q-1",
+            "topic3_ids": topic3_ids,
+            "knowledge_source": "agent_maintenance",
+            "knowledge_confidences": [0.98, 0.91, 0.86],
+            "knowledge_note": "根据题干和解析维护",
+        }],
+        reason="修复知识点绑定",
+    )
+
+    assert result["ok"] is True
+    assert result["audit_batch_id"]
+    with sqlite3.connect(db_path) as conn:
+        bindings = conn.execute(
+            "SELECT topic3_id, rank, source, confidence, note FROM question_knowledge_points WHERE question_id='q-1' ORDER BY rank"
+        ).fetchall()
+        audit = conn.execute(
+            "SELECT change_type, reason, changed_count FROM change_batches WHERE batch_id=?",
+            (result["audit_batch_id"],),
+        ).fetchone()
+    assert [row[0] for row in bindings] == topic3_ids
+    assert [row[1] for row in bindings] == [1, 2, 3]
+    assert all(row[2] == "agent_maintenance" for row in bindings)
+    assert [round(row[3], 2) for row in bindings] == [0.98, 0.91, 0.86]
+    assert all(row[4] == "根据题干和解析维护" for row in bindings)
+    assert audit == ("knowledge_binding_normalization", "修复知识点绑定", 1)
+
+
+def test_knowledge_maintenance_repairs_high_confidence_wrong_label_without_self_confirmation(tmp_path: Path) -> None:
+    db_path = _database(tmp_path)
+    service = MetadataManagementService(db_path)
+    created = service.create_knowledge_points(
+        [
+            {"topic1_id": "KP-MECH", "topic1_name": "力学", "topic2_name": "万有引力与航天", "topic3_name": "万有引力定律"},
+            {"topic1_id": "KP-OPT", "topic1_name": "光学", "topic2_name": "几何光学", "topic3_name": "折射定律"},
+        ]
+    )
+    by_name = {item["topic3_name"]: item["topic3_id"] for item in created["created"]}
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE question_text_index SET stem_text='根据万有引力定律计算卫星的环绕速度' WHERE question_id='q-1'")
+    service.batch_update_question_metadata(
+        [{"question_id": "q-1", "topic3_ids": [by_name["折射定律"]]}],
+        reason="seed wrong label",
+    )
+
+    result = service.maintain_question_knowledge_points(["q-1"], auto_fix=True)
+
+    diagnosis = result["items"][0]
+    assert diagnosis["status"] == "suspected_mismatch"
+    assert diagnosis["auto_fix_safe"] is True
+    assert diagnosis["recommended_topic3_ids"] == [by_name["万有引力定律"]]
+    assert result["repair"]["audit_batch_id"]
+    with sqlite3.connect(db_path) as conn:
+        repaired = conn.execute(
+            "SELECT topic3_id, source FROM question_knowledge_points WHERE question_id='q-1'"
+        ).fetchone()
+    assert repaired == (by_name["万有引力定律"], "agent_maintenance")
+
+
 def test_knowledge_search_uses_fuzzy_chinese_aliases(tmp_path: Path) -> None:
     service = MetadataManagementService(_database(tmp_path))
     created = service.create_knowledge_points(
@@ -198,6 +318,24 @@ def test_knowledge_search_uses_fuzzy_chinese_aliases(tmp_path: Path) -> None:
     assert result
     assert result[0]["topic3_id"] == created["created"][0]["topic3_id"]
     assert result[0]["score"] >= 12
+
+
+def test_knowledge_search_supports_reference_frame_synonyms_and_pinyin(tmp_path: Path) -> None:
+    service = MetadataManagementService(_database(tmp_path))
+    created = service.create_knowledge_points(
+        [{
+            "topic1_id": "KP-MECH",
+            "topic1_name": "\u529b\u5b66",
+            "topic2_name": "\u8fd0\u52a8\u7684\u5408\u6210\u4e0e\u5206\u89e3",
+            "topic3_name": "\u8fd0\u52a8\u7684\u5408\u6210\u4e0e\u5206\u89e3",
+        }]
+    )
+
+    by_synonym = service.search_knowledge_points("\u53c2\u8003\u7cfb")
+    by_pinyin = service.search_knowledge_points("cankao xi")
+
+    assert by_synonym[0]["topic3_id"] == created["created"][0]["topic3_id"]
+    assert by_pinyin[0]["topic3_id"] == created["created"][0]["topic3_id"]
 
 
 def test_import_metadata_normalization_extracts_answer_fields() -> None:

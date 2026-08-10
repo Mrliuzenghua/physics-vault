@@ -66,6 +66,10 @@ class ChatTestResponse(BaseModel):
     usage: dict[str, Any] | None = None
 
 
+class RefineQuestionFormatRequest(BaseModel):
+    question: dict[str, Any]
+
+
 def _http_error(exc: AppError) -> HTTPException:
     status_code = 503 if exc.code in {"AI_DISABLED", "MCP_TIMEOUT", "MCP_PROCESS_EXITED"} else 400
     return HTTPException(
@@ -208,6 +212,16 @@ def build_mcp_router(service: McpGatewayService) -> APIRouter:
             reply=reply,
             usage=response.usage.model_dump() if response.usage else None,
         )
+
+    @router.post("/refine-question-format", response_model=McpTaskResponse)
+    async def refine_question_format(request: RefineQuestionFormatRequest) -> McpTaskResponse:
+        try:
+            data = await service.refine_question_format(request.question)
+        except AppError as exc:
+            raise _http_error(exc) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise _provider_error(exc) from exc
+        return McpTaskResponse(data=data)
 
     @router.post("/parse-document", response_model=McpTaskResponse)
     async def parse_document(request: ParseDocumentRequest) -> McpTaskResponse:

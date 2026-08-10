@@ -240,6 +240,8 @@ def test_question_picker_prompt_keeps_page_context_separate():
 
     assert "当前页面上下文：" in prompt
     assert "当前校对任务 task_id：task-123" in prompt
+    assert "不能让老师自行处理" in prompt
+    assert "行内公式统一为 $...$" in prompt
 
 
 def test_review_center_request_does_not_fallback_to_formal_question_search(monkeypatch, tmp_path):
@@ -271,6 +273,30 @@ def test_review_center_request_does_not_fallback_to_formal_question_search(monke
     assert response.actions == []
     assert "校对中心清洗任务" in response.reply
     assert response.warnings == []
+
+
+def test_risk_repair_request_is_routed_to_review_center(monkeypatch, tmp_path):
+    config_path = Path(".codex-run") / f"agent-config-{uuid4().hex}.json"
+    monkeypatch.setattr(agent_module, "_CONFIG_FILE", config_path)
+    monkeypatch.setattr(agent_module, "default_db_path", lambda: tmp_path / "missing.sqlite3")
+    _save_config(AgentConfig(claude_code_path="claude.cmd", enabled=True, timeout_seconds=90))
+    monkeypatch.setattr(agent_module, "_check_claude_code", lambda _config: (True, "ok", "test"))
+
+    async def fake_run_claude_print_stream(_config, _prompt, **_kwargs):
+        raise TimeoutError("timeout")
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(agent_module, "_run_claude_print_stream", fake_run_claude_print_stream)
+
+    repo = TrackingRepository()
+    response = asyncio.run(
+        ClaudeCodeAgentService(repo).pick_questions(
+            QuestionPickerAgentRequest(messages=[AiAssistantMessage(role="user", content="帮我修复检验页的全部风险")])
+        )
+    )
+
+    assert repo.search_calls == 0
+    assert response.selected_questions == []
 
 
 def test_review_center_timeout_reads_current_task_directly(monkeypatch, tmp_path):

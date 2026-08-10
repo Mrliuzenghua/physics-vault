@@ -167,6 +167,7 @@ class TaskCenterService:
         include_analysis: bool,
         file_name: str | None,
         context: TaskActionContext,
+        answer_position: str = "after_question",
     ) -> tuple[dict[str, Any], str]:
         if export_format not in {"word", "pptx"}:
             raise HTTPException(status_code=400, detail=f"Unsupported export format: {export_format}")
@@ -176,6 +177,7 @@ class TaskCenterService:
             lesson_package=lesson_package,
             include_answers=include_answers,
             include_analysis=include_analysis,
+            answer_position=answer_position,  # type: ignore[arg-type]
             file_name=file_name,
         )
         task = self._export_dispatcher.submit(

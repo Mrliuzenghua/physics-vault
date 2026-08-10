@@ -52,6 +52,30 @@ def test_search_repository_recovers_when_database_becomes_available() -> None:
     assert rows[0]["question_id"] == "q-live"
 
 
+def test_question_write_rejects_exact_duplicate_content() -> None:
+    db_path = initialize_database(_temp_db())
+    service = QuestionWriteService(QuestionWriteRepository(str(db_path)))
+    payload = {
+        "question_type": "single_choice",
+        "title": "A sufficiently long Newton second law duplicate question",
+        "options": [{"opt": "A", "content": "F equals ma"}],
+        "answer": "A",
+        "analysis": "Apply Newton's second law.",
+        "difficulty": 2,
+    }
+
+    first = service.save_batch([{**payload, "question_id": "q-original"}])
+    second = service.save_batch([{**payload, "question_id": "q-duplicate"}])
+
+    assert first.saved_count == 1
+    assert second.saved_count == 0
+    assert any("q-original" in error for error in second.errors)
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("SELECT content_hash FROM questions WHERE question_id = 'q-original'").fetchone()[0]
+    assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 1
+    conn.close()
+
+
 def test_delete_many_removes_question_bindings_and_soft_references() -> None:
     db_path = initialize_database(_temp_db())
     _save_question(db_path)

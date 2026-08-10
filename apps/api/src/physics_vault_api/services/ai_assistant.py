@@ -257,11 +257,13 @@ def _row_to_context(row: dict[str, Any]) -> AiAssistantQuestionContext:
         except Exception:  # noqa: BLE001
             tags = []
     knowledge_points = row.get("knowledge_points") or []
-    kp_name = row.get("topic3") or row.get("knowledge_point")
-    if not kp_name and knowledge_points:
-        first = knowledge_points[0]
-        if isinstance(first, dict):
-            kp_name = first.get("topic3_name") or first.get("topic2_name") or first.get("topic1_name")
+    kp_names = [
+        str(point.get("topic3_name") or point.get("topic2_name") or point.get("topic1_name") or "").strip()
+        for point in knowledge_points[:3]
+        if isinstance(point, dict)
+    ]
+    kp_names = list(dict.fromkeys(name for name in kp_names if name))
+    kp_name = "、".join(kp_names) or row.get("topic3") or row.get("knowledge_point")
 
     return AiAssistantQuestionContext(
         question_id=str(row.get("question_id") or ""),

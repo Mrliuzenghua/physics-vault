@@ -14,7 +14,7 @@ def build_system_status_router(search_repo: QuestionSearchRepository) -> APIRout
     router = APIRouter(prefix="/api/system", tags=["system-status"])
 
     @router.get("/db-status")
-    async def db_status() -> dict[str, Any]:
+    def db_status() -> dict[str, Any]:
         db_path = default_db_path()
         status: dict[str, Any] = {
             "db_path": str(db_path),

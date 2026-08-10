@@ -4,18 +4,24 @@ import hashlib
 import json
 import re
 import sqlite3
+import uuid
 from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 from ..database import connect_db
 from ..paths import default_db_path
+from .embedding_refresh import schedule_question_embedding_refresh
+from .method_feature_index import refresh_question_method_features
 
 
 QUESTION_TYPES = {"single_choice", "multi_choice", "fill", "experiment", "calculation"}
 MAX_METADATA_UPDATES = 100
 MAX_KNOWLEDGE_POINTS = 100
 MAX_TAGS_PER_QUESTION = 20
+MAX_KNOWLEDGE_POINTS_PER_QUESTION = 3
+KNOWLEDGE_SUGGESTION_THRESHOLD = 18
+KNOWLEDGE_AUTO_FIX_THRESHOLD = 80
 
 
 class MetadataManagementService:
@@ -62,7 +68,7 @@ class MetadataManagementService:
         *,
         max_suggestions: int = 3,
     ) -> dict[str, Any]:
-        limit = min(max(int(max_suggestions or 3), 1), 5)
+        limit = min(max(int(max_suggestions or 3), 1), MAX_KNOWLEDGE_POINTS_PER_QUESTION)
         with closing(self._connect(writable=False)) as conn:
             rows = conn.execute(
                 """
@@ -136,6 +142,196 @@ class MetadataManagementService:
                 "knowledge_point_count": len(points),
             },
         }
+
+    def diagnose_question_knowledge_points(
+        self,
+        question_ids: list[str],
+        *,
+        max_suggestions: int = MAX_KNOWLEDGE_POINTS_PER_QUESTION,
+    ) -> dict[str, Any]:
+        """Compare canonical bindings with evidence from the question itself.
+
+        Existing labels are deliberately excluded from the evidence corpus so a
+        stale label cannot confirm itself. Automatic repairs are recommended only
+        for high-confidence direct matches; ambiguous cases remain review-only.
+        """
+
+        clean_ids = list(dict.fromkeys(str(item or "").strip() for item in question_ids if str(item or "").strip()))
+        if not clean_ids:
+            return _error("INVALID_ARGUMENT", "question_ids 至少需要一个题号。", "question_ids")
+        if len(clean_ids) > MAX_METADATA_UPDATES:
+            return _error("LIMIT_EXCEEDED", f"一次最多诊断 {MAX_METADATA_UPDATES} 道题。", "question_ids")
+        limit = min(max(int(max_suggestions or MAX_KNOWLEDGE_POINTS_PER_QUESTION), 1), MAX_KNOWLEDGE_POINTS_PER_QUESTION)
+        placeholders = ",".join("?" for _ in clean_ids)
+        with closing(self._connect(writable=False)) as conn:
+            point_rows = conn.execute(
+                """
+                SELECT topic3_id, topic3_name, topic2_id, topic2_name,
+                       topic1_id, topic1_name, source_chapter
+                FROM knowledge_points
+                WHERE status = 'active'
+                ORDER BY topic1_id, topic2_id, topic3_name
+                """
+            ).fetchall()
+            question_rows = conn.execute(
+                f"""
+                SELECT q.question_id, q.canonical_title, qti.title_text, qti.stem_text,
+                       qti.stem_clean_text, qti.analysis_text
+                FROM questions q
+                LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
+                WHERE q.question_id IN ({placeholders})
+                """,
+                clean_ids,
+            ).fetchall()
+            binding_rows = conn.execute(
+                f"""
+                SELECT question_id, rank, topic3_id, topic3_name, topic2_id,
+                       topic2_name, topic1_id, topic1_name, source, confidence, note
+                FROM question_knowledge_points_view
+                WHERE question_id IN ({placeholders})
+                ORDER BY question_id, rank, topic3_id
+                """,
+                clean_ids,
+            ).fetchall()
+
+        points = [dict(row) for row in point_rows]
+        questions = {str(row["question_id"]): dict(row) for row in question_rows}
+        current_by_question: dict[str, list[dict[str, Any]]] = {qid: [] for qid in clean_ids}
+        for row in binding_rows:
+            current_by_question.setdefault(str(row["question_id"]), []).append(dict(row))
+
+        items: list[dict[str, Any]] = []
+        missing_ids: list[str] = []
+        safe_updates: list[dict[str, Any]] = []
+        for question_id in clean_ids:
+            question = questions.get(question_id)
+            if question is None:
+                missing_ids.append(question_id)
+                continue
+            evidence_text = " ".join(
+                str(question.get(key) or "")
+                for key in ("canonical_title", "title_text", "stem_clean_text", "stem_text", "analysis_text")
+            )
+            corpus = _search_text(evidence_text)
+            ranked = sorted(
+                ((_knowledge_score(corpus, point), point) for point in points),
+                key=lambda item: (-item[0], item[1]["topic3_id"]),
+            )
+            suggestions = [
+                {
+                    **point,
+                    "score": score,
+                    "confidence": _confidence(score),
+                    "rationale": _knowledge_rationale(corpus, point, score),
+                }
+                for score, point in ranked
+                if score >= KNOWLEDGE_SUGGESTION_THRESHOLD
+            ][:limit]
+            current = current_by_question.get(question_id, [])
+            current_ids = [str(point["topic3_id"]) for point in current]
+            score_by_id = {str(point["topic3_id"]): score for score, point in ranked}
+            current_with_evidence = [
+                {**point, "evidence_score": score_by_id.get(str(point["topic3_id"]), 0)}
+                for point in current
+            ]
+            suggested_ids = [str(point["topic3_id"]) for point in suggestions]
+            strong_ids = [
+                str(point["topic3_id"])
+                for point in suggestions
+                if int(point["score"]) >= 45
+            ][:MAX_KNOWLEDGE_POINTS_PER_QUESTION]
+            top_score = int(suggestions[0]["score"]) if suggestions else 0
+            primary_score = score_by_id.get(current_ids[0], 0) if current_ids else 0
+
+            if not current_ids:
+                status = "missing"
+            elif top_score >= KNOWLEDGE_AUTO_FIX_THRESHOLD and suggested_ids[0] not in current_ids and primary_score < 45:
+                status = "suspected_mismatch"
+            elif len(current_ids) < MAX_KNOWLEDGE_POINTS_PER_QUESTION and any(item not in current_ids for item in strong_ids):
+                status = "incomplete"
+            elif primary_score < KNOWLEDGE_SUGGESTION_THRESHOLD and top_score >= 45:
+                status = "needs_review"
+            else:
+                status = "healthy"
+
+            if status == "incomplete":
+                recommended_ids = list(dict.fromkeys([*current_ids, *strong_ids]))[:MAX_KNOWLEDGE_POINTS_PER_QUESTION]
+            elif status in {"missing", "suspected_mismatch"}:
+                recommended_ids = strong_ids
+            else:
+                recommended_ids = current_ids
+            auto_fix_safe = (
+                status in {"missing", "suspected_mismatch", "incomplete"}
+                and top_score >= KNOWLEDGE_AUTO_FIX_THRESHOLD
+                and bool(recommended_ids)
+                and recommended_ids != current_ids
+            )
+            item = {
+                "question_id": question_id,
+                "title_preview": " ".join(str(question.get("title_text") or question.get("canonical_title") or "").split())[:160],
+                "status": status,
+                "current": current_with_evidence,
+                "suggestions": suggestions,
+                "recommended_topic3_ids": recommended_ids,
+                "target_count": MAX_KNOWLEDGE_POINTS_PER_QUESTION,
+                "auto_fix_safe": auto_fix_safe,
+                "reason": (
+                    "题目正文直接命中了新的三级知识点，且当前主知识点缺少文本证据。"
+                    if status == "suspected_mismatch"
+                    else "题目还有证据充分的辅助知识点，可补充到最多三个。"
+                    if status == "incomplete"
+                    else "题目尚未绑定知识点。"
+                    if status == "missing"
+                    else "现有绑定与题目证据基本一致。"
+                    if status == "healthy"
+                    else "现有绑定证据较弱，但自动修改的置信度不足。"
+                ),
+            }
+            items.append(item)
+            if auto_fix_safe:
+                confidence_by_id = {str(point["topic3_id"]): min(float(point["score"]) / 100.0, 1.0) for point in suggestions}
+                safe_updates.append(
+                    {
+                        "question_id": question_id,
+                        "topic3_ids": recommended_ids,
+                        "knowledge_source": "agent_maintenance",
+                        "knowledge_confidences": [confidence_by_id.get(topic3_id, 0.75) for topic3_id in recommended_ids],
+                        "knowledge_note": "智能体根据题干与解析进行高置信度知识点维护",
+                    }
+                )
+
+        return {
+            "ok": True,
+            "items": items,
+            "missing_question_ids": missing_ids,
+            "safe_updates": safe_updates,
+            "summary": {
+                "requested": len(clean_ids),
+                "diagnosed": len(items),
+                "missing_questions": len(missing_ids),
+                "healthy": sum(item["status"] == "healthy" for item in items),
+                "incomplete": sum(item["status"] == "incomplete" for item in items),
+                "suspected_mismatch": sum(item["status"] == "suspected_mismatch" for item in items),
+                "needs_review": sum(item["status"] == "needs_review" for item in items),
+                "safe_fix_count": len(safe_updates),
+            },
+        }
+
+    def maintain_question_knowledge_points(
+        self,
+        question_ids: list[str],
+        *,
+        auto_fix: bool = True,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        diagnosis = self.diagnose_question_knowledge_points(question_ids)
+        if not diagnosis.get("ok") or not auto_fix or not diagnosis.get("safe_updates"):
+            return {**diagnosis, "auto_fix": auto_fix, "repair": None}
+        repair = self.batch_update_question_metadata(
+            diagnosis["safe_updates"],
+            reason=reason or "智能体检索后自动维护高置信度知识点绑定",
+        )
+        return {**diagnosis, "auto_fix": True, "repair": repair}
 
     def search_knowledge_points(
         self,
@@ -220,9 +416,18 @@ class MetadataManagementService:
                             }
                         )
                         continue
+                    if len(raw_points) > MAX_KNOWLEDGE_POINTS_PER_QUESTION:
+                        failed.append(
+                            {
+                                "index": index,
+                                "question_id": question_id,
+                                "error": f"每道题最多绑定 {MAX_KNOWLEDGE_POINTS_PER_QUESTION} 个三级知识点。",
+                            }
+                        )
+                        continue
 
                     resolved: list[dict[str, Any]] = []
-                    for point_index, raw_point in enumerate(raw_points[:3]):
+                    for point_index, raw_point in enumerate(raw_points):
                         if not isinstance(raw_point, dict):
                             failed.append(
                                 {
@@ -337,6 +542,7 @@ class MetadataManagementService:
         updated: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
+        audit_batch_id: str | None = None
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -357,14 +563,24 @@ class MetadataManagementService:
                                 "error": str(exc),
                             }
                         )
+                audit_batch_id = _record_knowledge_binding_audit(conn, updated, reason)
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
         clean_reason = " ".join(str(reason or "").split())[:300] or None
+        schedule_question_embedding_refresh(
+            [str(item["question_id"]) for item in updated],
+            db_path=self._db_path,
+        )
+        refresh_question_method_features(
+            [str(item["question_id"]) for item in updated],
+            db_path=self._db_path,
+        )
         return {
             "ok": not failed,
             "reason": clean_reason,
+            "audit_batch_id": audit_batch_id,
             "updated": updated,
             "skipped": skipped,
             "failed": failed,
@@ -497,7 +713,8 @@ class MetadataManagementService:
 
         allowed = {
             "question_id", "tags", "topic3_ids", "difficulty", "question_type",
-            "source_normalized", "year", "region", "exam_type",
+            "source_normalized", "primary_paper_id", "year", "region", "exam_type",
+            "knowledge_source", "knowledge_confidences", "knowledge_note",
         }
         unknown = sorted(set(raw) - allowed)
         if unknown:
@@ -525,11 +742,31 @@ class MetadataManagementService:
             question_sets.append("source = ?")
             question_params.append(source)
             changes["source_normalized"] = source
+        effective_paper_id = str(question["primary_paper_id"] or "").strip()
+        if "primary_paper_id" in raw and raw.get("primary_paper_id") is not None:
+            primary_paper_id = str(raw["primary_paper_id"]).strip()
+            if not primary_paper_id:
+                raise ValueError("primary_paper_id 不能为空；如需解除关联，请使用专门的解绑流程。")
+            paper = conn.execute(
+                "SELECT paper_id FROM papers WHERE paper_id = ?",
+                (primary_paper_id,),
+            ).fetchone()
+            if paper is None:
+                raise ValueError(f"正式题库中不存在试卷：{primary_paper_id}")
+            effective_paper_id = primary_paper_id
+            question_sets.append("primary_paper_id = ?")
+            question_params.append(primary_paper_id)
+            changes["primary_paper_id"] = primary_paper_id
         if question_sets:
             question_params.append(question_id)
             conn.execute(
                 f"UPDATE questions SET {', '.join(question_sets)}, updated_at = CURRENT_TIMESTAMP WHERE question_id = ?",
                 question_params,
+            )
+        if "primary_paper_id" in raw and raw.get("primary_paper_id") is not None:
+            conn.execute(
+                "UPDATE question_text_index SET paper_id = ?, updated_at = CURRENT_TIMESTAMP WHERE question_id = ?",
+                (effective_paper_id, question_id),
             )
 
         if "tags" in raw and raw.get("tags") is not None:
@@ -548,8 +785,28 @@ class MetadataManagementService:
 
         if "topic3_ids" in raw and raw.get("topic3_ids") is not None:
             topic3_ids = list(dict.fromkeys(str(item).strip() for item in raw.get("topic3_ids") or [] if str(item).strip()))
-            if len(topic3_ids) > 3:
-                raise ValueError("每道题最多绑定 3 个知识点。")
+            if len(topic3_ids) > MAX_KNOWLEDGE_POINTS_PER_QUESTION:
+                raise ValueError(f"每道题最多绑定 {MAX_KNOWLEDGE_POINTS_PER_QUESTION} 个三级知识点。")
+            before_topic3_ids = [
+                str(row["topic3_id"])
+                for row in conn.execute(
+                    "SELECT topic3_id FROM question_knowledge_points WHERE question_id = ? ORDER BY rank, topic3_id",
+                    (question_id,),
+                ).fetchall()
+            ]
+            knowledge_source = str(raw.get("knowledge_source") or "ai_metadata").strip()[:50] or "ai_metadata"
+            confidence_values = raw.get("knowledge_confidences")
+            if confidence_values is None:
+                confidences = [1.0] * len(topic3_ids)
+            elif isinstance(confidence_values, (int, float)):
+                confidences = [float(confidence_values)] * len(topic3_ids)
+            elif isinstance(confidence_values, list) and len(confidence_values) == len(topic3_ids):
+                confidences = [float(value) for value in confidence_values]
+            else:
+                raise ValueError("knowledge_confidences 必须与 topic3_ids 数量一致。")
+            if any(value < 0 or value > 1 for value in confidences):
+                raise ValueError("knowledge_confidences 必须在 0 到 1 之间。")
+            knowledge_note = " ".join(str(raw.get("knowledge_note") or "").split())[:500] or None
             points: dict[str, sqlite3.Row] = {}
             if topic3_ids:
                 placeholders = ",".join("?" for _ in topic3_ids)
@@ -566,11 +823,19 @@ class MetadataManagementService:
                 conn.execute(
                     """
                     INSERT INTO question_knowledge_points (
-                        link_id, question_id, topic3_id, rank, source, confidence,
+                        link_id, question_id, topic3_id, rank, source, confidence, note,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'ai_metadata', 1.0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     """,
-                    (f"QKP-{question_id}-{rank}-{hashlib.sha256(topic3_id.encode()).hexdigest()[:8]}", question_id, topic3_id, rank),
+                    (
+                        f"QKP-{question_id}-{rank}-{hashlib.sha256(topic3_id.encode()).hexdigest()[:8]}",
+                        question_id,
+                        topic3_id,
+                        rank,
+                        knowledge_source,
+                        confidences[rank - 1],
+                        knowledge_note,
+                    ),
                 )
             primary = points.get(topic3_ids[0]) if topic3_ids else None
             conn.execute(
@@ -587,6 +852,11 @@ class MetadataManagementService:
                 ),
             )
             changes["topic3_ids"] = topic3_ids
+            changes["knowledge_source"] = knowledge_source
+            changes["knowledge_confidences"] = confidences
+            if knowledge_note:
+                changes["knowledge_note"] = knowledge_note
+            changes["previous_topic3_ids"] = before_topic3_ids
 
         paper_fields: dict[str, Any] = {}
         if "year" in raw and raw.get("year") is not None:
@@ -607,7 +877,7 @@ class MetadataManagementService:
                 raise ValueError(f"{field} 不能超过 50 个字符。")
             paper_fields[field] = value
         if paper_fields:
-            paper_id = str(question["primary_paper_id"] or "").strip()
+            paper_id = effective_paper_id
             if not paper_id:
                 raise ValueError("题目没有关联试卷，无法更新年份、地区或试卷类型。")
             assignments = [f"{key} = ?" for key in paper_fields]
@@ -620,6 +890,15 @@ class MetadataManagementService:
 
         if not changes:
             return "skipped", {"question_id": question_id, "reason": "没有提供可更新字段。"}
+        if {"topic3_ids", "difficulty", "question_type"} & changes.keys():
+            conn.execute(
+                """
+                UPDATE embeddings
+                SET status = 'stale', updated_at = CURRENT_TIMESTAMP
+                WHERE owner_type = 'question' AND owner_id = ?
+                """,
+                (question_id,),
+            )
         return "updated", {"question_id": question_id, "changes": changes}
 
 
@@ -639,6 +918,10 @@ def _search_text(value: Any) -> str:
 def _search_query_text(value: Any) -> str:
     normalized = _search_text(value)
     aliases = {
+        "\u53c2\u8003\u7cfb": "\u53c2\u8003\u7cfb\u76f8\u5bf9\u8fd0\u52a8\u8fd0\u52a8\u7684\u5408\u6210\u4e0e\u5206\u89e3",
+        "\u76f8\u5bf9\u8fd0\u52a8": "\u76f8\u5bf9\u8fd0\u52a8\u53c2\u8003\u7cfb\u8fd0\u52a8\u7684\u5408\u6210\u4e0e\u5206\u89e3",
+        "cankaoxi": "\u53c2\u8003\u7cfb\u76f8\u5bf9\u8fd0\u52a8\u8fd0\u52a8\u7684\u5408\u6210\u4e0e\u5206\u89e3",
+        "xiangduiyundong": "\u76f8\u5bf9\u8fd0\u52a8\u53c2\u8003\u7cfb\u8fd0\u52a8\u7684\u5408\u6210\u4e0e\u5206\u89e3",
         "参考系": "参照物参考系",
         "参照物": "参考系参照物",
         "卫星轨道": "人造卫星圆周运动轨道",
@@ -646,6 +929,10 @@ def _search_query_text(value: Any) -> str:
         "平抛运动": "抛体运动平抛运动",
         "宇宙速度": "人造卫星宇宙速度",
     }
+    if normalized in {"\u53c2\u8003\u7cfb", "cankaoxi"}:
+        return "\u53c2\u8003\u7cfb\u76f8\u5bf9\u8fd0\u52a8\u8fd0\u52a8\u7684\u5408\u6210\u4e0e\u5206\u89e3"
+    if normalized in {"\u76f8\u5bf9\u8fd0\u52a8", "xiangduiyundong"}:
+        return "\u76f8\u5bf9\u8fd0\u52a8\u53c2\u8003\u7cfb\u8fd0\u52a8\u7684\u5408\u6210\u4e0e\u5206\u89e3"
     return aliases.get(normalized, normalized)
 
 
@@ -713,6 +1000,89 @@ def _dedupe_points(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if topic3_id:
             unique.setdefault(topic3_id, point)
     return list(unique.values())
+
+
+def _record_knowledge_binding_audit(
+    conn: sqlite3.Connection,
+    updated: list[dict[str, Any]],
+    reason: str | None,
+) -> str | None:
+    items = []
+    for result in updated:
+        changes = result.get("changes") if isinstance(result.get("changes"), dict) else {}
+        if "topic3_ids" not in changes:
+            continue
+        before = [str(item) for item in changes.get("previous_topic3_ids") or []]
+        after = [str(item) for item in changes.get("topic3_ids") or []]
+        if before == after:
+            continue
+        items.append({"question_id": str(result.get("question_id") or ""), "before": before, "after": after})
+    if not items:
+        return None
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS change_batches (
+            batch_id TEXT PRIMARY KEY,
+            change_type TEXT NOT NULL,
+            reason TEXT,
+            source TEXT NOT NULL DEFAULT 'physics_vault_mcp',
+            status TEXT NOT NULL DEFAULT 'applied',
+            target_count INTEGER NOT NULL DEFAULT 0,
+            changed_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            applied_at TEXT,
+            rolled_back_at TEXT,
+            rollback_reason TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS change_items (
+            item_id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            before_value_json TEXT,
+            after_value_json TEXT,
+            status TEXT NOT NULL DEFAULT 'changed',
+            risk_level TEXT NOT NULL DEFAULT 'medium',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(batch_id) REFERENCES change_batches(batch_id)
+        )
+        """
+    )
+    batch_id = f"CHG-{uuid.uuid4().hex[:12]}"
+    conn.execute(
+        """
+        INSERT INTO change_batches (
+            batch_id, change_type, reason, source, status,
+            target_count, changed_count, applied_at
+        ) VALUES (?, 'knowledge_binding_normalization', ?, 'agent_metadata_maintenance',
+                  'applied', ?, ?, CURRENT_TIMESTAMP)
+        """,
+        (batch_id, " ".join(str(reason or "").split())[:300] or None, len(items), len(items)),
+    )
+    for item in items:
+        conn.execute(
+            """
+            INSERT INTO change_items (
+                item_id, batch_id, entity_type, entity_id, field_name,
+                before_value_json, after_value_json, status, risk_level
+            ) VALUES (?, ?, 'question', ?, 'question_knowledge_points.topic3_id',
+                      ?, ?, 'changed', 'medium')
+            """,
+            (
+                f"CHI-{uuid.uuid4().hex[:12]}",
+                batch_id,
+                item["question_id"],
+                json.dumps(item["before"], ensure_ascii=False),
+                json.dumps(item["after"], ensure_ascii=False),
+            ),
+        )
+    return batch_id
 
 
 def _error(code: str, message: str, field: str) -> dict[str, Any]:

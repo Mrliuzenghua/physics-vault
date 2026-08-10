@@ -46,6 +46,8 @@ class AiHttpClient:
         max_tokens: int = 4096,
         response_format: dict[str, Any] | None = None,
         timeout_seconds: int | None = None,
+        model_name: str | None = None,
+        thinking: str | None = None,
     ) -> dict[str, Any]:
         """Send a chat completion request and return the parsed JSON response."""
         import http.client
@@ -65,13 +67,15 @@ class AiHttpClient:
             url = f"{base}/chat/completions"
 
         body: dict[str, Any] = {
-            "model": self._model,
+            "model": model_name or self._model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
         if response_format is not None:
             body["response_format"] = response_format
+        if thinking is not None:
+            body["thinking"] = {"type": thinking}
 
         def _do_request(payload_bytes: bytes) -> dict[str, Any]:
             req = urllib.request.Request(
@@ -376,6 +380,86 @@ class AiHttpClient:
             max_workers=3,
             time_budget_seconds=time_budget_seconds,
         )
+
+    def refine_question_format(self, question: dict[str, Any]) -> dict[str, Any]:
+        """Fix presentation and LaTeX syntax without rewriting a question."""
+        source = {
+            "question_id": str(question.get("question_id") or ""),
+            "question_type": str(question.get("question_type") or ""),
+            "title": str(question.get("title") or ""),
+            "options": question.get("options") if isinstance(question.get("options"), list) else [],
+            "answer": str(question.get("answer") or ""),
+            "analysis": str(question.get("analysis") or ""),
+        }
+        system_prompt = """你是高中物理题库的格式校对助手。只修复格式，不得改变题意、条件、数值、单位、选项含义、答案或解题结论。
+
+请处理中文与 LaTeX 混排中的常见问题：
+1. 行内公式统一为 $...$，独占一行的公式才使用 $$...$$；不要输出 \\( ... \\) 或 \\[ ... \\]。
+2. 修正显然的 LaTeX 转义、花括号和分隔符问题，例如 \\varphi、\\frac、\\leq；保留题图占位符 ![fig:...] 原样不动。
+   欧姆单位是高频错误：必须写成数学模式中的 `\\Omega`，推荐将数值和单位合为 `$300.0\\,\\Omega$`。严禁输出 `\\text{\\Omega}`、`$\\text{\\Omega}$`、裸露的 `\\Omega` 或把 `\\Omega` 当普通文字。示例：`300.0$\\text{\\Omega}$` 必须优化为 `$300.0\\,\\Omega$`；`17.0k\\text{\\Omega}` 必须优化为 `$17.0\\,\\mathrm{k}\\Omega$`。
+3. 识别数据表格。由横线、空格或制表符分列的数据，必须转成标准 Markdown 表格：首行为表头，第二行为 | --- | 分隔行，后续为数据行；每行列数必须相同。表格中的数值、单位和公式不得改变。
+4. OCR 的单行断行通常不表示换段。你必须自行判断并合并同一段的软换行，不能因为原文换行就保留它。删除没有语义作用的空白行：题干、分问、步骤和选项之间不得用空白行人为拉开；相邻内容最多保留一个换行，禁止输出连续空行。仅真正独立的行间公式、图片占位符或表格可保留必要的换行，但其前后也不得出现多余空白行。特别是下面的输入必须原样按语义合成一行：
+输入：持续时间为\n$\\Delta t$\n，经过狭缝后……\n输出：持续时间为$\\Delta t$，经过狭缝后……
+只在自然段、列表、表格、图片占位符或真正独立的行间公式处保留换行。选项只能保留原有选项字母和数量。
+5. 删除 OCR 误插入的编号噪声：解析中出现的 `\\[1]`、`[1]`、`\\[10]` 等方括号编号不是题目内容时必须删除；由这些编号拆出的孤立连续数字行（例如单独占行的 `4`、`5`、`6`、`7`）也必须删除。保留题目开头的正式题号、选项字母、数值/单位、公式下标，以及真实分问标记 `（1）`、`（2）`。
+6. 当 `question_type` 为 `experiment` 时，A/B/C 等不是选择项，而是实验步骤。必须将它们按顺序并入 `title` 的“实验步骤”正文，改为 `（1）（2）（3）` 步骤编号，并返回空数组 `options: []`。实验题绝不能保留选择题选项。
+7. 信息不确定时保持原文，绝不补写、删减或推断物理内容。
+
+只返回 JSON，不要 Markdown：
+{"question_id":"原样保留","title":"...","options":[{"opt":"A","content":"..."}],"answer":"...","analysis":"..."}"""
+        source_json = json.dumps(source, ensure_ascii=False)
+        # Formatting does not need V4-Pro's slower reasoning path. Use Flash
+        # only for the official DeepSeek V4 endpoint; custom OpenAI-compatible
+        # providers retain the model explicitly configured by the user.
+        format_model = self._model
+        if self._base_url.rstrip("/") == "https://api.deepseek.com" and self._model == "deepseek-v4-pro":
+            format_model = "deepseek-v4-flash"
+        # Keep enough room to return the complete question but avoid asking a
+        # short formatting request to reserve a 6K-token response.
+        format_max_tokens = min(6000, max(1200, int(len(source_json) * 1.25) + 300))
+
+        result = self._call(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": source_json},
+            ],
+            temperature=0,
+            max_tokens=format_max_tokens,
+            response_format={"type": "json_object"},
+            timeout_seconds=min(60, self._timeout),
+            model_name=format_model,
+            thinking="disabled",
+        )
+
+        merged = dict(source)
+        for field in ("title", "answer", "analysis"):
+            value = result.get(field)
+            if isinstance(value, str):
+                merged[field] = value.strip()
+
+        candidate_options = result.get("options")
+        if source["question_type"] == "experiment" and isinstance(candidate_options, list) and len(candidate_options) == 0:
+            merged["options"] = []
+        elif isinstance(candidate_options, list) and len(candidate_options) == len(source["options"]):
+            original_by_opt = {
+                str(item.get("opt") or "").strip().upper(): item
+                for item in source["options"]
+                if isinstance(item, dict)
+            }
+            refined_by_opt = {
+                str(item.get("opt") or "").strip().upper(): item
+                for item in candidate_options
+                if isinstance(item, dict)
+            }
+            if original_by_opt and set(original_by_opt) == set(refined_by_opt):
+                merged["options"] = [
+                    {
+                        **original,
+                        "content": str(refined_by_opt[opt].get("content") or "").strip(),
+                    }
+                    for opt, original in original_by_opt.items()
+                ]
+        return merged
 
     def parse_document(
         self,

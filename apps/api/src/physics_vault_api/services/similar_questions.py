@@ -1,8 +1,4 @@
-"""Rule-based similar-question search.
-
-Scoring is purely deterministic, using only the structured fields already
-present in the database.  No embedding, no vector, no external service.
-"""
+"""Explainable similar-question search over canonical structured metadata."""
 
 from __future__ import annotations
 
@@ -121,33 +117,37 @@ class SimilarQuestionsService:
     ) -> float:
         score = 0.0
 
+        src_diff = self._safe_int(source.get("difficulty"))
+        cand_diff = self._safe_int(candidate.get("difficulty"))
+        if (
+            src_diff is not None
+            and cand_diff is not None
+            and difficulty_tolerance < 99
+            and abs(src_diff - cand_diff) > max(int(difficulty_tolerance), 0)
+        ):
+            return 0.0
+
         # — same question type —
-        src_type = str(source.get("question_type", "")).strip()
-        cand_type = str(candidate.get("question_type", "")).strip()
+        src_type = self._clean_text(source.get("question_type"))
+        cand_type = self._clean_text(candidate.get("question_type"))
         if src_type and cand_type and src_type == cand_type:
             score += WEIGHT_SAME_QUESTION_TYPE
 
         # — same topic3 (most specific) —
-        src_t3 = str(source.get("topic3", "")).strip()
-        cand_t3 = str(candidate.get("topic3", "")).strip()
-        if src_t3 and cand_t3 and src_t3 == cand_t3:
+        src_knowledge = self._knowledge_dimensions(source)
+        cand_knowledge = self._knowledge_dimensions(candidate)
+        if src_knowledge["topic3"] & cand_knowledge["topic3"]:
             score += WEIGHT_SAME_TOPIC3
 
         # — same topic2 —
-        src_t2 = str(source.get("topic2", "")).strip()
-        cand_t2 = str(candidate.get("topic2", "")).strip()
-        if src_t2 and cand_t2 and src_t2 == cand_t2:
+        if src_knowledge["topic2"] & cand_knowledge["topic2"]:
             score += WEIGHT_SAME_TOPIC2
 
         # — same module —
-        src_mod = str(source.get("module", "")).strip()
-        cand_mod = str(candidate.get("module", "")).strip()
-        if src_mod and cand_mod and src_mod == cand_mod:
+        if src_knowledge["topic1"] & cand_knowledge["topic1"]:
             score += WEIGHT_SAME_MODULE
 
         # — difficulty proximity —
-        src_diff = self._safe_int(source.get("difficulty"))
-        cand_diff = self._safe_int(candidate.get("difficulty"))
         if src_diff is not None and cand_diff is not None:
             gap = abs(src_diff - cand_diff)
             if gap == 0:
@@ -194,16 +194,35 @@ class SimilarQuestionsService:
         same_knowledge_point: bool,
     ) -> list[dict[str, Any]]:
         """Fetch a broad candidate pool, optionally pre-filtered by type/topic."""
-        qt = str(source.get("question_type", "")) if same_question_type else None
-        t3 = str(source.get("topic3", "")) if same_knowledge_point else None
-        t2 = str(source.get("topic2", "")) if same_knowledge_point else None
+        qt = self._clean_text(source.get("question_type")) if same_question_type else None
+        structured_ids = [
+            self._clean_text(point.get("topic3_id"))
+            for point in source.get("knowledge_points", []) or []
+            if isinstance(point, dict) and self._clean_text(point.get("topic3_id"))
+        ]
 
+        merged: dict[str, dict[str, Any]] = {}
+        if same_knowledge_point and structured_ids:
+            for topic3_id in structured_ids[:3]:
+                rows, _ = self._repo.search_questions(
+                    search_mode="browse",
+                    question_type=qt,
+                    topic3_id=topic3_id,
+                    limit=1000,
+                    offset=0,
+                )
+                for row in rows:
+                    merged.setdefault(str(row["question_id"]), row)
+            return list(merged.values())
+
+        legacy_t3 = self._clean_text(source.get("topic3")) if same_knowledge_point else None
+        legacy_t2 = self._clean_text(source.get("topic2")) if same_knowledge_point else None
         rows, _ = self._repo.search_questions(
             search_mode="browse",
             question_type=qt,
-            topic3=t3,
-            topic2=t2,
-            limit=200,
+            topic3=legacy_t3,
+            topic2=legacy_t2,
+            limit=5000,
             offset=0,
         )
         return list(rows)
@@ -235,6 +254,40 @@ class SimilarQuestionsService:
         return []
 
     @staticmethod
+    def _clean_text(value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @classmethod
+    def _knowledge_dimensions(cls, question: dict[str, Any]) -> dict[str, set[str]]:
+        dimensions = {"topic1": set(), "topic2": set(), "topic3": set()}
+        for point in question.get("knowledge_points", []) or []:
+            if not isinstance(point, dict):
+                continue
+            for level, id_key, name_key in (
+                ("topic1", "topic1_id", "topic1_name"),
+                ("topic2", "topic2_id", "topic2_name"),
+                ("topic3", "topic3_id", "topic3_name"),
+            ):
+                value = cls._clean_text(point.get(id_key)) or cls._clean_text(point.get(name_key))
+                if value:
+                    dimensions[level].add(value)
+        if not dimensions["topic1"]:
+            value = cls._clean_text(question.get("module"))
+            if value:
+                dimensions["topic1"].add(value)
+        if not dimensions["topic2"]:
+            value = cls._clean_text(question.get("topic2"))
+            if value:
+                dimensions["topic2"].add(value)
+        if not dimensions["topic3"]:
+            value = cls._clean_text(question.get("topic3"))
+            if value:
+                dimensions["topic3"].add(value)
+        return dimensions
+
+    @staticmethod
     def _tokenize(text: str) -> list[str]:
         """Simple Chinese-aware tokenizer — splits on common delimiters and
         extracts 2-char bigrams as well as whole-character sequences."""
@@ -247,4 +300,5 @@ class SimilarQuestionsService:
         for token in tokens:
             if len(token) >= 2:
                 bigrams.extend(token[i : i + 2] for i in range(len(token) - 1))
-        return tokens + bigrams
+        generic = {"如图", "图所", "所示", "下列", "关于", "一个", "物体", "正确", "错误"}
+        return [token for token in tokens + bigrams if token not in generic]

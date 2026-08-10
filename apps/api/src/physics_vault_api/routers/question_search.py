@@ -57,7 +57,7 @@ def build_question_search_router(
             "hybrid / similar 当前退化为 strict。"
         ),
     )
-    async def search_questions(  # noqa: PLR0913
+    def search_questions(  # noqa: PLR0913
         search_mode: SearchMode = Query(
             default=SearchMode.browse,
             description="检索模式：browse / strict / hybrid / similar",
@@ -84,6 +84,7 @@ def build_question_search_router(
         is_mistake: bool | None = Query(default=None, description="错题筛选：true=仅错题, false=非错题, 不传=全部"),
         limit: int = Query(default=20, ge=1, le=200, description="返回条数"),
         offset: int = Query(default=0, ge=0, description="分页偏移"),
+        include_facets: bool = Query(default=True),
     ) -> SearchResponse:
         try:
             params = QuestionSearchParams(
@@ -107,7 +108,7 @@ def build_question_search_router(
                 limit=limit,
                 offset=offset,
             )
-            return service.search(params)
+            return service.search(params, include_facets=include_facets)
         except SearchError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except QuestionDatabaseUnavailableError as exc:
@@ -128,7 +129,7 @@ def build_question_search_router(
         summary="筛选项聚合数据",
         description="返回前端筛选栏需要的所有可选项（年份、地区、模块、题型、难度、状态等）。",
     )
-    async def get_facets() -> FilterFacetsResponse:
+    def get_facets() -> FilterFacetsResponse:
         try:
             return service.get_facets()
         except QuestionDatabaseUnavailableError as exc:
@@ -144,7 +145,7 @@ def build_question_search_router(
         response_model=BatchQuestionFetchResponse,
         summary="按 ID 批量读取题目",
     )
-    async def batch_get_questions(
+    def batch_get_questions(
         request: BatchQuestionFetchRequest,
     ) -> BatchQuestionFetchResponse:
         try:
@@ -162,7 +163,7 @@ def build_question_search_router(
         response_model=BatchQuestionDeleteResponse,
         summary="批量删除题目",
     )
-    async def batch_delete_questions(
+    def batch_delete_questions(
         request: BatchQuestionDeleteRequest,
     ) -> BatchQuestionDeleteResponse:
         try:
@@ -187,7 +188,7 @@ def build_question_search_router(
         response_model=ReturnQuestionToReviewResponse,
         summary="将题目送回校对中心",
     )
-    async def return_question_to_review(
+    def return_question_to_review(
         question_id: str,
         request: ReturnQuestionToReviewRequest,
     ) -> ReturnQuestionToReviewResponse:

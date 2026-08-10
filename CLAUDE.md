@@ -22,7 +22,9 @@
 
 ## 写入规则
 
-- 标准库的标签、年份、知识点等规范化必须走 `batch_replace_question_tags` 或 `batch_replace_question_knowledge_points`，并保留变更批次。
+- 标准库的标签、年份、知识点等检索元数据使用 `batch_update_question_metadata` 直接维护；知识点修改会自动保留可回滚变更批次。
+- 每道正式题采用“1 个主三级知识点 + 最多 2 个辅助三级知识点”。只在题干或解析存在明确证据时补充辅助知识点，不得为了凑满三个而添加弱相关节点。
+- 检索结果的题干/解析与现有知识点明显冲突、知识点缺失或绑定不完整时，调用 `maintain_question_knowledge_points`。允许自动应用高置信度修复；`needs_review` 项不得强行修改。
 - 需要撤销时先调用 `get_change_batch`，再调用 `rollback_change_batch`。
 - 将正式题退回审核只能使用 `return_question_to_review`。
 - 审核库内的 LaTeX 规范化优先使用 `clean_review_task_latex`；先 dry run，确认后再执行。

@@ -86,6 +86,7 @@ class QuestionItem(BaseModel):
     keyword_match: bool = False
     search_mode: str | None = None
     score: float | None = None
+    method_match: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +118,9 @@ class SearchResponse(BaseModel):
     limit: int = 20
     offset: int = 0
     search_mode: str = "browse"
-    facets: FacetBlock = Field(default_factory=FacetBlock)
+    # The list client may obtain filter values independently and avoid this
+    # repeated payload on every paginated search.
+    facets: FacetBlock | None = None
 
 
 class BatchQuestionFetchRequest(BaseModel):

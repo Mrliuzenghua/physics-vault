@@ -15,6 +15,7 @@ from ..schemas.question_search import (
     QuestionSearchParams,
     SearchResponse,
 )
+from .semantic_retrieval import SemanticRetrievalService, SemanticSearchUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +31,44 @@ class QuestionSearchService:
     parameter validation, search-mode routing, scoring, and model mapping.
     """
 
-    def __init__(self, repository: QuestionSearchRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: QuestionSearchRepository | None = None,
+        semantic_service: SemanticRetrievalService | None = None,
+    ) -> None:
         self._repo = repository or QuestionSearchRepository()
+        self._semantic = semantic_service or SemanticRetrievalService(self._repo)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def search(self, params: QuestionSearchParams) -> SearchResponse:
+    def search(self, params: QuestionSearchParams, *, include_facets: bool = True) -> SearchResponse:
         """Execute a search and return a structured response envelope."""
         self._validate(params)
 
         search_mode = params.search_mode.value
+
+        if search_mode in ("hybrid", "similar"):
+            try:
+                semantic = self._semantic.search(params)
+                items = [
+                    self._row_to_item(row, search_mode, params.query)
+                    for row in semantic.rows
+                ]
+                facets = self._build_facets_block() if include_facets else None
+                return SearchResponse(
+                    items=items,
+                    total=semantic.total,
+                    limit=params.limit,
+                    offset=params.offset,
+                    search_mode=search_mode,
+                    facets=facets,
+                )
+            except SemanticSearchUnavailable as exc:
+                logger.info("semantic search unavailable; falling back to strict: %s", exc)
+            except Exception as exc:
+                logger.warning("semantic search failed; falling back to strict: %s", exc)
 
         # hybrid / similar degrade to strict in the first version
         if search_mode in ("hybrid", "similar"):
@@ -74,7 +101,7 @@ class QuestionSearchService:
         )
 
         items = [self._row_to_item(row, search_mode, params.query) for row in rows]
-        facets = self._build_facets_block()
+        facets = self._build_facets_block() if include_facets else None
 
         return SearchResponse(
             items=items,
@@ -126,13 +153,42 @@ class QuestionSearchService:
         knowledge_points = row.get("knowledge_points", []) or []
 
         # Compute keyword match for scoring
-        keyword_match = False
+        keyword_match = bool(row.get("keyword_match", False))
         if query and search_mode == "strict":
             q = query.lower()
-            keyword_match = any(
-                q in (str(row.get(f)) or "").lower()
-                for f in ("canonical_title", "stem_text", "answer_text", "analysis_text")
+            searchable_values = [
+                row.get(field)
+                for field in (
+                    "canonical_title",
+                    "stem_text",
+                    "answer_text",
+                    "analysis_text",
+                    "tags_json",
+                    "source_text",
+                    "source_label",
+                    "module",
+                    "topic2",
+                    "topic3",
+                )
+            ]
+            searchable_values.extend(
+                point.get("topic3_name") or point.get("topic2_name") or point.get("topic1_name")
+                for point in knowledge_points
+                if isinstance(point, dict)
             )
+            keyword_match = any(q in str(value or "").lower() for value in searchable_values)
+
+        raw_search_score = row.get("search_score")
+        try:
+            search_score = float(raw_search_score) if raw_search_score is not None else None
+        except (TypeError, ValueError):
+            search_score = None
+
+        raw_similarity = row.get("similarity")
+        try:
+            similarity = float(raw_similarity) if raw_similarity is not None else None
+        except (TypeError, ValueError):
+            similarity = None
 
         # Resolve year from paper_year or explicit year filter
         resolved_year = row.get("paper_year")
@@ -165,10 +221,11 @@ class QuestionSearchService:
             has_media=bool(row.get("has_media", False)),
             image_count=row.get("image_count", 0),
             # Scoring
-            similarity=None,
+            similarity=similarity,
             keyword_match=keyword_match,
             search_mode=search_mode,
-            score=1.0 if keyword_match else 0.0,
+            score=search_score if search_score is not None else (1.0 if keyword_match else 0.0),
+            method_match=row.get("method_match"),
         )
 
     @staticmethod

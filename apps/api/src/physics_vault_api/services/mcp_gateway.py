@@ -388,6 +388,12 @@ class McpGatewayService:
             raise RuntimeError("AI HTTP client is not configured")
         return self._http_client.refine_import_questions(questions=questions)
 
+    async def refine_question_format(self, question: dict[str, Any]) -> dict[str, Any]:
+        """Run the configured LLM as a format-only question proofreader."""
+        if not self._has_http:
+            raise RuntimeError("AI HTTP client is not configured")
+        return await asyncio.to_thread(self._http_client.refine_question_format, question)
+
     async def generate_question_variants(
         self, payload: GenerateQuestionVariantsInput | dict[str, Any]
     ) -> dict[str, Any]:

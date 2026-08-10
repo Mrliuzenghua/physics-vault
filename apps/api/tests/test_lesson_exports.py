@@ -24,10 +24,20 @@ from physics_vault_api.services.document_pipeline import (
     PandocAdapter,
     StructuredQuestionParsingService,
 )
-from physics_vault_api.services.lesson_exports import LessonExportService
+from physics_vault_api.services.lesson_exports import LessonExportService, _office_text_parts
 from physics_vault_api.services.task_center import TaskCenterService
 from physics_vault_api.services.task_queue import LessonExportDispatcher
 from physics_vault_api.tasks.lesson_exports import build_lesson_export_actors
+
+
+def test_docx_text_parts_remove_accidental_blank_lines() -> None:
+    parts = _office_text_parts("第一行\n\n\n第二行 $v_1$\r\n\r\n第三行")
+
+    assert parts == [
+        ("text", "第一行\n第二行 "),
+        ("math", "v_1"),
+        ("text", "\n第三行"),
+    ]
 
 
 def _lesson_package(image_path: str) -> dict:
@@ -199,8 +209,8 @@ def test_word_export_snapshot_structure_and_safe_download(tmp_path: Path) -> Non
     assert "机械能守恒练习" not in text
     assert "学生版与教师版共用快照" not in text
     assert "机械能专题训练" in text
-    assert "答案：" in text
-    assert "解析：" in text
+    assert "【答案】" in text
+    assert "【详解】" in text
     assert "A. 动能为" in table_text
     assert document.styles["Normal"].font.name == "SimSun"
     assert document.styles["Normal"].font.size.pt == 10.5
@@ -208,8 +218,8 @@ def test_word_export_snapshot_structure_and_safe_download(tmp_path: Path) -> Non
     section_run = next(paragraph for paragraph in document.paragraphs if paragraph.text == "一、选择题").runs[0]
     knowledge_run = next(paragraph for paragraph in document.paragraphs if paragraph.text == "机械能守恒").runs[0]
     knowledge_body_run = next(paragraph for paragraph in document.paragraphs if "只有重力做功" in paragraph.text).runs[0]
-    answer_run = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("答案：")).runs[0]
-    analysis_run = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("解析：")).runs[0]
+    answer_run = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("【答案】")).runs[0]
+    analysis_run = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("【详解】")).runs[0]
     assert (title_run.font.name, title_run.font.size.pt, str(title_run.font.color.rgb)) == ("SimSun", 16, "000000")
     assert (section_run.font.name, section_run.font.size.pt, str(section_run.font.color.rgb)) == ("SimSun", 14, "000000")
     assert (knowledge_run.font.name, knowledge_run.font.size.pt, str(knowledge_run.font.color.rgb)) == ("SimSun", 14, "000000")
@@ -258,9 +268,9 @@ def test_word_export_can_place_answers_at_document_end(tmp_path: Path) -> None:
     document = Document(output_path)
     paragraphs = [paragraph.text for paragraph in document.paragraphs]
     heading_index = paragraphs.index("参考答案与解析")
-    answer_index = next(index for index, text in enumerate(paragraphs) if text.startswith("1. 答案："))
+    answer_index = next(index for index, text in enumerate(paragraphs) if text.startswith("1. 【答案】"))
     assert heading_index < answer_index
-    assert all("答案：" not in text for text in paragraphs[:heading_index])
+    assert all("【答案】" not in text for text in paragraphs[:heading_index])
 
 
 def test_pptx_export_preserves_template_teacher_content_and_images(tmp_path: Path) -> None:

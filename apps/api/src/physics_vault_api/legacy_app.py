@@ -429,7 +429,10 @@ def fetch_question_candidates(
         add_knowledge_exists("kpv.topic3_id = ?", [topic3_id])
     add_exact(difficulty, "q.difficulty")
     add_exact(question_type, "q.question_type")
-    add_exact(status, "q.status")
+    if status is None:
+        where.append("COALESCE(q.status, '') != 'archived_duplicate'")
+    else:
+        add_exact(status, "q.status")
     if has_media is not None:
         where.append("q.has_media = ?")
         params.append(int(has_media))
@@ -505,25 +508,6 @@ class HealthResponse(BaseModel):
     database_path: str
 
 
-class PaperSummary(BaseModel):
-    paper_id: str
-    year: int | None = None
-    exam_type: str
-    region: str | None = None
-    paper_name: str
-    subject: str
-    status: str
-    question_count: int = 0
-
-
-class PaperDetail(PaperSummary):
-    source_path: str | None = None
-    source_format: str | None = None
-    notes: str | None = None
-    created_at: str
-    updated_at: str
-
-
 class KnowledgePointLink(BaseModel):
     rank: int
     topic1_id: str
@@ -536,29 +520,6 @@ class KnowledgePointLink(BaseModel):
     source: str | None = None
     confidence: float | None = None
     note: str | None = None
-
-
-class KnowledgePointItem(BaseModel):
-    topic3_id: str
-    topic3_name: str
-    topic2_id: str
-    topic2_name: str
-    topic1_id: str
-    topic1_name: str
-    source_chapter: str | None = None
-    status: str
-    note: str | None = None
-
-
-class QuestionKnowledgePointUpsert(BaseModel):
-    topic3_id: str
-    source: str = "manual"
-    confidence: float = Field(default=1.0, ge=0, le=1)
-    note: str | None = None
-
-
-class QuestionKnowledgePointBatchItem(QuestionKnowledgePointUpsert):
-    rank: int = Field(ge=1, le=3)
 
 
 class QuestionSummary(BaseModel):
@@ -588,61 +549,6 @@ class UnifiedQuestionSearchItem(QuestionSummary):
     score: float | None = None
 
 
-class QuestionDetail(QuestionSummary):
-    content_hash: str | None = None
-    schema_version: str
-    title_text: str | None = None
-    stem_text: str | None = None
-    stem_clean_text: str | None = None
-    source_id: str | None = None
-    image_asset_ids: list[str] = Field(default_factory=list)
-    image_filenames: list[str] = Field(default_factory=list)
-    image_count: int = 0
-    answer_text: str | None = None
-    analysis_text: str | None = None
-    tips_text: str | None = None
-    options_json: str | None = None
-    created_at: str
-    updated_at: str
-
-
-class QuestionAsset(BaseModel):
-    link_id: str
-    asset_id: str
-    role: str
-    sort_order: int
-    placeholder_key: str | None = None
-    is_primary: bool
-    is_verified: bool
-    filename: str
-    file_path: str
-    mime_type: str | None = None
-    width: int | None = None
-    height: int | None = None
-    description: str | None = None
-    binding_confidence: float | None = None
-    verified: bool
-
-
-class ImageAssetItem(BaseModel):
-    asset_id: str
-    filename: str
-    file_path: str
-    paper_id: str | None = None
-    question_id: str | None = None
-    source_id: str | None = None
-    role: str
-    sort_order: int
-    mime_type: str | None = None
-    width: int | None = None
-    height: int | None = None
-    description: str | None = None
-    extracted_text: str | None = None
-    image_type: str | None = None
-    binding_confidence: float | None = None
-    verified: bool
-
-
 class ReviewQueueItem(BaseModel):
     review_id: str
     entity_type: str
@@ -654,27 +560,6 @@ class ReviewQueueItem(BaseModel):
     payload_json: str | None = None
     created_at: str
     updated_at: str
-
-
-class ProcessingRunItem(BaseModel):
-    run_id: str
-    pipeline_name: str
-    pipeline_version: str
-    paper_id: str | None = None
-    question_id: str | None = None
-    status: str
-    started_at: str | None = None
-    finished_at: str | None = None
-    operator: str | None = None
-    summary_json: str | None = None
-
-
-class EmbeddingStatusItem(BaseModel):
-    model_name: str
-    model_version: str | None = None
-    vector_type: str
-    owner_count: int
-    last_updated_at: str | None = None
 
 
 class EmbeddingBuildRequest(BaseModel):
@@ -760,7 +645,6 @@ def serve_file(file_path: str):
     return response
 
 
-@app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return """
 <!doctype html>
@@ -1204,105 +1088,6 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok", database_path=str(DB_PATH))
 
 
-@app.get("/papers", response_model=list[PaperSummary])
-def list_papers(
-    year: int | None = None,
-    region: str | None = None,
-    exam_type: str | None = None,
-    q: str | None = Query(default=None, description="Search in paper name or paper id"),
-    subject: str = "PHY",
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-) -> list[PaperSummary]:
-    sql = """
-        SELECT
-            p.paper_id,
-            p.year,
-            p.exam_type,
-            p.region,
-            p.paper_name,
-            p.subject,
-            p.status,
-            COUNT(qn.question_id) AS question_count
-        FROM papers p
-        LEFT JOIN questions qn ON qn.primary_paper_id = p.paper_id
-        WHERE (? IS NULL OR p.year = ?)
-          AND (? IS NULL OR p.region = ?)
-          AND (? IS NULL OR p.exam_type = ?)
-          AND (? IS NULL OR p.subject = ?)
-          AND (
-              ? IS NULL
-              OR p.paper_name LIKE '%' || ? || '%'
-              OR p.paper_id LIKE '%' || ? || '%'
-          )
-        GROUP BY p.paper_id
-        ORDER BY p.year DESC, p.paper_id
-        LIMIT ? OFFSET ?
-    """
-    params = [year, year, region, region, exam_type, exam_type, subject, subject, q, q, q, limit, offset]
-    with closing(get_connection()) as connection:
-        rows = connection.execute(sql, params).fetchall()
-    return [PaperSummary(**row_to_dict(row)) for row in rows]
-
-
-@app.get("/papers/{paper_id}", response_model=PaperDetail)
-def get_paper(paper_id: str) -> PaperDetail:
-    sql = """
-        SELECT
-            p.paper_id,
-            p.year,
-            p.exam_type,
-            p.region,
-            p.paper_name,
-            p.subject,
-            p.status,
-            p.source_path,
-            p.source_format,
-            p.notes,
-            p.created_at,
-            p.updated_at,
-            COUNT(q.question_id) AS question_count
-        FROM papers p
-        LEFT JOIN questions q ON q.primary_paper_id = p.paper_id
-        WHERE p.paper_id = ?
-        GROUP BY p.paper_id
-    """
-    with closing(get_connection()) as connection:
-        row = connection.execute(sql, (paper_id,)).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Paper not found")
-    return PaperDetail(**row_to_dict(row))
-
-
-@app.get("/papers/{paper_id}/questions", response_model=list[QuestionSummary])
-def list_paper_questions(paper_id: str) -> list[QuestionSummary]:
-    sql = """
-        SELECT
-            question_id,
-            canonical_title,
-            module,
-            topic2,
-            topic3,
-            difficulty,
-            question_type AS type,
-            status,
-            has_media,
-            primary_paper_id,
-            primary_question_no,
-            vault_markdown_path
-        FROM questions
-        WHERE primary_paper_id = ?
-        ORDER BY primary_question_no, question_id
-    """
-    with closing(get_connection()) as connection:
-        rows = connection.execute(sql, (paper_id,)).fetchall()
-        knowledge_map = fetch_knowledge_points_for_questions(
-            connection,
-            [row["question_id"] for row in rows],
-        )
-    return [QuestionSummary(**question_payload(row, knowledge_map)) for row in rows]
-
-
 @app.get(
     "/search/questions",
     response_model=list[UnifiedQuestionSearchItem],
@@ -1550,57 +1335,6 @@ def unified_search_questions(
     return scored[offset:offset + limit]
 
 
-@app.get("/questions/{question_id}", response_model=QuestionDetail)
-def get_question(question_id: str) -> QuestionDetail:
-    sql = """
-        SELECT
-            q.question_id,
-            q.canonical_title,
-            q.module,
-            q.topic2,
-            q.topic3,
-            q.difficulty,
-            q.question_type AS type,
-            q.status,
-            q.has_media,
-            q.primary_paper_id,
-            q.primary_question_no,
-            q.vault_markdown_path,
-            q.content_hash,
-            q.schema_version,
-            q.created_at,
-            q.updated_at,
-            qti.stem_text,
-            qti.title_text,
-            qti.stem_clean_text,
-            qti.source_id,
-            COALESCE(qti.source_text, q.source, q.primary_paper_id) AS source,
-            qti.image_asset_ids_json,
-            qti.image_filenames_json,
-            COALESCE(qti.image_count, 0) AS image_count,
-            qti.answer_text,
-            qti.analysis_text,
-            qti.tips_text,
-            qti.options_json
-        FROM questions q
-        LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
-        WHERE q.question_id = ?
-    """
-    with closing(get_connection()) as connection:
-        row = connection.execute(sql, (question_id,)).fetchone()
-        knowledge_map = fetch_knowledge_points_for_questions(connection, [question_id])
-    if row is None:
-        raise HTTPException(status_code=404, detail="Question not found")
-    payload = row_to_dict(row)
-    if payload.get("difficulty") is not None:
-        payload["difficulty"] = str(payload["difficulty"])
-    payload["image_asset_ids"] = parse_json_list(payload.pop("image_asset_ids_json", None))
-    payload["image_filenames"] = parse_json_list(payload.pop("image_filenames_json", None))
-    payload["knowledge_points"] = knowledge_map.get(question_id, [])
-    return QuestionDetail(**payload)
-
-
-@app.put("/questions/{question_id}", response_model=dict)
 def update_question(question_id: str, payload: dict) -> dict:
     """更新单道题的全部字段。
 
@@ -1621,18 +1355,48 @@ def update_question(question_id: str, payload: dict) -> dict:
         with closing(get_connection()) as conn:
             tx_row = conn.execute(
                 """
-                SELECT image_asset_ids_json, image_filenames_json, image_count
+                SELECT figures_json, image_asset_ids_json, image_filenames_json, image_count
                 FROM question_text_index WHERE question_id = ?
                 """,
                 (question_id,),
             ).fetchone()
         if tx_row:
-            asset_ids = parse_json_list(tx_row["image_asset_ids_json"])
-            filenames = parse_json_list(tx_row["image_filenames_json"])
-            payload["figures"] = [
-                {"fig_uuid": aid, "local_path": fn}
-                for aid, fn in zip(asset_ids, filenames)
-            ]
+            stored_figures = parse_json_list(tx_row["figures_json"])
+            if stored_figures:
+                # Keep the original relative paths. Older saves reduced them
+                # to filenames, so restore those paths from the asset bindings.
+                with closing(get_connection()) as conn:
+                    asset_rows = conn.execute(
+                        """
+                        SELECT qa.asset_id, qa.placeholder_key, ia.file_path
+                        FROM question_assets qa
+                        INNER JOIN image_assets ia ON ia.asset_id = qa.asset_id
+                        WHERE qa.question_id = ?
+                        """,
+                        (question_id,),
+                    ).fetchall()
+                paths_by_ref = {
+                    str(ref): str(file_path)
+                    for asset_id, placeholder_key, file_path in asset_rows
+                    for ref in (asset_id, placeholder_key)
+                    if ref and file_path
+                }
+                payload["figures"] = []
+                for item in stored_figures:
+                    if not isinstance(item, dict):
+                        continue
+                    figure = dict(item)
+                    figure_id = str(figure.get("fig_uuid") or figure.get("asset_id") or "")
+                    if paths_by_ref.get(figure_id):
+                        figure["local_path"] = paths_by_ref[figure_id]
+                    payload["figures"].append(figure)
+            else:
+                asset_ids = parse_json_list(tx_row["image_asset_ids_json"])
+                filenames = parse_json_list(tx_row["image_filenames_json"])
+                payload["figures"] = [
+                    {"fig_uuid": aid, "local_path": fn}
+                    for aid, fn in zip(asset_ids, filenames)
+                ]
 
     service = QuestionWriteService()
     result = service.save_batch([payload])
@@ -1653,6 +1417,7 @@ def update_question(question_id: str, payload: dict) -> dict:
             q.content_hash, q.schema_version, q.created_at, q.updated_at,
             qti.stem_text, qti.title_text, qti.stem_clean_text, qti.source_id,
             COALESCE(qti.source_text, q.source, q.primary_paper_id) AS source,
+            qti.figures_json,
             qti.image_asset_ids_json, qti.image_filenames_json,
             COALESCE(qti.image_count, 0) AS image_count,
             qti.answer_text, qti.analysis_text, qti.tips_text, qti.options_json
@@ -1670,379 +1435,9 @@ def update_question(question_id: str, payload: dict) -> dict:
         data["difficulty"] = str(data["difficulty"])
     data["image_asset_ids"] = parse_json_list(data.pop("image_asset_ids_json", None))
     data["image_filenames"] = parse_json_list(data.pop("image_filenames_json", None))
+    data["figures"] = parse_json_list(data.pop("figures_json", None))
     data["knowledge_points"] = knowledge_map.get(question_id, [])
     return data
-
-
-@app.get("/questions/{question_id}/knowledge-points", response_model=list[KnowledgePointLink])
-def get_question_knowledge_points(question_id: str) -> list[KnowledgePointLink]:
-    with closing(get_connection()) as connection:
-        exists = connection.execute(
-            "SELECT 1 FROM questions WHERE question_id = ?",
-            (question_id,),
-        ).fetchone()
-        if exists is None:
-            raise HTTPException(status_code=404, detail="Question not found")
-        knowledge_map = fetch_knowledge_points_for_questions(connection, [question_id])
-    return [KnowledgePointLink(**item) for item in knowledge_map.get(question_id, [])]
-
-
-@app.put("/questions/{question_id}/knowledge-points", response_model=list[KnowledgePointLink])
-def replace_question_knowledge_points(
-    question_id: str,
-    payload: list[QuestionKnowledgePointBatchItem],
-) -> list[KnowledgePointLink]:
-    if not payload:
-        raise HTTPException(status_code=400, detail="At least one knowledge point is required")
-    if len(payload) > 3:
-        raise HTTPException(status_code=400, detail="A question can have at most 3 knowledge points")
-
-    ranks = [item.rank for item in payload]
-    if len(set(ranks)) != len(ranks):
-        raise HTTPException(status_code=400, detail="Duplicate ranks are not allowed")
-    if 1 not in ranks:
-        raise HTTPException(status_code=400, detail="rank=1 is required as the primary topic")
-
-    topic3_ids = [item.topic3_id for item in payload]
-    if len(set(topic3_ids)) != len(topic3_ids):
-        raise HTTPException(status_code=400, detail="Duplicate topic3_id values are not allowed")
-
-    with closing(get_connection()) as connection:
-        exists = connection.execute(
-            "SELECT 1 FROM questions WHERE question_id = ?",
-            (question_id,),
-        ).fetchone()
-        if exists is None:
-            raise HTTPException(status_code=404, detail="Question not found")
-
-        placeholders = ",".join("?" for _ in topic3_ids)
-        existing_topic_ids = {
-            row["topic3_id"]
-            for row in connection.execute(
-                f"SELECT topic3_id FROM knowledge_points WHERE topic3_id IN ({placeholders}) AND status = 'active'",
-                topic3_ids,
-            ).fetchall()
-        }
-        missing_topic_ids = sorted(set(topic3_ids) - existing_topic_ids)
-        if missing_topic_ids:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Knowledge point not found: {', '.join(missing_topic_ids)}",
-            )
-
-        try:
-            connection.execute(
-                "DELETE FROM question_knowledge_points WHERE question_id = ? AND rank BETWEEN 1 AND 3",
-                (question_id,),
-            )
-            connection.executemany(
-                """
-                INSERT INTO question_knowledge_points (
-                    question_id, rank, topic3_id, source, confidence, note, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                """,
-                [
-                    (
-                        question_id,
-                        item.rank,
-                        item.topic3_id,
-                        item.source,
-                        item.confidence,
-                        item.note,
-                    )
-                    for item in payload
-                ],
-            )
-            connection.commit()
-        except sqlite3.IntegrityError as exc:
-            connection.rollback()
-            raise HTTPException(status_code=400, detail="Knowledge point replacement failed") from exc
-
-        knowledge_map = fetch_knowledge_points_for_questions(connection, [question_id])
-    return [KnowledgePointLink(**item) for item in knowledge_map.get(question_id, [])]
-
-
-@app.put("/questions/{question_id}/knowledge-points/{rank}", response_model=KnowledgePointLink)
-def upsert_question_knowledge_point(
-    question_id: str,
-    rank: int,
-    payload: QuestionKnowledgePointUpsert,
-) -> KnowledgePointLink:
-    if rank < 1 or rank > 3:
-        raise HTTPException(status_code=400, detail="rank must be 1, 2, or 3")
-    with closing(get_connection()) as connection:
-        exists = connection.execute(
-            "SELECT 1 FROM questions WHERE question_id = ?",
-            (question_id,),
-        ).fetchone()
-        if exists is None:
-            raise HTTPException(status_code=404, detail="Question not found")
-        topic_exists = connection.execute(
-            "SELECT 1 FROM knowledge_points WHERE topic3_id = ? AND status = 'active'",
-            (payload.topic3_id,),
-        ).fetchone()
-        if topic_exists is None:
-            raise HTTPException(status_code=404, detail="Knowledge point not found")
-        try:
-            connection.execute(
-                """
-                INSERT INTO question_knowledge_points (
-                    question_id, rank, topic3_id, source, confidence, note, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT(question_id, rank) DO UPDATE SET
-                    topic3_id = excluded.topic3_id,
-                    source = excluded.source,
-                    confidence = excluded.confidence,
-                    note = excluded.note,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (
-                    question_id,
-                    rank,
-                    payload.topic3_id,
-                    payload.source,
-                    payload.confidence,
-                    payload.note,
-                ),
-            )
-            connection.commit()
-        except sqlite3.IntegrityError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail="This question already uses the same topic3_id at another rank",
-            ) from exc
-        row = connection.execute(
-            """
-            SELECT
-                rank,
-                topic1_id,
-                topic1_name,
-                topic2_id,
-                topic2_name,
-                topic3_id,
-                topic3_name,
-                source_chapter,
-                source,
-                confidence,
-                note
-            FROM question_knowledge_points_view
-            WHERE question_id = ? AND rank = ?
-            """,
-            (question_id, rank),
-        ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=500, detail="Knowledge point update failed")
-    return KnowledgePointLink(**row_to_dict(row))
-
-
-@app.delete("/questions/{question_id}/knowledge-points/{rank}", response_model=dict[str, str])
-def delete_question_knowledge_point(question_id: str, rank: int) -> dict[str, str]:
-    if rank < 1 or rank > 3:
-        raise HTTPException(status_code=400, detail="rank must be 1, 2, or 3")
-    if rank == 1:
-        raise HTTPException(status_code=400, detail="rank=1 is the primary topic and should not be deleted")
-    with closing(get_connection()) as connection:
-        connection.execute(
-            "DELETE FROM question_knowledge_points WHERE question_id = ? AND rank = ?",
-            (question_id, rank),
-        )
-        connection.commit()
-    return {"status": "deleted"}
-
-
-@app.get("/questions/{question_id}/assets", response_model=list[QuestionAsset])
-def get_question_assets(question_id: str) -> list[QuestionAsset]:
-    sql = """
-        SELECT
-            qa.link_id,
-            qa.asset_id,
-            qa.role,
-            qa.sort_order,
-            qa.placeholder_key,
-            qa.is_primary,
-            qa.is_verified,
-            ia.filename,
-            ia.file_path,
-            ia.mime_type,
-            ia.width,
-            ia.height,
-            ia.description,
-            ia.binding_confidence,
-            ia.verified
-        FROM question_assets qa
-        INNER JOIN image_assets ia ON ia.asset_id = qa.asset_id
-        WHERE qa.question_id = ?
-        ORDER BY qa.sort_order, qa.asset_id
-    """
-    with closing(get_connection()) as connection:
-        rows = connection.execute(sql, (question_id,)).fetchall()
-    return [QuestionAsset(**row_to_dict(row)) for row in rows]
-
-
-@app.get("/images", response_model=list[ImageAssetItem])
-def list_images(
-    q: str | None = Query(default=None, description="Search in filename, description, extracted_text"),
-    paper_id: str | None = None,
-    question_id: str | None = None,
-    year: int | None = None,
-    region: str | None = None,
-    exam_type: str | None = None,
-    topic3: str | None = None,
-    verified: bool | None = None,
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-) -> list[ImageAssetItem]:
-    sql = """
-        SELECT DISTINCT
-            ia.asset_id,
-            ia.filename,
-            ia.file_path,
-            ia.paper_id,
-            ia.question_id,
-            ia.source_id,
-            ia.role,
-            ia.sort_order,
-            ia.mime_type,
-            ia.width,
-            ia.height,
-            ia.description,
-            ia.extracted_text,
-            ia.image_type,
-            ia.binding_confidence,
-            ia.verified
-        FROM image_assets ia
-        LEFT JOIN papers p ON p.paper_id = ia.paper_id
-        LEFT JOIN questions qn ON qn.question_id = ia.question_id
-        WHERE (? IS NULL OR ia.paper_id = ?)
-          AND (? IS NULL OR ia.question_id = ?)
-          AND (? IS NULL OR p.year = ?)
-          AND (? IS NULL OR p.region = ?)
-          AND (? IS NULL OR p.exam_type = ?)
-          AND (? IS NULL OR qn.topic3 = ?)
-          AND (? IS NULL OR ia.verified = ?)
-          AND (
-              ? IS NULL
-              OR ia.filename LIKE '%' || ? || '%'
-              OR ia.description LIKE '%' || ? || '%'
-              OR ia.extracted_text LIKE '%' || ? || '%'
-          )
-        ORDER BY ia.updated_at DESC, ia.asset_id DESC
-        LIMIT ? OFFSET ?
-    """
-    verified_value = None if verified is None else int(verified)
-    params = [
-        paper_id,
-        paper_id,
-        question_id,
-        question_id,
-        year,
-        year,
-        region,
-        region,
-        exam_type,
-        exam_type,
-        topic3,
-        topic3,
-        verified_value,
-        verified_value,
-        q,
-        q,
-        q,
-        q,
-        limit,
-        offset,
-    ]
-    with closing(get_connection()) as connection:
-        rows = connection.execute(sql, params).fetchall()
-    return [ImageAssetItem(**row_to_dict(row)) for row in rows]
-
-
-@app.get("/knowledge-points", response_model=list[KnowledgePointItem])
-def list_knowledge_points(
-    topic1_id: str | None = None,
-    topic1_name: str | None = None,
-    topic2_id: str | None = None,
-    topic2_name: str | None = None,
-    q: str | None = Query(default=None, description="Search topic names and ids"),
-    status: str | None = None,
-    limit: int = Query(default=200, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-) -> list[KnowledgePointItem]:
-    sql = """
-        SELECT
-            topic3_id,
-            topic3_name,
-            topic2_id,
-            topic2_name,
-            topic1_id,
-            topic1_name,
-            source_chapter,
-            status,
-            note
-        FROM knowledge_points
-        WHERE (? IS NULL OR topic1_id = ?)
-          AND (? IS NULL OR topic1_name = ?)
-          AND (? IS NULL OR topic2_id = ?)
-          AND (? IS NULL OR topic2_name = ?)
-          AND (? IS NULL OR status = ?)
-          AND (
-              ? IS NULL
-              OR topic1_name LIKE '%' || ? || '%'
-              OR topic2_name LIKE '%' || ? || '%'
-              OR topic3_name LIKE '%' || ? || '%'
-              OR topic1_id LIKE '%' || ? || '%'
-              OR topic2_id LIKE '%' || ? || '%'
-              OR topic3_id LIKE '%' || ? || '%'
-          )
-        ORDER BY topic1_id, topic2_id, topic3_id
-        LIMIT ? OFFSET ?
-    """
-    params = [
-        topic1_id,
-        topic1_id,
-        topic1_name,
-        topic1_name,
-        topic2_id,
-        topic2_id,
-        topic2_name,
-        topic2_name,
-        status,
-        status,
-        q,
-        q,
-        q,
-        q,
-        q,
-        q,
-        q,
-        limit,
-        offset,
-    ]
-    with closing(get_connection()) as connection:
-        rows = connection.execute(sql, params).fetchall()
-    return [KnowledgePointItem(**row_to_dict(row)) for row in rows]
-
-
-@app.get("/knowledge-points/counts")
-def knowledge_point_counts() -> dict[str, int]:
-    """每个 topic3 关联的题目数量（含所有 rank），用于知识点树题量展示。"""
-    sql = """
-        SELECT topic3_id, COUNT(DISTINCT question_id) AS cnt
-        FROM question_knowledge_points
-        GROUP BY topic3_id
-    """
-    with closing(get_connection()) as connection:
-        rows = connection.execute(sql).fetchall()
-    return {row["topic3_id"]: row["cnt"] for row in rows}
-
-
-@app.get("/stats/questions")
-def question_stats() -> dict[str, int]:
-    """按审核状态统计题目数量。"""
-    sql = "SELECT status, COUNT(*) AS cnt FROM questions GROUP BY status"
-    with closing(get_connection()) as connection:
-        rows = connection.execute(sql).fetchall()
-    return {row["status"]: row["cnt"] for row in rows}
 
 
 @app.get("/filters/facets", response_model=FilterFacets)
@@ -2131,7 +1526,6 @@ class ReviewActionResponse(BaseModel):
     review_id: str
 
 
-@app.post("/questions/{question_id}/review", response_model=ReviewActionResponse)
 def review_question(question_id: str, payload: ReviewActionRequest) -> ReviewActionResponse:
     """教师审核：approve 将题目置为已审核并留痕；reject 仅记录打回原因。"""
     with closing(get_connection()) as connection:
@@ -2209,7 +1603,6 @@ class ProposeFixResponse(BaseModel):
     status: str
 
 
-@app.post("/questions/{question_id}/propose-fix", response_model=ProposeFixResponse)
 def propose_fix(question_id: str, payload: ProposeFixRequest) -> ProposeFixResponse:
     """AI 提交修改建议：写入 review_queue(pending)，不改题库，等人工定夺。"""
     with closing(get_connection()) as connection:
@@ -2262,7 +1655,6 @@ class PendingFixItem(BaseModel):
     created_at: str
 
 
-@app.get("/review-queue/pending-fixes", response_model=list[PendingFixItem])
 def list_pending_fixes() -> list[PendingFixItem]:
     """列出所有待人工定夺的 AI 修改建议。"""
     sql = """
@@ -2309,7 +1701,6 @@ class RejectedQuestionItem(BaseModel):
     pending_fix_count: int = 0
 
 
-@app.get("/review-queue/rejected", response_model=list[RejectedQuestionItem])
 def list_rejected_questions(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -2366,7 +1757,6 @@ class FixDetailResponse(BaseModel):
     created_at: str
 
 
-@app.get("/review-queue/{review_id}", response_model=FixDetailResponse)
 def get_fix_detail(review_id: str) -> FixDetailResponse:
     """查看单条 AI 建议详情：原题干 vs AI 建议新题干。"""
     with closing(get_connection()) as connection:
@@ -2408,7 +1798,6 @@ class DecideFixResponse(BaseModel):
     question_status: str
 
 
-@app.post("/review-queue/{review_id}/decide", response_model=DecideFixResponse)
 def decide_fix(review_id: str, payload: DecideFixRequest) -> DecideFixResponse:
     """人工定夺 AI 建议：apply=应用修改入库并置已审核；reject=丢弃，题目保持已驳回。"""
     with closing(get_connection()) as connection:
@@ -2471,7 +1860,6 @@ class ReportIssueResponse(BaseModel):
     status: str
 
 
-@app.post("/questions/{question_id}/report-issue", response_model=ReportIssueResponse)
 def report_issue(question_id: str, payload: ReportIssueRequest) -> ReportIssueResponse:
     """已审核题报告错误：置为已驳回，进 review_queue 等修复。"""
     with closing(get_connection()) as connection:
@@ -2513,7 +1901,6 @@ def report_issue(question_id: str, payload: ReportIssueRequest) -> ReportIssueRe
     return ReportIssueResponse(review_id=review_id, question_id=question_id, status="已驳回")
 
 
-@app.get("/questions/{question_id}/review-history", response_model=list[ReviewQueueItem])
 def get_review_history(question_id: str) -> list[ReviewQueueItem]:
     """查一题的全部审核历史（打回/AI建议/报错，按时间倒序）。"""
     sql = """
@@ -2531,35 +1918,6 @@ def get_review_history(question_id: str) -> list[ReviewQueueItem]:
 # ── Question Version History ─────────────────────────────────────────
 
 
-class QuestionVersionSummary(BaseModel):
-    version_id: str
-    question_id: str
-    version_number: int
-    change_summary: str | None = None
-    modified_by: str = "system"
-    source: str = "manual"
-    created_at: str
-
-
-class QuestionVersionDetail(BaseModel):
-    version_id: str
-    question_id: str
-    version_number: int
-    snapshot: dict
-    change_summary: str | None = None
-    modified_by: str = "system"
-    source: str = "manual"
-    created_at: str
-
-
-class VersionRollbackRequest(BaseModel):
-    modified_by: str = "teacher"
-
-
-@app.get(
-    "/questions/{question_id}/versions",
-    response_model=list[QuestionVersionSummary],
-)
 def list_question_versions(question_id: str) -> list[QuestionVersionSummary]:
     """列出某题的全部历史版本（最新在前）。"""
     from .repositories.question_write import QuestionWriteRepository
@@ -2571,10 +1929,6 @@ def list_question_versions(question_id: str) -> list[QuestionVersionSummary]:
     return [QuestionVersionSummary(**v) for v in versions]
 
 
-@app.get(
-    "/questions/{question_id}/versions/{version_id}",
-    response_model=QuestionVersionDetail,
-)
 def get_question_version(question_id: str, version_id: str) -> QuestionVersionDetail:
     """查看某个历史版本的完整快照。"""
     from .repositories.question_write import QuestionWriteRepository
@@ -2590,10 +1944,6 @@ def get_question_version(question_id: str, version_id: str) -> QuestionVersionDe
     return QuestionVersionDetail(**v)
 
 
-@app.post(
-    "/questions/{question_id}/versions/{version_id}/rollback",
-    response_model=dict,
-)
 def rollback_question_version(
     question_id: str,
     version_id: str,
@@ -2678,7 +2028,6 @@ class ImportQuestionResponse(BaseModel):
     review_id: str
 
 
-@app.post("/questions/import", response_model=ImportQuestionResponse)
 def import_question(payload: ImportQuestionRequest) -> ImportQuestionResponse:
     """导入外部 v2 JSON 新题：教师审核通过后写入数据库（status=已审核）。"""
     classification = payload.classification or {}
@@ -2874,61 +2223,6 @@ def import_question(payload: ImportQuestionRequest) -> ImportQuestionResponse:
     )
 
 
-@app.get("/processing-runs", response_model=list[ProcessingRunItem])
-def list_processing_runs(
-    pipeline_name: str | None = None,
-    paper_id: str | None = None,
-    status: str | None = None,
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-) -> list[ProcessingRunItem]:
-    sql = """
-        SELECT
-            run_id,
-            pipeline_name,
-            pipeline_version,
-            paper_id,
-            question_id,
-            status,
-            started_at,
-            finished_at,
-            operator,
-            summary_json
-        FROM processing_runs
-        WHERE (? IS NULL OR pipeline_name = ?)
-          AND (? IS NULL OR paper_id = ?)
-          AND (? IS NULL OR status = ?)
-        ORDER BY started_at DESC, run_id DESC
-        LIMIT ? OFFSET ?
-    """
-    with closing(get_connection()) as connection:
-        rows = connection.execute(
-            sql,
-            (pipeline_name, pipeline_name, paper_id, paper_id, status, status, limit, offset),
-        ).fetchall()
-    return [ProcessingRunItem(**row_to_dict(row)) for row in rows]
-
-
-@app.get("/embeddings/status", response_model=list[EmbeddingStatusItem])
-def list_embedding_status() -> list[EmbeddingStatusItem]:
-    sql = """
-        SELECT
-            model_name,
-            model_version,
-            vector_type,
-            COUNT(*) AS owner_count,
-            MAX(updated_at) AS last_updated_at
-        FROM embeddings
-        WHERE owner_type = 'question'
-        GROUP BY model_name, model_version, vector_type
-        ORDER BY owner_count DESC, model_name, vector_type
-    """
-    with closing(get_connection()) as connection:
-        rows = connection.execute(sql).fetchall()
-    return [EmbeddingStatusItem(**row_to_dict(row)) for row in rows]
-
-
-@app.post("/embeddings/questions/build", response_model=EmbeddingBuildResponse)
 def build_question_embeddings(payload: EmbeddingBuildRequest) -> EmbeddingBuildResponse:
     provider = payload.provider.strip().lower()
     model_name = resolve_embedding_model(provider, payload.model)

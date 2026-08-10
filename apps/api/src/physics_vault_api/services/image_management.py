@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+import io
 import json
+import hashlib
 import logging
+import mimetypes
 import re
+import shutil
 import sqlite3
 import uuid
+import zipfile
 from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 from ..database import connect_db
-from ..paths import default_db_path
+from ..paths import default_db_path, project_root
 
 from ..schemas.image_management import (
     AddImageRequest,
+    AddCachedImageRequest,
+    CachedImageAsset,
+    CacheUploadResponse,
     ImageListResponse,
     PlaceholderIssue,
     QuestionImageDetail,
@@ -27,12 +35,19 @@ from ..schemas.image_management import (
 
 logger = logging.getLogger(__name__)
 
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
+_MAX_CACHE_FILE_BYTES = 30 * 1024 * 1024
+_MAX_CACHE_TOTAL_BYTES = 80 * 1024 * 1024
+_MAX_DOCX_IMAGES = 80
+
 
 class ImageManagementService:
     """Manages question-image bindings in question_assets + image_assets tables."""
 
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(self, db_path: str | None = None, root_path: str | None = None) -> None:
         self._db_path = Path(db_path) if db_path else default_db_path()
+        self._project_root = Path(root_path).resolve() if root_path else project_root().resolve()
+        self._cache_root = self._project_root / "data" / "cache" / "question-images"
 
     def _db_available(self) -> bool:
         return self._db_path.exists()
@@ -194,6 +209,208 @@ class ImageManagementService:
             width=img["width"],
             height=img["height"],
         )
+
+    def add_cached_image(self, question_id: str, req: AddCachedImageRequest) -> QuestionImageDetail:
+        relative_path = Path(req.relative_path.replace("\\", "/"))
+        if relative_path.is_absolute():
+            raise ValueError("缓存图片路径必须是项目内相对路径")
+        resolved_path = (self._project_root / relative_path).resolve()
+        try:
+            normalized_path = resolved_path.relative_to(self._project_root).as_posix()
+        except ValueError as exc:
+            raise ValueError("缓存图片路径超出项目目录") from exc
+        if not resolved_path.is_file():
+            raise ValueError("缓存图片不存在或已被清理")
+        if resolved_path.suffix.lower() not in _IMAGE_EXTENSIONS:
+            raise ValueError("缓存文件不是支持的图片格式")
+
+        is_temporary = self._is_temporary_cache_path(resolved_path)
+        file_hash = self._file_hash(resolved_path)
+        asset_path = resolved_path
+        asset_relative_path = normalized_path
+        asset_id = f"cache_{hashlib.sha256(normalized_path.encode('utf-8')).hexdigest()[:24]}"
+
+        # Temporary cache files must never become the canonical source for a formal
+        # question. Copy first, bind the permanent copy, and only then remove the
+        # cache file. A failed database operation therefore leaves the user's upload
+        # available for retry instead of losing it.
+        if is_temporary:
+            permanent_dir = self._project_root / "data" / "assets" / "questions" / "manual"
+            permanent_dir.mkdir(parents=True, exist_ok=True)
+            permanent_path = permanent_dir / f"{file_hash}{resolved_path.suffix.lower()}"
+            if permanent_path.exists() and not permanent_path.is_file():
+                raise ValueError("正式图片存储位置不可用")
+            if not permanent_path.exists():
+                shutil.copy2(resolved_path, permanent_path)
+            asset_path = permanent_path
+            asset_relative_path = permanent_path.relative_to(self._project_root).as_posix()
+            asset_id = f"asset_{file_hash[:48]}_{resolved_path.suffix.lower().lstrip('.')}"
+
+        mime_type = mimetypes.guess_type(asset_path.name)[0] or "application/octet-stream"
+        with closing(self._get_connection()) as conn:
+            conn.execute(
+                """
+                INSERT INTO image_assets
+                    (asset_id, filename, file_path, source_id, mime_type, file_size, sha256, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                    filename = excluded.filename,
+                    file_path = excluded.file_path,
+                    source_id = excluded.source_id,
+                    mime_type = excluded.mime_type,
+                    file_size = excluded.file_size,
+                    sha256 = excluded.sha256,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    asset_id,
+                    asset_path.name,
+                    asset_relative_path,
+                    asset_relative_path,
+                    mime_type,
+                    asset_path.stat().st_size,
+                    file_hash,
+                ),
+            )
+            conn.commit()
+
+        result = self.add_image(question_id, AddImageRequest(
+            asset_id=asset_id,
+            role=req.role,
+            sort_order=req.sort_order,
+            placeholder_key=asset_id,
+            is_primary=req.is_primary,
+        ))
+        if is_temporary:
+            try:
+                resolved_path.unlink()
+                self._remove_empty_cache_parents(resolved_path.parent)
+            except OSError:
+                logger.warning("Question image was bound, but its temporary cache copy could not be removed: %s", resolved_path)
+        return result
+
+    # -- Temporary cache ------------------------------------------------------
+
+    def list_cache_images(self, keyword: str = "", limit: int = 200) -> list[CachedImageAsset]:
+        if not self._cache_root.exists():
+            return []
+        search = keyword.casefold().strip()
+        candidates: list[Path] = []
+        for path in self._cache_root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in _IMAGE_EXTENSIONS:
+                continue
+            try:
+                relative = path.resolve().relative_to(self._project_root)
+            except ValueError:
+                continue
+            if search and search not in path.name.casefold() and search not in relative.as_posix().casefold():
+                continue
+            candidates.append(path)
+
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return [self._cache_asset(path) for path in candidates[:max(1, min(limit, 500))]]
+
+    def upload_cache_files(self, files: list[tuple[str, bytes]]) -> CacheUploadResponse:
+        """Store direct images or extract images from dropped Word documents."""
+        staged: list[tuple[str, bytes]] = []
+        skipped: list[str] = []
+        total_size = 0
+        for original_name, content in files:
+            name = Path(original_name or "upload").name
+            suffix = Path(name).suffix.lower()
+            if not content:
+                skipped.append(f"{name}: 空文件")
+                continue
+            if len(content) > _MAX_CACHE_FILE_BYTES:
+                skipped.append(f"{name}: 超过 30MB 大小限制")
+                continue
+            if suffix in _IMAGE_EXTENSIONS:
+                staged.append((name, content))
+            elif suffix == ".docx":
+                try:
+                    extracted = self._extract_docx_images(name, content)
+                except (OSError, ValueError, zipfile.BadZipFile) as exc:
+                    skipped.append(f"{name}: 无法提取图片（{exc}）")
+                    continue
+                if not extracted:
+                    skipped.append(f"{name}: 未找到支持的内嵌图片")
+                    continue
+                staged.extend(extracted)
+            else:
+                skipped.append(f"{name}: 仅支持图片和 .docx 文件")
+
+        for _, content in staged:
+            total_size += len(content)
+            if total_size > _MAX_CACHE_TOTAL_BYTES:
+                raise ValueError("本次拖入的图片总大小超过 80MB")
+        if not staged:
+            return CacheUploadResponse(images=[], skipped=skipped)
+
+        batch_dir = self._cache_root / uuid.uuid4().hex
+        batch_dir.mkdir(parents=True, exist_ok=False)
+        images: list[CachedImageAsset] = []
+        for index, (name, content) in enumerate(staged, start=1):
+            safe_name = self._safe_upload_name(name)
+            target = batch_dir / f"{index:03d}-{safe_name}"
+            target.write_bytes(content)
+            images.append(self._cache_asset(target))
+        return CacheUploadResponse(images=images, skipped=skipped)
+
+    def _extract_docx_images(self, document_name: str, content: bytes) -> list[tuple[str, bytes]]:
+        images: list[tuple[str, bytes]] = []
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            for info in archive.infolist():
+                member = info.filename.replace("\\", "/")
+                if not member.startswith("word/media/") or member.endswith("/"):
+                    continue
+                if Path(member).suffix.lower() not in _IMAGE_EXTENSIONS:
+                    continue
+                if info.file_size > _MAX_CACHE_FILE_BYTES:
+                    raise ValueError("内嵌图片超过 30MB")
+                images.append((f"{Path(document_name).stem}-{Path(member).name}", archive.read(info)))
+                if len(images) >= _MAX_DOCX_IMAGES:
+                    raise ValueError("内嵌图片超过 80 张")
+        return images
+
+    def _cache_asset(self, path: Path) -> CachedImageAsset:
+        relative = path.resolve().relative_to(self._project_root).as_posix()
+        return CachedImageAsset(
+            relative_path=relative,
+            file_path=relative,
+            filename=path.name,
+            mime_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            size=path.stat().st_size,
+        )
+
+    def _is_temporary_cache_path(self, path: Path) -> bool:
+        try:
+            path.resolve().relative_to(self._cache_root.resolve())
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _file_hash(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _safe_upload_name(filename: str) -> str:
+        source = Path(filename).name
+        stem = re.sub(r"[^\w\-.()\u4e00-\u9fff]+", "_", Path(source).stem, flags=re.UNICODE).strip("._")
+        suffix = Path(source).suffix.lower()
+        return f"{stem[:80] or 'image'}{suffix}"
+
+    def _remove_empty_cache_parents(self, directory: Path) -> None:
+        while directory != self._cache_root:
+            try:
+                directory.rmdir()
+            except OSError:
+                return
+            directory = directory.parent
 
     # ── Replace ─────────────────────────────────────────────────
 

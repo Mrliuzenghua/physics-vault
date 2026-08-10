@@ -383,6 +383,46 @@ CREATE TABLE IF NOT EXISTS embeddings (
     UNIQUE (owner_type, owner_id, vector_type, model_name, model_version)
 );
 
+CREATE TRIGGER IF NOT EXISTS trg_embedding_stale_after_question_update
+AFTER UPDATE OF canonical_title, module, topic2, topic3, difficulty, question_type ON questions
+BEGIN
+    UPDATE embeddings
+    SET status = 'stale', updated_at = CURRENT_TIMESTAMP
+    WHERE owner_type = 'question' AND owner_id = NEW.question_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_embedding_stale_after_question_text_update
+AFTER UPDATE OF title_text, stem_text ON question_text_index
+BEGIN
+    UPDATE embeddings
+    SET status = 'stale', updated_at = CURRENT_TIMESTAMP
+    WHERE owner_type = 'question' AND owner_id = NEW.question_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_embedding_stale_after_knowledge_insert
+AFTER INSERT ON question_knowledge_points
+BEGIN
+    UPDATE embeddings
+    SET status = 'stale', updated_at = CURRENT_TIMESTAMP
+    WHERE owner_type = 'question' AND owner_id = NEW.question_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_embedding_stale_after_knowledge_update
+AFTER UPDATE ON question_knowledge_points
+BEGIN
+    UPDATE embeddings
+    SET status = 'stale', updated_at = CURRENT_TIMESTAMP
+    WHERE owner_type = 'question' AND owner_id = NEW.question_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_embedding_stale_after_knowledge_delete
+AFTER DELETE ON question_knowledge_points
+BEGIN
+    UPDATE embeddings
+    SET status = 'stale', updated_at = CURRENT_TIMESTAMP
+    WHERE owner_type = 'question' AND owner_id = OLD.question_id;
+END;
+
 CREATE INDEX IF NOT EXISTS idx_questions_type ON questions(question_type);
 CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
 CREATE INDEX IF NOT EXISTS idx_questions_review_status ON questions(review_status);
@@ -393,6 +433,7 @@ CREATE INDEX IF NOT EXISTS idx_questions_topic3 ON questions(topic3);
 CREATE INDEX IF NOT EXISTS idx_questions_paper ON questions(primary_paper_id);
 CREATE INDEX IF NOT EXISTS idx_questions_batch ON questions(import_batch_id);
 CREATE INDEX IF NOT EXISTS idx_questions_mistake ON questions(is_mistake);
+CREATE INDEX IF NOT EXISTS idx_questions_content_hash ON questions(content_hash);
 
 CREATE INDEX IF NOT EXISTS idx_qti_paper ON question_text_index(paper_id);
 CREATE INDEX IF NOT EXISTS idx_qti_question_no ON question_text_index(question_no);

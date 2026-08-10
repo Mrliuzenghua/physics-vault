@@ -10,7 +10,7 @@ from .ai_assistant import AiAssistantMessage, AiAssistantQuestionContext
 class AgentConfig(BaseModel):
     claude_code_path: str = ""
     enabled: bool = False
-    timeout_seconds: int = Field(default=90, ge=10, le=600)
+    timeout_seconds: int = Field(default=300, ge=10, le=600)
 
 
 class AgentConfigResponse(BaseModel):
@@ -22,7 +22,7 @@ class AgentConfigResponse(BaseModel):
 class AgentConfigUpdateRequest(BaseModel):
     claude_code_path: str = ""
     enabled: bool = True
-    timeout_seconds: int = Field(default=90, ge=10, le=600)
+    timeout_seconds: int = Field(default=300, ge=10, le=600)
 
 
 class AgentTestResponse(BaseModel):

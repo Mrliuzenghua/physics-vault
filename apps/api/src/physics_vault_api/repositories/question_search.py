@@ -294,9 +294,14 @@ class QuestionSearchRepository:
     # Connection
     # ------------------------------------------------------------------
 
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
     def _get_connection(self) -> sqlite3.Connection:
         """Open a new SQLite connection (real or in-memory)."""
         self._refresh_mock_state()
+
         if self._mock:
             conn = sqlite3.connect(":memory:")
             conn.row_factory = sqlite3.Row
@@ -476,8 +481,13 @@ class QuestionSearchRepository:
     ) -> tuple[list[dict[str, Any]], int]:
         apply_keyword = search_mode == "strict" and bool(query)
         use_fts = apply_keyword and not _force_like and self._fts_available()
+        fts_score_sql = (
+            ", -bm25(question_search_fts, 0.0, 8.0, 4.0, 1.0, 1.0, 6.0, 0.5) AS search_score"
+            if use_fts
+            else ", NULL AS search_score"
+        )
 
-        base_sql = """
+        base_sql = f"""
             SELECT DISTINCT
                 q.question_id,
                 q.canonical_title,
@@ -497,6 +507,7 @@ class QuestionSearchRepository:
                 qti.answer_text,
                 qti.analysis_text,
                 qti.options_json,
+                qti.tags_json,
                 qti.figures_json,
                 qti.image_asset_ids_json,
                 qti.image_filenames_json,
@@ -509,6 +520,7 @@ class QuestionSearchRepository:
                 p.year AS paper_year,
                 p.region AS paper_region,
                 p.exam_type AS paper_exam_type
+                {fts_score_sql}
             FROM questions q
             LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
             LEFT JOIN question_sources qs
@@ -562,7 +574,10 @@ class QuestionSearchRepository:
         _add(topic3, "q.topic3 = ?")
         _add(question_type, "q.question_type = ?")
         _add(difficulty, "q.difficulty = ?")
-        _add(status, "q.status = ?")
+        if status is None:
+            where.append("COALESCE(q.status, '') != 'archived_duplicate'")
+        else:
+            _add(status, "q.status = ?")
         _add(image_count_min if image_count_min > 0 else None, "COALESCE(qti.image_count, 0) >= ?")
         _add(1 if is_mistake is True else (0 if is_mistake is False else None), "COALESCE(q.is_mistake, 0) = ?")
 
@@ -593,25 +608,36 @@ class QuestionSearchRepository:
         else:
             where_clause = ""
 
-        count_sql = """
-            SELECT COUNT(DISTINCT q.question_id)
-            FROM questions q
-            LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
-            LEFT JOIN question_sources qs
-                ON qs.source_id = (
-                    SELECT qsi.source_id
-                    FROM question_sources qsi
-                    WHERE qsi.question_id = q.question_id
-                    ORDER BY
-                        CASE WHEN qsi.source_role = 'primary' THEN 0 ELSE 1 END,
-                        qsi.is_verified DESC,
-                        qsi.updated_at DESC,
-                        qsi.created_at DESC,
-                        qsi.source_id
-                    LIMIT 1
-                )
-            LEFT JOIN papers p ON p.paper_id = COALESCE(q.primary_paper_id, qs.paper_id, qti.paper_id)
-        """
+        # The count is executed for every page.  Do not repeat the expensive
+        # source-selection join unless a paper filter actually needs it: most
+        # browse requests only filter columns on ``questions``.  The row query
+        # below is deliberately unchanged, so returned data keeps the same
+        # source and paper resolution rules.
+        paper_filter_active = any(value is not None for value in (year, region, exam_type))
+        text_index_needed_for_count = (
+            image_count_min > 0 or (apply_keyword and not use_fts)
+        )
+        count_sql = "SELECT COUNT(*) FROM questions q"
+        if paper_filter_active:
+            count_sql += """
+                LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
+                LEFT JOIN question_sources qs
+                    ON qs.source_id = (
+                        SELECT qsi.source_id
+                        FROM question_sources qsi
+                        WHERE qsi.question_id = q.question_id
+                        ORDER BY
+                            CASE WHEN qsi.source_role = 'primary' THEN 0 ELSE 1 END,
+                            qsi.is_verified DESC,
+                            qsi.updated_at DESC,
+                            qsi.created_at DESC,
+                            qsi.source_id
+                        LIMIT 1
+                    )
+                LEFT JOIN papers p ON p.paper_id = COALESCE(q.primary_paper_id, qs.paper_id, qti.paper_id)
+            """
+        elif text_index_needed_for_count:
+            count_sql += " LEFT JOIN question_text_index qti ON qti.question_id = q.question_id"
         if use_fts:
             count_sql += """
             INNER JOIN question_search_fts
@@ -620,7 +646,10 @@ class QuestionSearchRepository:
         count_sql += where_clause
 
         sql += where_clause
-        sql += " ORDER BY q.primary_question_no, q.question_id"
+        if use_fts:
+            sql += " ORDER BY search_score DESC, q.primary_question_no, q.question_id"
+        else:
+            sql += " ORDER BY q.primary_question_no, q.question_id"
         sql += " LIMIT ? OFFSET ?"
 
         with closing(self._get_connection()) as conn:
@@ -741,6 +770,134 @@ class QuestionSearchRepository:
             payload["knowledge_points"] = knowledge_map.get(row["question_id"], [])
             result.append(payload)
         return result
+
+    def embedding_index_revision(
+        self,
+        *,
+        model_name: str,
+        model_version: str,
+        vector_type: str,
+    ) -> tuple[int, str]:
+        """Return a cheap revision marker for the ready question-vector index."""
+        self._refresh_mock_state()
+        if self._mock:
+            return 0, ""
+        with closing(self._get_connection()) as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS vector_count, COALESCE(MAX(updated_at), '') AS last_updated_at
+                FROM embeddings
+                WHERE owner_type = 'question'
+                  AND vector_type = ?
+                  AND model_name = ?
+                  AND COALESCE(model_version, '') = COALESCE(?, '')
+                  AND status = 'ready'
+                """,
+                (vector_type, model_name, model_version),
+            ).fetchone()
+        return int(row["vector_count"] or 0), str(row["last_updated_at"] or "")
+
+    def embedding_index_health(
+        self,
+        *,
+        model_name: str,
+        model_version: str,
+        vector_type: str,
+    ) -> dict[str, Any]:
+        """Return vector coverage for questions that are visible in normal search."""
+        self._refresh_mock_state()
+        if self._mock:
+            return {
+                "question_count": 0,
+                "ready_embedding_count": 0,
+                "stale_embedding_count": 0,
+                "missing_embedding_count": 0,
+                "last_updated_at": "",
+            }
+        with closing(self._get_connection()) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS question_count,
+                    SUM(CASE WHEN e.status = 'ready' THEN 1 ELSE 0 END)
+                        AS ready_embedding_count,
+                    SUM(CASE WHEN e.status = 'stale' THEN 1 ELSE 0 END)
+                        AS stale_embedding_count,
+                    SUM(CASE WHEN e.owner_id IS NULL THEN 1 ELSE 0 END)
+                        AS missing_embedding_count,
+                    COALESCE(MAX(e.updated_at), '') AS last_updated_at
+                FROM questions q
+                LEFT JOIN embeddings e
+                  ON e.owner_type = 'question'
+                 AND e.owner_id = q.question_id
+                 AND e.vector_type = ?
+                 AND e.model_name = ?
+                 AND COALESCE(e.model_version, '') = COALESCE(?, '')
+                WHERE COALESCE(q.status, '') != 'archived_duplicate'
+                """,
+                (vector_type, model_name, model_version),
+            ).fetchone()
+        return {
+            "question_count": int(row["question_count"] or 0),
+            "ready_embedding_count": int(row["ready_embedding_count"] or 0),
+            "stale_embedding_count": int(row["stale_embedding_count"] or 0),
+            "missing_embedding_count": int(row["missing_embedding_count"] or 0),
+            "last_updated_at": str(row["last_updated_at"] or ""),
+        }
+
+    def load_question_embeddings(
+        self,
+        *,
+        model_name: str,
+        model_version: str,
+        vector_type: str,
+    ) -> list[dict[str, Any]]:
+        """Load the ready vector index; the service layer caches parsed vectors."""
+        self._refresh_mock_state()
+        if self._mock:
+            return []
+        with closing(self._get_connection()) as conn:
+            rows = conn.execute(
+                """
+                SELECT owner_id, dimensions, vector_json, updated_at
+                FROM embeddings
+                WHERE owner_type = 'question'
+                  AND vector_type = ?
+                  AND model_name = ?
+                  AND COALESCE(model_version, '') = COALESCE(?, '')
+                  AND status = 'ready'
+                ORDER BY owner_id
+                """,
+                (vector_type, model_name, model_version),
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def load_method_features(
+        self,
+        *,
+        method_id: str,
+        branches: tuple[str, ...],
+    ) -> list[dict[str, Any]] | None:
+        """Load the persistent method index, or None when the schema is unavailable."""
+        self._refresh_mock_state()
+        if self._mock or not branches:
+            return None
+        placeholders = ",".join("?" for _ in branches)
+        try:
+            with closing(self._get_connection()) as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT question_id, method_id, branch, level, score,
+                           match_basis, evidence_json, index_version
+                    FROM question_method_features
+                    WHERE method_id = ? AND branch IN ({placeholders})
+                    ORDER BY score DESC, question_id
+                    """,
+                    (method_id, *branches),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            return None
+        return [_row_to_dict(row) for row in rows]
 
     def _fts_available(self) -> bool:
         with closing(self._get_connection()) as conn:

@@ -6,10 +6,13 @@ calls never fall back to demo questions unless PHYSICS_ALLOW_DEMO_DATA is set.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 
 from physics_vault_api.app import create_app
+from physics_vault_api.db_schema import initialize_database
 from physics_vault_api.repositories.question_search import (
     QuestionDatabaseUnavailableError,
     QuestionSearchRepository,
@@ -129,6 +132,31 @@ def test_search_strict_keyword_match() -> None:
             or "牛顿" in (item.get("analysis") or "")
         )
         assert keyword_match, f"Item {item['question_id']} does not contain keyword '牛顿'"
+
+
+def test_strict_search_orders_fts_results_by_weighted_relevance(tmp_path) -> None:
+    db_path = initialize_database(tmp_path / "ranked-search.sqlite3")
+    with sqlite3.connect(db_path) as conn:
+        for question_id, title, tags in (
+            ("q-title", "momentum conservation", "[]"),
+            ("q-tag", "unrelated mechanics prompt", '["momentum"]'),
+        ):
+            conn.execute(
+                "INSERT INTO questions (question_id, canonical_title, question_type, difficulty) VALUES (?, ?, 'calculation', 3)",
+                (question_id, title),
+            )
+            conn.execute(
+                "INSERT INTO question_text_index (question_id, title_text, stem_text, tags_json) VALUES (?, ?, ?, ?)",
+                (question_id, title, title, tags),
+            )
+
+    rows, total = QuestionSearchRepository(str(db_path)).search_questions(
+        search_mode="strict", query="momentum", limit=10
+    )
+
+    assert total == 2
+    assert [row["question_id"] for row in rows] == ["q-title", "q-tag"]
+    assert rows[0]["search_score"] >= rows[1]["search_score"]
 
 
 def test_search_strict_no_query_returns_400() -> None:

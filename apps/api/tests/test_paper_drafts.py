@@ -56,3 +56,35 @@ def test_stale_paper_draft_save_cannot_overwrite_newer_content(tmp_path: Path) -
     assert current.updated_at == second.updated_at
     assert current.title == "AI enriched"
     assert [item.id for item in current.items] == ["knowledge-1"]
+
+
+def test_project_question_snapshot_round_trips_in_draft_payload(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    request = PaperDraftUpsertRequest(
+        id="draft-snapshot",
+        title="Editable project question",
+        items=[
+            PaperDraftItem(
+                id="question-instance-1",
+                type="question",
+                title="项目内修改后的题干",
+                payload={
+                    "question_snapshot": {
+                        "question_id": "bank-question-1",
+                        "title": "项目内修改后的题干",
+                        "options": [{"opt": "A", "content": "项目内选项"}],
+                        "answer": "A",
+                        "analysis": "项目内解析",
+                        "figures": [],
+                    }
+                },
+            )
+        ],
+    )
+
+    saved = service.save(request)
+
+    snapshot = saved.items[0].payload["question_snapshot"]
+    assert snapshot["title"] == "项目内修改后的题干"
+    assert snapshot["options"][0]["content"] == "项目内选项"
+    assert snapshot["analysis"] == "项目内解析"

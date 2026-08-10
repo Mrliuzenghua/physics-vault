@@ -83,6 +83,32 @@ def test_asset_list_has_real_references_source_stats_batches_and_pagination(tmp_
     assert staged.lifecycle_status == "staged"
 
 
+def test_asset_list_matches_absolute_reference_paths(tmp_path: Path) -> None:
+    assets_dir = tmp_path / "assets"
+    nested_dir = assets_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    asset = nested_dir / "used.png"
+    asset.write_bytes(b"used")
+    db_path = tmp_path / "test.sqlite3"
+    _create_reference_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO image_assets(asset_id, file_path, question_id) VALUES (?, ?, ?)",
+            ("asset-absolute", str(asset), "Q-absolute"),
+        )
+
+    service = AssetsManagerService(
+        assets_dir=str(assets_dir),
+        db_path=str(db_path),
+        import_batches_dir=str(tmp_path / "import-batches"),
+    )
+
+    result = service.get_asset_list(source="question_bank")
+
+    assert result.assets[0].is_referenced is True
+    assert "Q-absolute" in result.assets[0].reference_question_ids
+
+
 def test_cleanup_preview_blocks_when_reference_database_is_missing(tmp_path: Path) -> None:
     assets_dir = tmp_path / "assets"
     assets_dir.mkdir()
@@ -161,3 +187,78 @@ def test_import_cache_cleanup_skips_active_batches_and_deletes_inactive_images(t
     assert not idle_image.exists()
     assert active_image.exists()
     assert (import_dir / "batch_idle" / "status.json").exists()
+
+
+def test_business_collections_follow_reference_status_not_storage_folder(tmp_path: Path) -> None:
+    assets_dir = tmp_path / "assets"
+    import_dir = tmp_path / "import-batches"
+    batch_dir = import_dir / "batch_demo" / "media"
+    assets_dir.mkdir()
+    batch_dir.mkdir(parents=True)
+    (assets_dir / "used.png").write_bytes(b"used")
+    (assets_dir / "unused-local.png").write_bytes(b"unused-local")
+    (batch_dir / "used-import.png").write_bytes(b"used-import")
+    (batch_dir / "unused-import.png").write_bytes(b"unused-import")
+    db_path = tmp_path / "test.sqlite3"
+    _create_reference_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO image_assets(asset_id, file_path, question_id) VALUES (?, ?, ?)",
+            (
+                "asset-import",
+                "data/import-batches/batch_demo/media/used-import.png",
+                "Q-3",
+            ),
+        )
+
+    service = AssetsManagerService(
+        assets_dir=str(assets_dir),
+        db_path=str(db_path),
+        import_batches_dir=str(import_dir),
+    )
+
+    library = service.get_asset_list(source="all", filter_mode="referenced", page_size=20)
+    cache = service.get_asset_list(source="all", filter_mode="unreferenced", page_size=20)
+
+    assert {asset.filename for asset in library.assets} == {"used.png", "used-import.png"}
+    assert {asset.filename for asset in cache.assets} == {"unused-local.png", "unused-import.png"}
+    assert all(asset.is_referenced for asset in library.assets)
+    assert all(not asset.is_referenced for asset in cache.assets)
+
+
+def test_unused_cache_can_be_deleted_but_referenced_assets_are_protected(tmp_path: Path) -> None:
+    assets_dir = tmp_path / "assets"
+    import_dir = tmp_path / "import-batches"
+    batch_dir = import_dir / "batch_idle" / "media"
+    assets_dir.mkdir()
+    batch_dir.mkdir(parents=True)
+    (import_dir / "batch_idle" / "status.json").write_text('{"status":"completed"}', encoding="utf-8")
+    referenced = assets_dir / "used.png"
+    unused_local = assets_dir / "unused-local.png"
+    unused_import = batch_dir / "unused-import.png"
+    referenced.write_bytes(b"used")
+    unused_local.write_bytes(b"unused-local")
+    unused_import.write_bytes(b"unused-import")
+    db_path = tmp_path / "test.sqlite3"
+    _create_reference_db(db_path)
+
+    service = AssetsManagerService(
+        assets_dir=str(assets_dir),
+        db_path=str(db_path),
+        import_batches_dir=str(import_dir),
+    )
+
+    protected_result = service.delete_single("used.png")
+    assert protected_result.success is False
+    assert referenced.exists()
+
+    delete_result = service.delete_single("data/import-batches/batch_idle/media/unused-import.png")
+    assert delete_result.success is True
+    assert not unused_import.exists()
+
+    preview = service.get_unused_cache_cleanup_preview()
+    assert preview.candidate_count == 1
+    cleanup = service.cleanup_unused_cache()
+    assert cleanup.deleted_count == 1
+    assert not unused_local.exists()
+    assert referenced.exists()

@@ -10,7 +10,6 @@ from PIL import Image, ImageOps
 
 from .application import ApplicationContainer
 from .db_schema import initialize_database
-from .legacy_compat import build_legacy_compat_router
 from .paths import project_root
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
@@ -90,7 +89,6 @@ def create_app() -> FastAPI:
     container = ApplicationContainer.build()
     for router in container.routers():
         app.include_router(router)
-    app.include_router(build_legacy_compat_router())
 
     return app
 

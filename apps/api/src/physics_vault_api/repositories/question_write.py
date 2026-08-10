@@ -38,6 +38,10 @@ class QuestionWriteRepository:
     def __init__(self, db_path: str | None = None) -> None:
         self._db_path = _resolve_db_path(db_path)
 
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
@@ -75,6 +79,10 @@ class QuestionWriteRepository:
     def upsert_many(
         self,
         questions: list[dict[str, Any]],
+        *,
+        version_modified_by: str = "system",
+        version_source: str = "manual",
+        version_change_summary: str | None = None,
     ) -> dict[str, int]:
         """Batch-upsert questions using ``question_id`` as the unique key.
 
@@ -140,7 +148,14 @@ class QuestionWriteRepository:
                         inserted += 1
                     else:
                         # Capture version snapshot BEFORE update
-                        _capture_version_snapshot(conn, qid, q)
+                        _capture_version_snapshot(
+                            conn,
+                            qid,
+                            q,
+                            change_summary=version_change_summary,
+                            modified_by=version_modified_by,
+                            source=version_source,
+                        )
 
                         conn.execute(
                             """
@@ -273,6 +288,16 @@ class QuestionWriteRepository:
                             ),
                         )
 
+                    if row is not None and _table_exists(conn, "embeddings"):
+                        conn.execute(
+                            """
+                            UPDATE embeddings
+                            SET status = 'stale', updated_at = CURRENT_TIMESTAMP
+                            WHERE owner_type = 'question' AND owner_id = ?
+                            """,
+                            (qid,),
+                        )
+
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -284,6 +309,27 @@ class QuestionWriteRepository:
             "inserted": inserted,
             "updated": updated,
         }
+
+    def find_question_ids_by_content_hashes(self, content_hashes: list[str]) -> dict[str, list[str]]:
+        """Find canonical questions sharing a non-empty content fingerprint."""
+        hashes = list(dict.fromkeys(str(item).strip() for item in content_hashes if str(item).strip()))
+        if not hashes:
+            return {}
+        placeholders = ",".join("?" for _ in hashes)
+        with closing(self._get_connection()) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT content_hash, question_id
+                FROM questions
+                WHERE content_hash IN ({placeholders})
+                ORDER BY question_id
+                """,
+                hashes,
+            ).fetchall()
+        matches: dict[str, list[str]] = {}
+        for row in rows:
+            matches.setdefault(str(row["content_hash"]), []).append(str(row["question_id"]))
+        return matches
 
     # ------------------------------------------------------------------
     # Batch delete

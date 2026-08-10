@@ -2,12 +2,15 @@
 
 import fnmatch
 import hashlib
+import html
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,7 +31,7 @@ if PYWIN32_SYSTEM32.exists() and hasattr(os, "add_dll_directory"):
 
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 
-from physics_vault_api.paths import default_db_path, default_review_db_path  # noqa: E402
+from physics_vault_api.paths import default_db_path, default_review_db_path, project_root  # noqa: E402
 from physics_vault_api.repositories.import_tasks import SQLiteImportTaskRepository  # noqa: E402
 from physics_vault_api.schemas.paper_drafts import PaperDraftItem, PaperDraftUpsertRequest  # noqa: E402
 from physics_vault_api.schemas.question_search import BatchQuestionFetchRequest, QuestionSearchParams  # noqa: E402
@@ -39,14 +42,81 @@ from physics_vault_api.services.document_pipeline import (  # noqa: E402
     StructuredQuestionParsingService,
 )
 from physics_vault_api.services.lesson_exports import LessonExportService  # noqa: E402
+from physics_vault_api.services.lesson_documents import (  # noqa: E402
+    get_saved_handout as _get_saved_handout_store,
+    list_saved_handout_versions as _list_saved_handout_versions_store,
+    list_saved_handouts as _list_saved_handouts_store,
+    rename_saved_handout as _rename_saved_handout_store,
+    restore_saved_handout_version as _restore_saved_handout_version_store,
+    update_saved_handout_format as _update_saved_handout_format_store,
+)
+from physics_vault_api.services.word_export_formats import (  # noqa: E402
+    format_spec_for_template,
+    get_word_export_template,
+    list_word_export_templates as _list_word_export_templates_store,
+    rename_word_export_template as _rename_word_export_template_store,
+    save_word_export_template as _save_word_export_template_store,
+    validate_format_spec,
+)
 from physics_vault_api.services.ai_assistant import _candidate_query_tokens  # noqa: E402
 from physics_vault_api.services.change_audit import ChangeAuditService  # noqa: E402
 from physics_vault_api.services.metadata_management import MetadataManagementService  # noqa: E402
-from physics_vault_api.services.math_text import normalize_math_delimiters  # noqa: E402
+from physics_vault_api.services.method_feature_index import (  # noqa: E402
+    METHOD_INDEX_VERSION,
+    ensure_method_feature_index_current,
+)
+from physics_vault_api.services.method_feedback import (  # noqa: E402
+    list_method_retrieval_feedback as _list_method_retrieval_feedback,
+    record_method_retrieval_feedback as _record_method_retrieval_feedback,
+)
+from physics_vault_api.services.retrieval_learning import (  # noqa: E402
+    build_method_retrieval_learning_report as _build_method_retrieval_learning_report,
+)
+from physics_vault_api.services.tag_maintenance import (  # noqa: E402
+    diagnose_tag_maintenance as _diagnose_tag_maintenance,
+    maintain_question_tags as _maintain_question_tags,
+    suggest_question_tags as _suggest_question_tags,
+)
+from physics_vault_api.services.math_text import (  # noqa: E402
+    normalize_math_delimiters,
+    normalize_standard_latex,
+    repair_unbalanced_inline_math,
+)
 from physics_vault_api.services.question_search import QuestionSearchService  # noqa: E402
+from physics_vault_api.services.retrieval_method_intent import (  # noqa: E402
+    detect_method_intent,
+    method_query_terms,
+    score_method_candidate,
+)
+from physics_vault_api.services.question_fingerprint import canonical_question_fingerprint  # noqa: E402
 from physics_vault_api.services.paper_drafts import PaperDraftConflictError, PaperDraftService  # noqa: E402
 from physics_vault_api.services.similar_questions import SimilarQuestionsService  # noqa: E402
 from physics_vault_api.services.task_center import TaskActionContext, TaskCenterService  # noqa: E402
+from physics_vault_api.services.typst_exports import TypstExportError, TypstQuestionExportService  # noqa: E402
+from physics_vault_api.services.teaching_projects import (  # noqa: E402
+    TeachingProjectConflictError,
+    duplicate_teaching_project as _duplicate_teaching_project,
+    get_teaching_project as _get_teaching_project,
+    list_teaching_projects as _list_teaching_projects,
+    save_teaching_project as _save_teaching_project,
+)
+
+_CLASSROOM_SESSION_STORE = project_root() / "data" / "config" / "classroom_sessions.json"
+
+
+def _read_classroom_sessions() -> list[dict[str, Any]]:
+    try:
+        value = json.loads(_CLASSROOM_SESSION_STORE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+    return [item for item in value if isinstance(item, dict) and item.get("id")] if isinstance(value, list) else []
+
+
+def _write_classroom_sessions(items: list[dict[str, Any]]) -> None:
+    _CLASSROOM_SESSION_STORE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = _CLASSROOM_SESSION_STORE.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, _CLASSROOM_SESSION_STORE)
 
 server = MCPServer(
     name="physics_vault",
@@ -61,10 +131,22 @@ server = MCPServer(
         "canonical search_questions/get_questions_by_ids. First call list_review_tasks or "
         "get_review_task on the Review DB, then clean_review_task_latex if needed. "
         "Use list_review_queue/list_review_tasks/get_review_task for fast review-center discovery. "
+        "When a task needs to inspect, OCR, reuse, or verify a canonical question figure, do not rely on figure metadata alone: "
+        "first call download_question_images with the question_id. It copies only managed image assets into data/mcp-downloads "
+        "and returns local absolute paths that can be read or attached. Do not download images for text-only work. "
+        "For Typst handouts, use export_questions_to_typst with dry_run=true first. It reads canonical questions and images only, "
+        "then writes template-neutral questions-data.typ and image-map.typ under data/exports/typst only after dry_run=false; it never copies, moves, renames, or deletes gallery files. "
         "When the user asks to import every Word file from a folder into the review center, use "
         "import_word_folder_to_review: first dry_run=true to show the file plan, then dry_run=false "
         "only after the user confirms the folder and count. This workflow writes only the Review DB. "
         "Use get_review_task_full when the complete draft is needed. "
+        "Review task detail, validation, cleaning, splitting, and draft update tools accept an exact task_id or a unique UUID prefix; always use the full task_id returned by the tool in subsequent calls. "
+        "Before explaining, cleaning, or submitting review drafts, call validate_review_task to get structured risks. "
+        "Use risks_only=true when only problematic questions are needed. "
+        "When options were merged during OCR/import, use split_merged_options with dry_run=true first, then dry_run=false after an explicit repair request. "
+        "When a review task contains repeated imported questions, use deduplicate_review_task_questions with dry_run=true first. It removes only exact content duplicates from the Review DB, preserves the first occurrence in each group, and never changes the Canonical DB. "
+        "Use its question_id, code, severity, field, message, and suggestion in the response to the teacher. "
+        "When the user explicitly asks to eliminate or fix risks, modify the existing review draft with update_review_task_draft or clean_review_task_latex, then call validate_review_task again; do not stop at a recommendation. If cleaning returns manual_action_required=true or remaining_risks, do not ask the teacher to edit it: read the full affected questions and use update_review_task_draft to manually patch each affected field into the standard format, then validate again. For LaTeX, use $...$ for inline math, $$...$$ only for standalone display math, and keep every opening delimiter paired with the same closing delimiter. Report any risk that cannot be safely inferred instead of claiming the task is fully fixed. "
         "Use database_boundary_report when unsure which database/tool family to use. "
         "Use clean_review_task_latex/update_review_task_draft to modify the current draft in place; "
         "do not create a duplicate task with submit_ai_generated_review. "
@@ -77,16 +159,96 @@ server = MCPServer(
         "the decisive reasoning, useful formulas and actual misconceptions from the question; never use generic fixed headings or boilerplate. "
         "Do not add a generic knowledge card plus a separate text block. Use topic3_id only for an exact semantic match; otherwise create a "
         "workbench-only explanation with title. add_knowledge_to_composition_workbench only references taxonomy and must not be used to generate explanations. "
-        "Use create_knowledge_points and batch_update_question_metadata directly to normalize tags, "
+        "Use diagnose_tag_maintenance, suggest_question_tags, maintain_question_tags, create_knowledge_points and batch_update_question_metadata directly to normalize tags, "
         "knowledge bindings, difficulty, question type, and normalized source without asking for approval. "
-        "These metadata tools cannot change stems, options, answers, analysis, images, or publication status. "
+        "A formal question may have one primary and up to two secondary level-3 knowledge points. "
+        "When retrieved question content conflicts with its labels, call maintain_question_knowledge_points. "
+        "It may automatically apply only high-confidence repairs and records a rollback-capable audit batch; "
+        "ambiguous cases must remain marked for review rather than being force-filled to three labels. "
+        "When the user searches by a named solution method, teaching nickname, formula pattern, or says a classic problem was missed, use search_method_questions first (or search_questions with search_mode=comprehensive when combining additional topic filters). Start with its default compact response and a small limit; request summary_only=false and include_evidence=true only when the user needs full question text or proof. Method retrieval must inspect stems and analyses, expand the nickname into physical structures, and never treat a knowledge-point label as a hard filter. Separate explicit-name matches, structural method matches, and merely related candidates; when evidence is requested, quote it and verify result counts, years, and sources from tool fields before claiming completeness. If the user supplies year or region, pass those structured filters instead of putting them only into query text. "
+        "When the teacher explicitly confirms a method match, identifies a false positive, or supplies a missed question, call record_method_retrieval_feedback so the correction persists and refreshes searchable metadata and derived indexes. Use method_retrieval_learning_report to audit accumulated feedback, benchmark constraints, and high-confidence metadata maintenance candidates. "
+        "When tag names are close in meaning or spelling, first call diagnose_tag_maintenance, then use maintain_question_tags with dry_run=true before applying a merge. High-confidence new teaching tags may be created through maintain_question_tags; ambiguous tags should remain suggestions. These metadata tools cannot change stems, options, answers, analysis, images, or publication status. "
         "return_question_to_review remains a controlled canonical content workflow and requires preview plus confirmation. "
+        "If its delivery_status is pending, call reconcile_review_queue_outbox to retry only the review-queue delivery; do not repeat the canonical update. "
         "Legacy batch_replace_question_tags and batch_replace_question_knowledge_points remain available for compatibility. "
         "Use list_change_batches/get_change_batch/rollback_change_batch to inspect or roll back audited changes. "
+        "For canonical duplicate questions, use scan_canonical_duplicate_questions, then call merge_canonical_duplicate_questions with dry_run=true before applying. "
+        "It archives duplicates instead of deleting them; use restore_canonical_duplicate_merge to reverse a merge batch. "
         "Task status tools are read-only. retry_job and cancel_job require confirmed=true after explicit human confirmation. "
-        "Task write tools call the application task service and record source, session, operator, and an audit id."
+        "Task write tools call the application task service and record source, session, operator, and an audit id. "
+        "Document routing is strict: composition-workbench tools operate only on document_kind=workbench_draft "
+        "stored in paper_drafts; saved-handout tools operate only on document_kind=saved_handout stored in the saved handout library. "
+        "Never infer that a saved handout is the current workbench. If the user does not identify the document kind or id, "
+        "use the workbench tools only for an active draft and ask for the saved handout id before changing a saved handout. "
+        "Word format templates are reusable configuration only; apply them to a workbench or saved handout explicitly before exporting."
     ),
 )
+
+# A single service remains convenient for local development, while clients
+# that support separate MCP entries can expose a narrower tool profile by
+# setting PHYSICS_MCP_PROFILE.  "all" preserves today's complete surface.
+_MCP_PROFILE = os.getenv("PHYSICS_MCP_PROFILE", "all").strip().lower() or "all"
+_MCP_PROFILE_TOOLS: dict[str, set[str]] = {
+    "catalog": {
+        "list_filter_facets", "search_questions", "search_method_questions", "download_question_images", "search_topic_questions",
+        "get_questions_by_ids", "list_knowledge_tree", "search_knowledge_points",
+        "get_question_knowledge_points", "list_question_tags", "list_method_retrieval_feedback", "method_retrieval_learning_report", "database_boundary_report",
+        "database_health_report", "find_similar_questions", "scan_canonical_duplicate_questions",
+        "list_canonical_duplicate_merges",
+    },
+    "catalog_maintenance": {
+        "create_knowledge_points", "organize_knowledge_tree", "batch_update_question_metadata",
+        "diagnose_tag_maintenance", "suggest_question_tags", "maintain_question_tags",
+        "record_method_retrieval_feedback",
+        "maintain_question_knowledge_points",
+        "backfill_canonical_question_hashes", "merge_canonical_duplicate_questions",
+        "restore_canonical_duplicate_merge", "batch_replace_question_tags",
+        "batch_replace_question_knowledge_points", "return_question_to_review",
+        "reconcile_review_queue_outbox", "list_change_batches", "get_change_batch", "rollback_change_batch",
+    },
+    "review": {
+        "list_review_queue", "import_word_folder_to_review", "list_review_tasks", "get_review_task",
+        "get_review_task_full", "validate_review_task", "find_duplicate_review_tasks", "delete_review_tasks",
+        "suggest_knowledge_points_for_task", "clean_review_task_latex", "split_merged_options",
+        "deduplicate_review_task_questions", "update_review_task_draft", "submit_ai_generated_review",
+    },
+    "authoring": {
+        "list_teaching_projects", "get_teaching_project", "get_teaching_project_status",
+        "duplicate_teaching_project", "publish_teaching_artifact", "preflight_teaching_handout",
+        "sync_teaching_slides", "start_classroom_session", "get_classroom_session",
+        "update_classroom_session", "end_classroom_session", "list_composition_workbenches",
+        "get_composition_workbench", "create_composition_workbench", "add_questions_to_composition_workbench",
+        "add_knowledge_to_composition_workbench", "insert_teaching_block_to_composition_workbench",
+        "reorder_composition_workbench", "move_composition_item", "remove_items_from_composition_workbench",
+        "update_composition_item", "lock_composition_workbench", "apply_composition_workbench_plan",
+        "preview_composition_workbench", "export_composition_workbench", "list_word_export_templates",
+        "get_word_export_template", "propose_word_export_format", "validate_word_export_format",
+        "save_word_export_template", "rename_word_export_template", "list_saved_handouts", "get_saved_handout",
+        "list_saved_handout_versions", "restore_saved_handout_version", "rename_saved_handout",
+        "apply_word_format_to_saved_handout", "apply_word_format_to_workbench", "export_saved_handout",
+        "curate_questions_to_composition_workbench", "create_paper", "associate_questions_to_paper",
+        "export_questions_to_typst",
+    },
+    "operations": {
+        "submit_import_job", "submit_ai_clean_job", "submit_word_export_job", "submit_pptx_export_job",
+        "get_job_status", "list_jobs", "retry_job", "cancel_job",
+    },
+}
+_mcp_server_tool = server.tool
+
+
+def _profiled_mcp_tool():
+    decorator = _mcp_server_tool()
+
+    def register(func: Any) -> Any:
+        if _MCP_PROFILE == "all" or func.__name__ in _MCP_PROFILE_TOOLS.get(_MCP_PROFILE, set()):
+            return decorator(func)
+        return func
+
+    return register
+
+
+server.tool = _profiled_mcp_tool  # type: ignore[method-assign]
 
 
 def _search_service() -> QuestionSearchService:
@@ -108,6 +270,10 @@ def _task_center_service() -> TaskCenterService:
         import_service,
         lesson_export_service=LessonExportService(import_service._task_repo),
     )
+
+
+def _typst_export_service() -> TypstQuestionExportService:
+    return TypstQuestionExportService(db_path=_formal_db_path())
 
 
 def _paper_draft_service() -> PaperDraftService:
@@ -137,23 +303,191 @@ def _review_db_path() -> Path:
 
 def _connect_formal_read_db() -> sqlite3.Connection:
     db_path = _formal_db_path()
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA query_only = ON")
     return conn
 
 
 def _connect_formal_write_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(_formal_db_path())
+    conn = sqlite3.connect(_formal_db_path(), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
 def _connect_review_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(_review_db_path())
+    conn = sqlite3.connect(_review_db_path(), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
     _ensure_review_db_schema(conn)
     return conn
+
+
+_MCP_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".svg"}
+
+
+def _mcp_download_directory(destination_subdir: str | None) -> Path | None:
+    """Resolve an agent download directory without permitting arbitrary writes."""
+    raw_subdir = str(destination_subdir or "").strip().replace("\\", "/")
+    relative = Path(raw_subdir) if raw_subdir else Path()
+    if relative.is_absolute() or any(part == ".." for part in relative.parts):
+        return None
+    base = (project_root() / "data" / "mcp-downloads").resolve()
+    target = (base / relative).resolve()
+    return target if target == base or base in target.parents else None
+
+
+def _resolve_managed_image_path(file_path: str) -> Path | None:
+    """Resolve a database image path while keeping MCP reads in managed project data."""
+    raw_path = str(file_path or "").strip()
+    if not raw_path:
+        return None
+    root = project_root().resolve()
+    candidate = Path(raw_path).expanduser()
+    target = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+    managed_roots = ((root / "data" / "assets").resolve(), (root / "data" / "import-batches").resolve())
+    if not target.is_file() or target.suffix.lower() not in _MCP_IMAGE_SUFFIXES:
+        return None
+    return target if any(target == managed or managed in target.parents for managed in managed_roots) else None
+
+
+def _decode_json_list(value: Any) -> list[Any]:
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _question_image_records(question_id: str) -> list[dict[str, str]]:
+    """Return managed assets bound to a question, with legacy figure metadata as fallback."""
+    records: list[dict[str, str]] = []
+    try:
+        with _connect_formal_read_db() as conn:
+            has_image_tables = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('image_assets', 'question_assets')"
+            ).fetchone()[0] == 2
+            if has_image_tables:
+                rows = conn.execute(
+                    """
+                    SELECT ia.asset_id, ia.filename, ia.file_path
+                    FROM question_assets qa
+                    JOIN image_assets ia ON ia.asset_id = qa.asset_id
+                    WHERE qa.question_id = ?
+                    ORDER BY qa.sort_order, ia.asset_id
+                    """,
+                    (question_id,),
+                ).fetchall()
+                if not rows:
+                    rows = conn.execute(
+                        """
+                        SELECT asset_id, filename, file_path
+                        FROM image_assets
+                        WHERE question_id = ?
+                        ORDER BY asset_id
+                        """,
+                        (question_id,),
+                    ).fetchall()
+                records.extend(
+                    {
+                        "asset_id": str(row["asset_id"] or ""),
+                        "filename": str(row["filename"] or ""),
+                        "file_path": str(row["file_path"] or ""),
+                    }
+                    for row in rows
+                )
+
+            if not records:
+                row = conn.execute(
+                    """
+                    SELECT figures_json, image_asset_ids_json, image_filenames_json
+                    FROM question_text_index WHERE question_id = ?
+                    """,
+                    (question_id,),
+                ).fetchone()
+                if row:
+                    figures = _decode_json_list(row["figures_json"])
+                    for index, figure in enumerate(figures, start=1):
+                        if not isinstance(figure, dict):
+                            continue
+                        file_path = str(figure.get("local_path") or figure.get("file_path") or figure.get("path") or "")
+                        if file_path:
+                            records.append({
+                                "asset_id": str(figure.get("asset_id") or figure.get("fig_uuid") or f"figure-{index}"),
+                                "filename": Path(file_path).name,
+                                "file_path": file_path,
+                            })
+    except sqlite3.Error:
+        return []
+    return records
+
+
+def _resolve_review_task_id(task_id: str) -> str | None:
+    """Resolve an exact task id or a unique short UUID prefix."""
+    tid = str(task_id or "").strip()
+    if not tid:
+        return None
+    with _connect_review_db() as conn:
+        row = conn.execute(
+            "SELECT task_id FROM import_pipeline_tasks WHERE task_id = ?",
+            (tid,),
+        ).fetchone()
+        if row is not None:
+            return str(row["task_id"])
+        rows = conn.execute(
+            "SELECT task_id FROM import_pipeline_tasks WHERE task_id LIKE ? ORDER BY updated_at DESC LIMIT 2",
+            (f"{tid}%",),
+        ).fetchall()
+    if len(rows) == 1:
+        return str(rows[0]["task_id"])
+    return None
+
+
+def _load_review_task(task_id: str) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]:
+    """统一读取审核任务，并集中处理空 ID、短 ID、缺表和任务不存在。"""
+    requested = str(task_id or "").strip()
+    if not requested:
+        return None, None, _tool_error("INVALID_ARGUMENT", "task_id 不能为空。", field="task_id")
+
+    resolved = _resolve_review_task_id(requested)
+    if resolved is None:
+        return None, None, {
+            "ok": False,
+            "status": "missing",
+            "task_id": requested,
+            "error": "校对任务不存在，或任务号前缀不唯一。",
+        }
+
+    with _connect_review_db() as conn:
+        if not _table_exists(conn, "import_pipeline_tasks"):
+            return None, None, {
+                "ok": False,
+                "table_missing": True,
+                "error": "import_pipeline_tasks 表不存在。",
+            }
+        row = conn.execute(
+            """
+            SELECT task_id, task_type, status, created_at, updated_at,
+                   input_summary_json, result_json, error
+            FROM import_pipeline_tasks
+            WHERE task_id = ?
+            """,
+            (resolved,),
+        ).fetchone()
+    if row is None:
+        return None, None, {
+            "ok": False,
+            "status": "missing",
+            "task_id": resolved,
+            "error": "校对任务不存在。",
+        }
+    return resolved, dict(row), None
 
 
 def _ensure_review_db_schema(conn: sqlite3.Connection) -> None:
@@ -259,6 +593,128 @@ def _ensure_change_audit_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_review_queue_outbox_schema(conn: sqlite3.Connection) -> None:
+    """Persist cross-database review-queue deliveries for safe retries.
+
+    A canonical status update and an insert into the review database cannot share
+    one SQLite transaction.  The outbox is committed with the canonical update,
+    then delivered separately and retried by ``reconcile_review_queue_outbox``.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS review_queue_outbox (
+            operation_id TEXT PRIMARY KEY,
+            review_id TEXT NOT NULL UNIQUE,
+            question_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            audit_batch_id TEXT,
+            delivery_status TEXT NOT NULL DEFAULT 'pending',
+            delivery_attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            delivered_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_review_queue_outbox_pending
+        ON review_queue_outbox(delivery_status, created_at)
+        """
+    )
+
+
+def _deliver_review_queue_outbox(operation_id: str) -> dict[str, Any]:
+    """Deliver one durable outbox item to the review DB without duplicating it."""
+    with _connect_formal_write_db() as conn:
+        _ensure_review_queue_outbox_schema(conn)
+        row = conn.execute(
+            """
+            SELECT operation_id, review_id, question_id, reason, payload_json,
+                   audit_batch_id, delivery_status, delivery_attempts, last_error
+            FROM review_queue_outbox WHERE operation_id = ?
+            """,
+            (operation_id,),
+        ).fetchone()
+        conn.commit()
+    if row is None:
+        return _tool_error("OUTBOX_OPERATION_NOT_FOUND", "审核队列投递操作不存在。", field="operation_id")
+
+    if row["delivery_status"] == "delivered":
+        return {
+            "ok": True,
+            "operation_id": operation_id,
+            "delivery_status": "delivered",
+            "already_delivered": True,
+            "audit_batch_id": row["audit_batch_id"],
+        }
+    if row["delivery_status"] == "cancelled":
+        return {
+            "ok": True,
+            "operation_id": operation_id,
+            "delivery_status": "cancelled",
+            "skipped": True,
+            "audit_batch_id": row["audit_batch_id"],
+        }
+
+    try:
+        with _connect_review_db() as review_conn:
+            review_conn.execute(
+                """
+                INSERT OR REPLACE INTO review_queue (
+                    review_id, entity_type, entity_id, queue_type, status,
+                    priority, reason, payload_json, created_at, updated_at
+                ) VALUES (?, 'question', ?, 'rework', 'pending', 5, ?, ?,
+                          CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (row["review_id"], row["question_id"], row["reason"], row["payload_json"]),
+            )
+            review_conn.commit()
+    except sqlite3.Error as exc:
+        with _connect_formal_write_db() as conn:
+            _ensure_review_queue_outbox_schema(conn)
+            conn.execute(
+                """
+                UPDATE review_queue_outbox
+                SET delivery_attempts = delivery_attempts + 1, last_error = ?
+                WHERE operation_id = ?
+                """,
+                (str(exc), operation_id),
+            )
+            conn.commit()
+        return {
+            "ok": False,
+            "operation_id": operation_id,
+            "delivery_status": "pending",
+            "error_info": {
+                "code": "REVIEW_QUEUE_DELIVERY_PENDING",
+                "message": "正式库更新已保存，但审核队列暂未写入；可稍后重试对账。",
+                "retryable": True,
+                "details": {},
+            },
+        }
+
+    with _connect_formal_write_db() as conn:
+        _ensure_review_queue_outbox_schema(conn)
+        conn.execute(
+            """
+            UPDATE review_queue_outbox
+            SET delivery_status = 'delivered', delivery_attempts = delivery_attempts + 1,
+                last_error = NULL, delivered_at = CURRENT_TIMESTAMP
+            WHERE operation_id = ?
+            """,
+            (operation_id,),
+        )
+        conn.commit()
+    return {
+        "ok": True,
+        "operation_id": operation_id,
+        "delivery_status": "delivered",
+        "audit_batch_id": row["audit_batch_id"],
+    }
+
+
 def _record_change_batch(
     conn: sqlite3.Connection,
     *,
@@ -337,6 +793,45 @@ def _tool_error(
     }
 
 
+class ReviewTaskConflictError(RuntimeError):
+    """Raised when a review draft changed after the caller read it."""
+
+    def __init__(self, task_id: str, expected: str, current: str) -> None:
+        super().__init__(f"校对任务 {task_id} 已被其他操作修改。")
+        self.task_id = task_id
+        self.expected = expected
+        self.current = current
+
+
+def _format_spec_diff(
+    before: dict[str, Any] | None,
+    after: dict[str, Any],
+    *,
+    before_template_id: str | None = None,
+    after_template_id: str | None = None,
+) -> dict[str, Any]:
+    """Summarize format changes without returning a large before/after payload."""
+    previous = before if isinstance(before, dict) else {}
+    sections = ("styleConfig", "headerFooter", "contentStyles", "output", "rules")
+    changed_fields: dict[str, list[str]] = {}
+    for section in sections:
+        previous_section = previous.get(section) if isinstance(previous.get(section), dict) else {}
+        next_section = after.get(section) if isinstance(after.get(section), dict) else {}
+        fields = sorted(
+            key
+            for key in set(previous_section) | set(next_section)
+            if previous_section.get(key) != next_section.get(key)
+        )
+        if fields:
+            changed_fields[section] = fields
+    return {
+        "changed_sections": sorted(changed_fields),
+        "changed_fields": changed_fields,
+        "before_template_id": before_template_id,
+        "after_template_id": after_template_id,
+    }
+
+
 _REVIEW_INTENT_RE = re.compile(
     r"(校对中心|待校对|审核任务|审核队列|送审|已送审|草稿|回炉|复核|review center|submitted|draft)",
     re.IGNORECASE,
@@ -350,6 +845,254 @@ def _looks_like_review_intent(text: str | None) -> bool:
 
 
 @server.tool()
+def list_teaching_projects(limit: int = 50) -> dict[str, Any]:
+    """列出教学项目及讲义、课件、课堂产物状态。只读。"""
+    return {"ok": True, "document_kind": "teaching_project", "items": _list_teaching_projects(limit)}
+
+
+@server.tool()
+def get_teaching_project(project_id: str) -> dict[str, Any]:
+    """读取一个教学项目的内容源、产物状态和发布快照。只读。"""
+    project = _get_teaching_project(project_id)
+    if not project:
+        return _tool_error("TEACHING_PROJECT_NOT_FOUND", f"教学项目不存在：{project_id}。", field="project_id")
+    return {"ok": True, **project, "document_kind": "teaching_project"}
+
+
+@server.tool()
+def get_teaching_project_status(project_id: str) -> dict[str, Any]:
+    """读取教学项目的内容版本、讲义/课件状态和发布版本号。"""
+    project = _get_teaching_project(project_id)
+    if not project:
+        return _tool_error("TEACHING_PROJECT_NOT_FOUND", f"教学项目不存在：{project_id}。", field="project_id")
+    result: dict[str, Any] = {
+        "project_id": project_id,
+        "title": project.get("title"),
+        "project_type": project.get("projectType"),
+        "content_revision": project.get("contentRevision"),
+        "status": project.get("status", "draft"),
+    }
+    for key in ("handout", "slides"):
+        artifact = project.get(key) if isinstance(project.get(key), dict) else {}
+        published = artifact.get("publishedSnapshot") if isinstance(artifact.get("publishedSnapshot"), dict) else {}
+        result[key] = {
+            "status": artifact.get("status", "draft"),
+            "source_revision": artifact.get("sourceRevision"),
+            "published_version": published.get("version"),
+            "published_at": published.get("publishedAt"),
+        }
+    return {"ok": True, "document_kind": "teaching_project_status", "status": result}
+
+
+@server.tool()
+def duplicate_teaching_project(project_id: str, title: str | None = None) -> dict[str, Any]:
+    """复制教学项目；副本会重置为草稿并清除已发布产物快照。"""
+    project = _duplicate_teaching_project(project_id, title=title)
+    if not project:
+        return _tool_error("TEACHING_PROJECT_NOT_FOUND", f"教学项目不存在：{project_id}。", field="project_id")
+    return {"ok": True, **project, "document_kind": "teaching_project"}
+
+
+@server.tool()
+def publish_teaching_artifact(
+    project_id: str,
+    artifact: Literal["handout", "slides"] = "slides",
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """发布教学产物。默认先返回计划，confirmed=true 才会写入不可变发布快照。"""
+    project = _get_teaching_project(project_id)
+    if not project:
+        return _tool_error("TEACHING_PROJECT_NOT_FOUND", f"教学项目不存在：{project_id}。", field="project_id")
+    current = project.get(artifact) if isinstance(project.get(artifact), dict) else None
+    if not current:
+        return _tool_error("ARTIFACT_NOT_FOUND", f"项目没有{artifact}产物。", field="artifact")
+    plan = {
+        "project_id": project_id,
+        "artifact": artifact,
+        "status_before": current.get("status", "draft"),
+        "source_revision": current.get("sourceRevision"),
+        "requires_confirmation": True,
+        "message": "将创建新的不可变发布快照，课堂将只读取课件发布快照。",
+    }
+    if not confirmed:
+        return {"ok": True, "dry_run": True, "plan": plan}
+    now = datetime.now(timezone.utc).isoformat()
+    version = int((current.get("publishedSnapshot") or {}).get("version") or 0) + 1
+    snapshot = json.loads(json.dumps({key: value for key, value in current.items() if key not in {"publishedSnapshot", "updatedAt", "status"}}))
+    snapshot["publishedAt"] = now
+    snapshot["version"] = version
+    if artifact == "slides":
+        lesson_package = (current.get("publishedSnapshot") or {}).get("lessonPackage")
+        if not isinstance(lesson_package, dict):
+            return _tool_error("PUBLISHED_SOURCE_REQUIRED", "课件发布需要完整的教学包快照，请先在课件页面发布一次。", field="artifact")
+        snapshot["lessonPackage"] = lesson_package
+    current["publishedSnapshot"] = snapshot
+    current["status"] = "published"
+    current["updatedAt"] = now
+    try:
+        saved = _save_teaching_project(project, base_updated_at=project.get("updatedAt"))
+    except TeachingProjectConflictError as exc:
+        return _tool_error("PROJECT_REVISION_CONFLICT", str(exc), field="project_id")
+    return {"ok": True, "dry_run": False, "project": saved, "published_version": version}
+
+
+@server.tool()
+def preflight_teaching_handout(project_id: str, use_published: bool = False) -> dict[str, Any]:
+    """检查讲义是否具备可发布/可导出的基本条件，并返回结构化风险。"""
+    project = _get_teaching_project(project_id)
+    if not project:
+        return _tool_error("TEACHING_PROJECT_NOT_FOUND", f"教学项目不存在：{project_id}。", field="project_id")
+    artifact = project.get("handout") if isinstance(project.get("handout"), dict) else {}
+    snapshot = artifact.get("publishedSnapshot") if use_published else None
+    source = snapshot if isinstance(snapshot, dict) else artifact
+    config = source.get("config") if isinstance(source.get("config"), dict) else {}
+    risks: list[dict[str, Any]] = []
+    if artifact.get("status") in {"stale", "changed_after_publish"} and not use_published:
+        risks.append({"severity": "warning", "code": "STALE_SOURCE", "message": "讲义内容源已变化，当前草稿需要重新分页并发布。"})
+    if not str(config.get("title") or "").strip():
+        risks.append({"severity": "warning", "code": "EMPTY_TITLE", "message": "讲义标题为空。"})
+    if config.get("headerFooter", {}).get("footerEnabled") and not str(config.get("headerFooter", {}).get("footerText") or "").strip():
+        risks.append({"severity": "warning", "code": "EMPTY_FOOTER", "message": "页脚已启用但页脚文字为空。"})
+    if config.get("styleConfig", {}).get("pageSize") not in {None, "A4", "A3"}:
+        risks.append({"severity": "danger", "code": "INVALID_PAGE_SIZE", "message": "页面尺寸不是 A4 或 A3。"})
+    return {
+        "ok": True,
+        "document_kind": "teaching_handout_preflight",
+        "project_id": project_id,
+        "use_published": use_published,
+        "source_revision": source.get("sourceRevision"),
+        "published_version": (artifact.get("publishedSnapshot") or {}).get("version"),
+        "risk_count": len(risks),
+        "risks": risks,
+        "ready": not any(item["severity"] == "danger" for item in risks),
+    }
+
+
+@server.tool()
+def sync_teaching_slides(
+    project_id: str,
+    strategy: Literal["preserve_manual", "replace"] = "preserve_manual",
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """同步课件与项目内容版本；默认只返回差异计划，避免误覆盖手工页面。"""
+    project = _get_teaching_project(project_id)
+    if not project:
+        return _tool_error("TEACHING_PROJECT_NOT_FOUND", f"教学项目不存在：{project_id}。", field="project_id")
+    artifact = project.get("slides") if isinstance(project.get("slides"), dict) else {}
+    current_deck = artifact.get("deck") if isinstance(artifact.get("deck"), dict) else {}
+    generated_deck = artifact.get("generatedDeck") if isinstance(artifact.get("generatedDeck"), dict) else None
+    current_pages = current_deck.get("pages") if isinstance(current_deck.get("pages"), list) else []
+    generated_pages = generated_deck.get("pages") if isinstance(generated_deck, dict) and isinstance(generated_deck.get("pages"), list) else []
+    page_ids = {str(item.get("id")) for item in current_pages if isinstance(item, dict)}
+    generated_ids = {str(item.get("id")) for item in generated_pages if isinstance(item, dict)}
+    plan = {
+        "project_id": project_id,
+        "strategy": strategy,
+        "source_revision": project.get("contentRevision"),
+        "current_revision": artifact.get("sourceRevision"),
+        "new_pages": sorted(generated_ids - page_ids),
+        "removed_pages": sorted(page_ids - generated_ids),
+        "manual_pages_preserved": strategy == "preserve_manual",
+        "requires_confirmation": True,
+    }
+    if not confirmed:
+        return {"ok": True, "dry_run": True, "plan": plan}
+    if strategy == "preserve_manual":
+        return {"ok": True, "dry_run": False, "applied": False, "plan": plan, "message": "保留手工页面策略需要在网页端执行差异合并，本次仅记录同步意图。"}
+    if not generated_deck:
+        return _tool_error("GENERATED_DECK_NOT_FOUND", "项目没有可用于替换的生成课件快照，请先在课件页同步内容。", field="project_id")
+    now = datetime.now(timezone.utc).isoformat()
+    artifact["deck"] = generated_deck
+    artifact["sourceRevision"] = project.get("contentRevision")
+    artifact["status"] = "ready"
+    artifact["updatedAt"] = now
+    try:
+        saved = _save_teaching_project(project, base_updated_at=project.get("updatedAt"))
+    except TeachingProjectConflictError as exc:
+        return _tool_error("PROJECT_REVISION_CONFLICT", str(exc), field="project_id")
+    return {"ok": True, "dry_run": False, "applied": True, "project": saved, "plan": plan}
+
+
+@server.tool()
+def start_classroom_session(project_id: str) -> dict[str, Any]:
+    """从已发布课件创建一个持久化课堂会话。"""
+    project = _get_teaching_project(project_id)
+    if not project:
+        return _tool_error("TEACHING_PROJECT_NOT_FOUND", f"教学项目不存在：{project_id}。", field="project_id")
+    published = project.get("slides", {}).get("publishedSnapshot") if isinstance(project.get("slides"), dict) else None
+    if not isinstance(published, dict):
+        return _tool_error("PUBLISHED_SLIDES_REQUIRED", "课堂只能从已发布课件启动。", field="project_id")
+    now = datetime.now(timezone.utc).isoformat()
+    session = {
+        "id": f"classroom-{project_id}-{uuid.uuid4().hex[:10]}",
+        "projectId": project_id,
+        "publishedVersion": published.get("version"),
+        "currentIndex": 0,
+        "displayMode": "stem_only",
+        "revealStep": 0,
+        "teacherNotes": "",
+        "annotations": {},
+        "status": "active",
+        "startedAt": now,
+        "updatedAt": now,
+    }
+    sessions = _read_classroom_sessions()
+    _write_classroom_sessions([*sessions, session])
+    return {"ok": True, "document_kind": "classroom_session", "session": session}
+
+
+@server.tool()
+def get_classroom_session(session_id: str) -> dict[str, Any]:
+    """读取课堂会话进度、教师备注和页面批注。"""
+    session = next((item for item in _read_classroom_sessions() if str(item.get("id")) == str(session_id)), None)
+    if not session:
+        return _tool_error("CLASSROOM_SESSION_NOT_FOUND", f"课堂会话不存在：{session_id}。", field="session_id")
+    return {"ok": True, "document_kind": "classroom_session", "session": session}
+
+
+@server.tool()
+def update_classroom_session(
+    session_id: str,
+    current_index: int | None = None,
+    display_mode: Literal["stem_only", "stem_answer", "full"] | None = None,
+    reveal_step: int | None = None,
+    teacher_notes: str | None = None,
+    annotations: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """更新课堂进度、授课显示模式、教师备注和页面批注。"""
+    sessions = _read_classroom_sessions()
+    index = next((idx for idx, item in enumerate(sessions) if str(item.get("id")) == str(session_id)), None)
+    if index is None:
+        return _tool_error("CLASSROOM_SESSION_NOT_FOUND", f"课堂会话不存在：{session_id}。", field="session_id")
+    session = dict(sessions[index])
+    if current_index is not None: session["currentIndex"] = max(0, int(current_index))
+    if display_mode is not None: session["displayMode"] = display_mode
+    if reveal_step is not None: session["revealStep"] = max(0, int(reveal_step))
+    if teacher_notes is not None: session["teacherNotes"] = teacher_notes
+    if annotations is not None: session["annotations"] = annotations
+    session["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    sessions[index] = session
+    _write_classroom_sessions(sessions)
+    return {"ok": True, "document_kind": "classroom_session", "session": session}
+
+
+@server.tool()
+def end_classroom_session(session_id: str) -> dict[str, Any]:
+    """结束课堂会话并保留复盘所需的最终状态。"""
+    sessions = _read_classroom_sessions()
+    index = next((idx for idx, item in enumerate(sessions) if str(item.get("id")) == str(session_id)), None)
+    if index is None:
+        return _tool_error("CLASSROOM_SESSION_NOT_FOUND", f"课堂会话不存在：{session_id}。", field="session_id")
+    session = dict(sessions[index])
+    session["status"] = "ended"
+    session["endedAt"] = datetime.now(timezone.utc).isoformat()
+    session["updatedAt"] = session["endedAt"]
+    sessions[index] = session
+    _write_classroom_sessions(sessions)
+    return {"ok": True, "document_kind": "classroom_session", "session": session}
+
+
+@server.tool()
 def list_filter_facets() -> dict[str, Any]:
     """列出题库可用筛选项，包括年份、模块、题型、难度、状态和知识点层级取值。"""
     return _dump_model(_search_service().get_facets())
@@ -358,7 +1101,7 @@ def list_filter_facets() -> dict[str, Any]:
 @server.tool()
 def search_questions(
     query: str | None = None,
-    search_mode: Literal["browse", "strict", "hybrid", "similar"] = "strict",
+    search_mode: Literal["browse", "strict", "hybrid", "similar", "comprehensive"] = "hybrid",
     question_type: str | None = None,
     difficulty: str | None = None,
     status: str | None = None,
@@ -377,7 +1120,13 @@ def search_questions(
     limit: int = 12,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """按关键词、题型、难度、知识点、年份、来源等条件检索正式题库。只读。不要用本工具定位送审/校对草稿；那类任务先用 list_review_tasks。"""
+    """按关键词、题型、难度、知识点、年份、来源等条件检索正式题库。
+
+    hybrid 默认合并 embedding 语义召回、BM25 关键词召回、方法结构召回和 rerank 精排；
+    comprehensive 模式还会扫描题干、解析、知识树、旧 module/topic 字段和历史标签，
+    并为“配速法”等解题方法返回 explicit/structural/related 分级证据。
+    只读；不要用本工具定位送审/校对草稿。
+    """
     if _looks_like_review_intent(query):
         return {
             "items": [],
@@ -415,6 +1164,27 @@ def search_questions(
     )
     if not clean.get("query") and clean.get("search_mode", "strict") != "browse":
         clean["search_mode"] = "browse"
+    if clean.get("search_mode") == "comprehensive":
+        if not clean.get("query"):
+            return _tool_error("INVALID_ARGUMENT", "comprehensive 模式需要 query。", field="query")
+        return _search_questions_comprehensive(
+            query=str(clean["query"]),
+            question_type=clean.get("question_type"),
+            difficulty=clean.get("difficulty"),
+            status=clean.get("status"),
+            module=clean.get("module"),
+            topic1_id=clean.get("topic1_id"),
+            topic2_id=clean.get("topic2_id"),
+            topic3_id=clean.get("topic3_id"),
+            topic2=clean.get("topic2"),
+            topic3=clean.get("topic3"),
+            limit=int(clean["limit"]),
+            offset=int(clean["offset"]),
+            year=clean.get("year"),
+            region=clean.get("region"),
+            exam_type=clean.get("exam_type"),
+            has_media=clean.get("has_media"),
+        )
     service = _search_service()
     result = _dump_model(service.search(QuestionSearchParams(**clean)))
     if result.get("items") or not clean.get("query") or clean.get("search_mode") == "browse":
@@ -439,6 +1209,748 @@ def search_questions(
 
 
 @server.tool()
+def download_question_images(
+    question_id: str,
+    destination_subdir: str | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """下载某道正式题目关联的图片到本地受管目录，供智能体读图、OCR 或制作素材。"""
+    clean_question_id = str(question_id or "").strip()
+    if not clean_question_id:
+        return _tool_error("INVALID_ARGUMENT", "question_id 不能为空。", field="question_id")
+    target_dir = _mcp_download_directory(destination_subdir)
+    if target_dir is None:
+        return _tool_error(
+            "INVALID_ARGUMENT",
+            "destination_subdir 只能是 data/mcp-downloads 下的相对目录，不能包含 .. 或绝对路径。",
+            field="destination_subdir",
+        )
+
+    records = _question_image_records(clean_question_id)
+    if not records:
+        return {
+            "ok": True,
+            "question_id": clean_question_id,
+            "download_dir": str(target_dir),
+            "downloaded_count": 0,
+            "images": [],
+            "message": "该题没有可下载的受管图片素材。",
+        }
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    images: list[dict[str, Any]] = []
+    for position, record in enumerate(records, start=1):
+        source = _resolve_managed_image_path(record["file_path"])
+        asset_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", record["asset_id"] or f"image-{position}").strip("._") or f"image-{position}"
+        filename = Path(record["filename"] or source.name if source else "image").name
+        target = target_dir / f"{position:02d}_{asset_id}_{filename}"
+        if source is None:
+            images.append({
+                "asset_id": record["asset_id"],
+                "status": "unavailable",
+                "message": "图片文件不存在、格式不受支持，或不在受管素材目录。",
+            })
+            continue
+        try:
+            reused_existing_file = target.exists() and not overwrite
+            if not reused_existing_file:
+                temporary = target.with_suffix(f"{target.suffix}.{uuid.uuid4().hex}.tmp")
+                shutil.copyfile(source, temporary)
+                os.replace(temporary, target)
+            images.append({
+                "asset_id": record["asset_id"],
+                "filename": source.name,
+                "local_path": str(target),
+                "source_path": str(source),
+                "status": "downloaded",
+                "reused_existing_file": reused_existing_file,
+            })
+        except OSError as exc:
+            images.append({
+                "asset_id": record["asset_id"],
+                "status": "failed",
+                "message": str(exc),
+            })
+
+    downloaded = [item for item in images if item["status"] == "downloaded"]
+    return {
+        "ok": bool(downloaded) or not images,
+        "question_id": clean_question_id,
+        "download_dir": str(target_dir),
+        "downloaded_count": len(downloaded),
+        "unavailable_count": len(images) - len(downloaded),
+        "images": images,
+        "next_step": "对 returned local_path 使用读图、OCR 或附件能力；若有 unavailable 项，先核对题目图片绑定。",
+    }
+
+
+_TOPIC_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        ("匀变速", "匀加速", "匀减速", "变速直线", "运动学"),
+        ("匀变速直线运动", "匀加速直线运动", "匀减速直线运动", "追及", "相遇", "上抛", "竖直上抛", "刹车", "制动", "自由落体", "速度时间图像", "v-t图像"),
+    ),
+    (
+        ("追及", "相遇"),
+        ("追及", "相遇", "匀变速直线运动", "速度时间图像"),
+    ),
+    (
+        ("上抛", "竖直上抛"),
+        ("上抛", "竖直上抛", "匀变速直线运动", "自由落体"),
+    ),
+    (
+        ("刹车", "制动"),
+        ("刹车", "制动", "匀减速直线运动", "匀变速直线运动"),
+    ),
+)
+
+
+def _comprehensive_query_terms(query: str) -> list[str]:
+    """Build a small, explainable topic expansion without hiding exact matches."""
+    clean_query = str(query or "").strip()
+    if not clean_query:
+        return []
+    method_intent = detect_method_intent(clean_query)
+    if method_intent is not None:
+        # Named solution methods are teaching terms, not ordinary topics.  Do not
+        # mix the generic topic/token expansion into this branch: a query such as
+        # "电磁感应 配速法" used to inherit high-frequency terms such as 法拉第 and
+        # 楞次定律, which drowned out the actual method signature.
+        return list(
+            dict.fromkeys(
+                term
+                for term in (clean_query, *method_intent.expanded_terms)
+                if len(term.strip()) >= 2
+            )
+        )
+    terms = [clean_query]
+    lowered = clean_query.casefold()
+    for triggers, expanded in _TOPIC_QUERY_EXPANSIONS:
+        if any(trigger.casefold() in lowered for trigger in triggers):
+            terms.extend(expanded)
+    terms.extend(_candidate_query_tokens(clean_query))
+    simplified = re.sub(r"(直线运动|运动|定理|规律|专题|知识点)$", "", clean_query).strip()
+    if len(simplified) >= 2:
+        terms.append(simplified)
+    return list(dict.fromkeys(term for term in terms if len(term.strip()) >= 2))
+
+
+def _truncate_search_text(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(limit - 1, 0)].rstrip()}…"
+
+
+def _search_questions_comprehensive(
+    *,
+    query: str,
+    question_type: str | None,
+    difficulty: str | None,
+    status: str | None,
+    module: str | None,
+    topic1_id: str | None,
+    topic2_id: str | None,
+    topic3_id: str | None,
+    topic2: str | None,
+    topic3: str | None,
+    limit: int,
+    offset: int,
+    year: int | None = None,
+    region: str | None = None,
+    exam_type: str | None = None,
+    has_media: bool | None = None,
+    summary_only: bool = False,
+    include_evidence: bool = True,
+    confirmed_only: bool = False,
+) -> dict[str, Any]:
+    """Search canonical, structured, and legacy metadata in one read-only pass."""
+    terms = _comprehensive_query_terms(query)
+    if not terms:
+        return _tool_error("INVALID_ARGUMENT", "query 不能为空。", field="query")
+
+    filters: list[str] = []
+    filter_params: list[Any] = []
+    for value, clause in (
+        (question_type, "q.question_type = ?"),
+        (difficulty, "q.difficulty = ?"),
+        (status, "q.status = ?"),
+        (module, "q.module = ?"),
+        (topic2, "q.topic2 = ?"),
+        (topic3, "q.topic3 = ?"),
+        (1 if has_media is True else (0 if has_media is False else None), "q.has_media = ?"),
+    ):
+        if value is not None:
+            filters.append(clause)
+            filter_params.append(value)
+    for value in (str(year) if year is not None else None, region, exam_type):
+        if value is not None:
+            filters.append(
+                "(COALESCE(q.source, '') LIKE '%' || ? || '%' "
+                "OR COALESCE(qti.source_text, '') LIKE '%' || ? || '%' "
+                "OR COALESCE(qs.source_label, '') LIKE '%' || ? || '%')"
+            )
+            filter_params.extend([value, value, value])
+    for value, column in ((topic1_id, "topic1_id"), (topic2_id, "topic2_id"), (topic3_id, "topic3_id")):
+        if value is not None:
+            filters.append(
+                f"EXISTS (SELECT 1 FROM question_knowledge_points qkp_filter "
+                f"JOIN knowledge_points kp_filter ON kp_filter.topic3_id = qkp_filter.topic3_id "
+                f"WHERE qkp_filter.question_id = q.question_id AND kp_filter.{column} = ?)"
+            )
+            filter_params.append(value)
+
+    # SQLite's GROUP_CONCAT lets one question retain all of its structured points
+    # while the query still sees legacy module/topic/tag values for unbound items.
+    where_sql = f" AND {' AND '.join(filters)}" if filters else ""
+    with _connect_formal_read_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT q.question_id, q.canonical_title, q.question_type, q.difficulty, q.status,
+                   q.module, q.topic2, q.topic3, q.source,
+                   qti.title_text, qti.stem_text, qti.answer_text, qti.analysis_text,
+                   qti.tags_json, qti.source_text,
+                   GROUP_CONCAT(DISTINCT qs.source_label) AS source_labels,
+                   GROUP_CONCAT(DISTINCT kp.topic1_name) AS knowledge_topic1_names,
+                   GROUP_CONCAT(DISTINCT kp.topic2_name) AS knowledge_topic2_names,
+                   GROUP_CONCAT(DISTINCT kp.topic3_name) AS knowledge_topic3_names
+            FROM questions q
+            LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
+            LEFT JOIN question_sources qs ON qs.question_id = q.question_id
+            LEFT JOIN question_knowledge_points qkp ON qkp.question_id = q.question_id
+            LEFT JOIN knowledge_points kp ON kp.topic3_id = qkp.topic3_id
+            WHERE 1 = 1 {where_sql}
+            GROUP BY q.question_id
+            """,
+            filter_params,
+        ).fetchall()
+
+    ranked: list[dict[str, Any]] = []
+    exact_query = str(query).casefold()
+    method_intent = detect_method_intent(query)
+    for row in rows:
+        candidate = dict(row)
+        searchable = {
+            "题干": " ".join(str(candidate.get(key) or "") for key in ("canonical_title", "title_text", "stem_text")),
+            "解析方法": " ".join(str(candidate.get(key) or "") for key in ("answer_text", "analysis_text")),
+            "结构化知识点": " ".join(str(candidate.get(key) or "") for key in ("knowledge_topic1_names", "knowledge_topic2_names", "knowledge_topic3_names")),
+            "旧模块/标签": " ".join(str(candidate.get(key) or "") for key in ("module", "topic2", "topic3", "tags_json")),
+            "来源": " ".join(str(candidate.get(key) or "") for key in ("source", "source_text", "source_labels")),
+        }
+        matched_terms: list[str] = []
+        matched_sources: list[str] = []
+        matched_locations: dict[str, list[str]] = {}
+        score = 0
+        for term in terms:
+            needle = term.casefold()
+            fields = [name for name, text in searchable.items() if needle in text.casefold()]
+            if not fields:
+                continue
+            matched_terms.append(term)
+            matched_sources.extend(fields)
+            matched_locations[term] = fields
+            field_score = max(
+                110 if term.casefold() == exact_query and name in {"题干", "解析方法", "结构化知识点"} else
+                85 if name == "解析方法" else
+                80 if name == "题干" else
+                70 if name == "结构化知识点" else
+                55 if name == "旧模块/标签" else 20
+                for name in fields
+            )
+            score += field_score
+        method_match = score_method_candidate(query, candidate, intent=method_intent)
+        if method_intent is not None and method_match is None:
+            continue
+        if method_match is not None:
+            score += round(float(method_match["score"]) * 500)
+            matched_sources.append("方法结构")
+        if not matched_terms and method_match is None:
+            continue
+        structured_names = str(candidate.get("knowledge_topic3_names") or "").strip()
+        metadata_quality = "structured" if structured_names else "legacy_only"
+        ranked.append(
+            {
+                **candidate,
+                "search_score": score,
+                "matched_terms": matched_terms,
+                "matched_sources": list(dict.fromkeys(matched_sources)),
+                "matched_locations": matched_locations,
+                "metadata_quality": metadata_quality,
+                "method_match": method_match,
+            }
+        )
+
+    ranked.sort(key=lambda item: (-int(item["search_score"]), str(item["question_id"])))
+    method_level_counts = {"explicit": 0, "structural": 0, "related": 0}
+    for item in ranked:
+        method_match = item.get("method_match")
+        if isinstance(method_match, dict) and method_match.get("level") in method_level_counts:
+            method_level_counts[str(method_match["level"])] += 1
+    all_candidate_count = len(ranked)
+    if method_intent is not None and confirmed_only:
+        ranked = [
+            item
+            for item in ranked
+            if (item.get("method_match") or {}).get("level") in {"explicit", "structural"}
+        ]
+    total = len(ranked)
+    page = ranked[offset : offset + limit]
+    page_ids = [str(item["question_id"]) for item in page]
+    summaries = {} if summary_only else _fetch_formal_question_summaries(page_ids)
+    items: list[dict[str, Any]] = []
+    for item in page:
+        question_id = str(item["question_id"])
+        method_match = dict(item.get("method_match") or {})
+        if not include_evidence:
+            method_match.pop("evidence", None)
+        elif summary_only and method_match.get("evidence"):
+            method_match["evidence"] = [
+                _truncate_search_text(value, 240)
+                for value in method_match["evidence"][:3]
+            ]
+        if summary_only:
+            payload = {
+                "question_id": question_id,
+                "title": _truncate_search_text(
+                    item.get("title_text") or item.get("canonical_title"), 80
+                ),
+                "source": _truncate_search_text(
+                    item.get("source_labels") or item.get("source_text") or item.get("source"),
+                    100,
+                ),
+                "question_type": item.get("question_type"),
+                "difficulty": item.get("difficulty"),
+                "method_level": method_match.get("level"),
+            }
+            if include_evidence:
+                payload["method_match"] = method_match
+                payload["matched_sources"] = item["matched_sources"]
+        else:
+            payload = dict(summaries.get(question_id) or {})
+            if not payload:
+                payload = {
+                    "question_id": question_id,
+                    "title": item.get("title_text") or item.get("canonical_title"),
+                    "question_type": item.get("question_type"),
+                    "difficulty": item.get("difficulty"),
+                    "source": item.get("source_labels") or item.get("source_text") or item.get("source"),
+                    "tags": _parse_tags(item.get("tags_json")),
+                }
+            payload["search_match"] = {
+                "score": item["search_score"],
+                "matched_terms": item["matched_terms"],
+                "matched_sources": item["matched_sources"],
+                "metadata_quality": item["metadata_quality"],
+            }
+            if include_evidence:
+                payload["search_match"]["matched_locations"] = item["matched_locations"]
+            if method_match:
+                payload["method_match"] = method_match
+        items.append(payload)
+
+    legacy_only_ids = [str(item["question_id"]) for item in ranked if item["metadata_quality"] == "legacy_only"]
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "search_mode": "comprehensive",
+        "response_mode": "compact" if summary_only else "full",
+        "evidence_included": include_evidence,
+        "query": query,
+        "expanded_terms": terms,
+        "method_search": (
+            {
+                "method_id": method_intent.method_id,
+                "method_name": method_intent.method_name,
+                "branches": list(method_intent.branches),
+                "classification": ["explicit", "structural", "related"],
+                "level_counts": method_level_counts,
+                "confirmed_count": method_level_counts["explicit"] + method_level_counts["structural"],
+                "related_candidate_count": method_level_counts["related"],
+                "all_candidate_count": all_candidate_count,
+                "confirmed_only": bool(confirmed_only),
+                "scanned_all_filtered_questions": True,
+                "instruction": (
+                    "先按匹配等级筛选；related 不得计入已确认总数。需要核验原文时，"
+                    "以 summary_only=false、include_evidence=true 再调用。"
+                    if summary_only and not include_evidence
+                    else "回答时按匹配等级分组；related 不得计入已确认总数。"
+                ),
+            }
+            if method_intent is not None
+            else None
+        ),
+        "unbound_legacy_question_ids": legacy_only_ids,
+        "next_action": (
+            "结果已合并结构化知识点和旧标签；若需要提升后续按知识树检索的完整性，"
+            "可用 organize_knowledge_tree 为 unbound_legacy_question_ids 补绑知识点。"
+            if legacy_only_ids else "结果均已有结构化知识点绑定。"
+        ),
+        "database_scope": "canonical_read_only",
+    }
+
+
+@server.tool()
+def search_topic_questions(
+    query: str,
+    question_type: str | None = None,
+    difficulty: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """一站式主题检索：自动合并知识树、旧模块、题型标签和题干命中，并标出待补绑题目。只读。"""
+    return _search_questions_comprehensive(
+        query=str(query or "").strip(),
+        question_type=question_type,
+        difficulty=difficulty,
+        status=None,
+        module=None,
+        topic1_id=None,
+        topic2_id=None,
+        topic3_id=None,
+        topic2=None,
+        topic3=None,
+        limit=min(max(int(limit or 20), 1), 50),
+        offset=max(int(offset or 0), 0),
+    )
+
+
+def _search_method_questions_indexed(
+    *,
+    query: str,
+    question_type: str | None,
+    difficulty: str | None,
+    limit: int,
+    offset: int,
+    year: int | None,
+    region: str | None,
+    summary_only: bool,
+    include_evidence: bool,
+    confirmed_only: bool,
+    index_refresh: dict[str, int],
+) -> dict[str, Any]:
+    intent = detect_method_intent(query)
+    if intent is None:
+        return _tool_error("UNSUPPORTED_METHOD_QUERY", "未识别解题方法。", field="query")
+
+    filters = ["mf.method_id = ?"]
+    params: list[Any] = [intent.method_id]
+    branch_placeholders = ",".join("?" for _ in intent.branches)
+    filters.append(f"mf.branch IN ({branch_placeholders})")
+    params.extend(intent.branches)
+    if question_type is not None:
+        filters.append("q.question_type = ?")
+        params.append(question_type)
+    if difficulty is not None:
+        filters.append("q.difficulty = ?")
+        params.append(difficulty)
+    for value in (str(year) if year is not None else None, region):
+        if value is None:
+            continue
+        filters.append(
+            "(COALESCE(q.source, '') LIKE '%' || ? || '%' "
+            "OR COALESCE(qti.source_text, '') LIKE '%' || ? || '%' "
+            "OR COALESCE(qs.source_label, '') LIKE '%' || ? || '%')"
+        )
+        params.extend([value, value, value])
+
+    with _connect_formal_read_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT mf.question_id, mf.method_id, mf.branch, mf.level, mf.score,
+                   mf.match_basis, mf.evidence_json,
+                   q.canonical_title, q.question_type, q.difficulty, q.status, q.source,
+                   qti.title_text, qti.stem_text, qti.answer_text, qti.analysis_text,
+                   qti.tags_json, qti.source_text,
+                   GROUP_CONCAT(DISTINCT qs.source_label) AS source_labels
+            FROM question_method_features mf
+            JOIN questions q ON q.question_id = mf.question_id
+            LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
+            LEFT JOIN question_sources qs ON qs.question_id = q.question_id
+            WHERE {' AND '.join(filters)}
+            GROUP BY mf.question_id, mf.branch
+            """,
+            params,
+        ).fetchall()
+
+    level_rank = {"explicit": 3, "structural": 2, "related": 1}
+    best_by_question: dict[str, dict[str, Any]] = {}
+    for raw in rows:
+        item = dict(raw)
+        question_id = str(item["question_id"])
+        current = best_by_question.get(question_id)
+        candidate_key = (
+            level_rank.get(str(item.get("level")), 0),
+            float(item.get("score") or 0),
+        )
+        current_key = (
+            level_rank.get(str(current.get("level")), 0),
+            float(current.get("score") or 0),
+        ) if current else (-1, -1.0)
+        if current is None or candidate_key > current_key:
+            best_by_question[question_id] = item
+
+    ranked = sorted(
+        best_by_question.values(),
+        key=lambda item: (
+            -level_rank.get(str(item.get("level")), 0),
+            -float(item.get("score") or 0),
+            str(item["question_id"]),
+        ),
+    )
+    level_counts = {"explicit": 0, "structural": 0, "related": 0}
+    for item in ranked:
+        level = str(item.get("level") or "")
+        if level in level_counts:
+            level_counts[level] += 1
+    all_candidate_count = len(ranked)
+    if confirmed_only:
+        ranked = [item for item in ranked if item.get("level") in {"explicit", "structural"}]
+    total = len(ranked)
+    page = ranked[offset : offset + limit]
+    summaries = (
+        {}
+        if summary_only
+        else _fetch_formal_question_summaries([str(item["question_id"]) for item in page])
+    )
+    terms = _comprehensive_query_terms(query)
+    items: list[dict[str, Any]] = []
+    for item in page:
+        question_id = str(item["question_id"])
+        try:
+            evidence = json.loads(str(item.get("evidence_json") or "[]"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            evidence = []
+        method_match = {
+            "method_id": str(item["method_id"]),
+            "method_name": intent.method_name,
+            "branch": str(item["branch"]),
+            "level": str(item["level"]),
+            "match_basis": str(item["match_basis"]),
+            "score": round(float(item["score"]), 4),
+        }
+        if include_evidence:
+            method_match["evidence"] = [
+                _truncate_search_text(value, 240) if summary_only else str(value)
+                for value in list(evidence)[:3]
+            ]
+
+        source = item.get("source_labels") or item.get("source_text") or item.get("source")
+        if summary_only:
+            payload: dict[str, Any] = {
+                "question_id": question_id,
+                "title": _truncate_search_text(
+                    item.get("title_text") or item.get("canonical_title"), 80
+                ),
+                "source": _truncate_search_text(source, 100),
+                "question_type": item.get("question_type"),
+                "difficulty": item.get("difficulty"),
+                "method_level": item.get("level"),
+            }
+            if include_evidence:
+                payload["method_match"] = method_match
+        else:
+            payload = dict(summaries.get(question_id) or {})
+            if not payload:
+                payload = {
+                    "question_id": question_id,
+                    "title": item.get("title_text") or item.get("canonical_title"),
+                    "question_type": item.get("question_type"),
+                    "difficulty": item.get("difficulty"),
+                    "source": source,
+                    "tags": _parse_tags(item.get("tags_json")),
+                }
+            searchable = {
+                "题干": " ".join(
+                    str(item.get(key) or "")
+                    for key in ("canonical_title", "title_text", "stem_text")
+                ),
+                "解析方法": " ".join(
+                    str(item.get(key) or "") for key in ("answer_text", "analysis_text")
+                ),
+                "旧模块/标签": str(item.get("tags_json") or ""),
+                "来源": str(source or ""),
+            }
+            matched_locations = {
+                term: [
+                    field_name
+                    for field_name, text_value in searchable.items()
+                    if term.casefold() in text_value.casefold()
+                ]
+                for term in terms
+                if any(term.casefold() in value.casefold() for value in searchable.values())
+            }
+            payload["search_match"] = {
+                "score": round(float(item["score"]) * 500),
+                "matched_terms": list(matched_locations),
+                "matched_sources": list(
+                    dict.fromkeys(
+                        source_name
+                        for names in matched_locations.values()
+                        for source_name in names
+                    )
+                ),
+            }
+            if include_evidence:
+                payload["search_match"]["matched_locations"] = matched_locations
+            payload["method_match"] = method_match
+        items.append(payload)
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "search_mode": "method_index",
+        "response_mode": "compact" if summary_only else "full",
+        "evidence_included": include_evidence,
+        "query": query,
+        "method_search": {
+            "method_id": intent.method_id,
+            "method_name": intent.method_name,
+            "branches": list(intent.branches),
+            "classification": ["explicit", "structural", "related"],
+            "level_counts": level_counts,
+            "confirmed_count": level_counts["explicit"] + level_counts["structural"],
+            "related_candidate_count": level_counts["related"],
+            "all_candidate_count": all_candidate_count,
+            "confirmed_only": confirmed_only,
+            "instruction": (
+                "先按匹配等级筛选；related 不得计入已确认总数。需要核验原文时，"
+                "以 summary_only=false、include_evidence=true 再调用。"
+            ),
+        },
+        "method_index": {
+            "index_version": METHOD_INDEX_VERSION,
+            "refreshed_question_count": int(index_refresh.get("question_count", 0)),
+            "was_current": int(index_refresh.get("missing_count", 0)) == 0,
+        },
+        "database_scope": "canonical_read_only_with_derived_index",
+    }
+
+
+@server.tool()
+def search_method_questions(
+    query: str,
+    year: int | None = None,
+    region: str | None = None,
+    question_type: str | None = None,
+    difficulty: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    summary_only: bool = True,
+    include_evidence: bool = False,
+    confirmed_only: bool = True,
+) -> dict[str, Any]:
+    """按解题方法或教学俗称检索正式题库；默认返回轻量摘要。
+
+    不要求题干写出方法名，会同时扫描题干、解析、公式和物理场景结构。
+    结果分为 explicit（明确写出）、structural（结构上使用）和 related（仅相关候选）；
+    related 不计入已确认题目数，默认 confirmed_only=true 不返回 related；需要扩展
+    候选时再关闭。summary_only=true 时只返回筛选所需字段；需要完整
+    题干与逐词命中位置时设为 false，需要方法证据时再开启 include_evidence。
+    提供年份、地区时请使用结构化参数。
+    """
+    clean_query = str(query or "").strip()
+    if not clean_query:
+        return _tool_error("INVALID_ARGUMENT", "query 不能为空。", field="query")
+    if detect_method_intent(clean_query) is None:
+        return _tool_error(
+            "UNSUPPORTED_METHOD_QUERY",
+            "当前尚未建立该解题方法的结构规则；可改用 search_questions(comprehensive) 做开放检索。",
+            field="query",
+            supported_methods=["配速法", "重力配速法", "电场配速法", "漂移速度法"],
+        )
+    index_refresh = ensure_method_feature_index_current(db_path=_formal_db_path())
+    return _search_method_questions_indexed(
+        query=clean_query,
+        question_type=question_type,
+        difficulty=difficulty,
+        limit=min(max(int(limit or 20), 1), 50),
+        offset=max(int(offset or 0), 0),
+        year=year,
+        region=region,
+        summary_only=bool(summary_only),
+        include_evidence=bool(include_evidence),
+        confirmed_only=bool(confirmed_only),
+        index_refresh=index_refresh,
+    )
+
+
+@server.tool()
+def record_method_retrieval_feedback(
+    question_id: str,
+    method_query: str,
+    verdict: Literal["correct", "incorrect", "missed"],
+    branch: Literal["gravity", "electric"] | None = None,
+    reason: str | None = None,
+    maintain_metadata: bool = True,
+    operator: str = "teacher",
+) -> dict[str, Any]:
+    """记录教师对方法检索的确认、误命中或漏检反馈，并刷新标签、知识点、embedding 与方法索引。
+
+    correct/missed 会成为该分支的高置信度方法证据；incorrect 会永久压制该题在该
+    分支中的方法命中。泛称“配速法”同时包含两个分支，必须显式提供 branch。
+    """
+    intent = detect_method_intent(str(method_query or "").strip())
+    if intent is None:
+        return _tool_error("UNSUPPORTED_METHOD_QUERY", "尚未建立该方法规则。", field="method_query")
+    resolved_branch = branch
+    if resolved_branch is None and len(intent.branches) == 1:
+        resolved_branch = intent.branches[0]
+    if resolved_branch not in intent.branches:
+        return _tool_error(
+            "INVALID_ARGUMENT",
+            "请提供与 method_query 一致的 gravity 或 electric 分支。",
+            field="branch",
+        )
+    try:
+        return _record_method_retrieval_feedback(
+            question_id=str(question_id or "").strip(),
+            method_id=intent.method_id,
+            branch=resolved_branch,
+            verdict=verdict,
+            reason=reason,
+            operator=operator,
+            maintain_metadata=bool(maintain_metadata),
+            db_path=_formal_db_path(),
+        )
+    except (FileNotFoundError, sqlite3.Error, ValueError) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
+
+
+@server.tool()
+def list_method_retrieval_feedback(
+    question_id: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """列出方法检索教师反馈及其审计信息。只读。"""
+    try:
+        items = _list_method_retrieval_feedback(
+            question_id=str(question_id or "").strip() or None,
+            limit=min(max(int(limit or 100), 1), 500),
+            db_path=_formal_db_path(),
+        )
+    except (FileNotFoundError, sqlite3.Error, ValueError) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
+    return {"items": items, "total": len(items), "database_scope": "canonical_feedback_audit"}
+
+
+@server.tool()
+def method_retrieval_learning_report(limit: int = 50) -> dict[str, Any]:
+    """汇总方法检索的长期学习状态：教师反馈、回归约束和待维护元数据。只读。"""
+    try:
+        return _build_method_retrieval_learning_report(
+            limit=min(max(int(limit or 50), 1), 200),
+            db_path=_formal_db_path(),
+        )
+    except (FileNotFoundError, sqlite3.Error, ValueError) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
+
+
+@server.tool()
 def get_questions_by_ids(question_ids: list[str]) -> dict[str, Any]:
     """按题号批量读取正式题库题目详情。只读。"""
     normalized_ids = list(dict.fromkeys(str(item).strip() for item in question_ids if str(item).strip()))
@@ -453,6 +1965,25 @@ def get_questions_by_ids(question_ids: list[str]) -> dict[str, Any]:
             max_count=50,
         )
     return _dump_model(_search_service().get_by_ids(BatchQuestionFetchRequest(question_ids=normalized_ids)))
+
+
+@server.tool()
+def export_questions_to_typst(
+    question_ids: list[str],
+    title: str | None = None,
+    include_answers: bool = False,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """将正式题库导出为供任意 Typst 模板 import 的题目数据；默认只预览且不修改图库。"""
+    try:
+        return _typst_export_service().export(
+            question_ids,
+            title=title,
+            include_answers=include_answers,
+            dry_run=dry_run,
+        )
+    except TypstExportError as exc:
+        return _tool_error("INVALID_ARGUMENT", str(exc), field="question_ids")
 
 
 def _get_compose_draft_or_error(draft_id: str | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -474,7 +2005,9 @@ def _get_compose_draft_or_error(draft_id: str | None) -> tuple[dict[str, Any] | 
             "尚未创建组卷工作台草稿。请先调用 create_composition_workbench。",
             next_tools=["create_composition_workbench", "list_composition_workbenches"],
         )
-    return _dump_model(draft), None
+    result = _dump_model(draft)
+    result["document_kind"] = "workbench_draft"
+    return result, None
 
 
 def _compose_draft_preview(draft: dict[str, Any], items: list[dict[str, Any]], *, action: str) -> dict[str, Any]:
@@ -493,6 +2026,49 @@ def _compose_draft_preview(draft: dict[str, Any], items: list[dict[str, Any]], *
         ],
         "message": "这是组卷工作台草稿的预览；不会修改正式题库或标准知识库。确认后以 dry_run=false 执行。",
     }
+
+
+def _compose_lock_error(draft: dict[str, Any]) -> dict[str, Any] | None:
+    lock = (draft.get("metadata") or {}).get("composition_lock")
+    if not isinstance(lock, dict) or not lock.get("locked"):
+        return None
+    return _tool_error(
+        "DRAFT_LOCKED",
+        "组卷工作台已锁定，请先调用 lock_composition_workbench(locked=false) 再修改。",
+        draft_id=draft.get("id"),
+        lock=lock,
+    )
+
+
+def _knowledge_content_fields(raw: dict[str, Any]) -> tuple[str, str, list[str]]:
+    content = str(raw.get("content") or "").strip()
+    summary = str(raw.get("summary") or "").strip()
+    if not summary:
+        summary = content
+    raw_points = raw.get("points") or []
+    points = [str(point).strip() for point in raw_points if str(point).strip()]
+    if not points and content:
+        candidates = []
+        for line in content.splitlines():
+            clean = re.sub(r"^\s*(?:#{1,6}\s*|[-*+]\s+|\d+[.)]\s+)", "", line).strip()
+            if clean:
+                candidates.append(clean)
+        points = candidates[:12] or [content]
+    return content, summary, points
+
+
+def _snapshot_compose_draft(draft: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(draft.get("metadata") or {})
+    snapshots = list(metadata.get("snapshots") or [])
+    snapshots.append(
+        {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "item_count": len(draft.get("items") or []),
+            "items": draft.get("items") or [],
+        }
+    )
+    metadata["snapshots"] = snapshots[-10:]
+    return {**draft, "metadata": metadata}
 
 
 def _save_compose_draft(draft: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -582,6 +2158,9 @@ def add_questions_to_composition_workbench(
     draft, error = _get_compose_draft_or_error(draft_id)
     if error:
         return error
+    lock_error = _compose_lock_error(draft)
+    if lock_error:
+        return lock_error
     requested_ids = list(dict.fromkeys(str(item).strip() for item in question_ids if str(item).strip()))[:50]
     if not requested_ids:
         return {"ok": False, "error": "至少提供一个正式题库 question_id。"}
@@ -624,6 +2203,9 @@ def add_knowledge_to_composition_workbench(
     draft, error = _get_compose_draft_or_error(draft_id)
     if error:
         return error
+    lock_error = _compose_lock_error(draft)
+    if lock_error:
+        return lock_error
     requested_ids = list(dict.fromkeys(str(item).strip() for item in topic3_ids if str(item).strip()))[:50]
     if not requested_ids:
         return {"ok": False, "error": "至少提供一个标准知识点 topic3_id。"}
@@ -682,6 +2264,9 @@ def insert_teaching_block_to_composition_workbench(
     draft, error = _get_compose_draft_or_error(draft_id)
     if error:
         return error
+    lock_error = _compose_lock_error(draft)
+    if lock_error:
+        return lock_error
     clean_title = str(title or "").strip()
     if not clean_title:
         return {"ok": False, "error": "教学对象标题不能为空。"}
@@ -703,21 +2288,31 @@ def insert_teaching_block_to_composition_workbench(
 
 @server.tool()
 def reorder_composition_workbench(
-    ordered_item_ids: list[str],
+    ordered_item_ids: list[str] | None = None,
     draft_id: str | None = None,
     dry_run: bool = False,
+    item_id: str | None = None,
+    after_item_id: str | None = None,
 ) -> dict[str, Any]:
-    """按完整 item id 列表调整组卷工作台内所有题目、知识卡和教学对象的顺序。仅写草稿。"""
+    """按完整列表或单项定位调整组卷工作台顺序。仅写草稿。"""
     draft, error = _get_compose_draft_or_error(draft_id)
     if error:
         return error
+    lock_error = _compose_lock_error(draft)
+    if lock_error:
+        return lock_error
     items = list(draft.get("items") or [])
     current_ids = [str(item.get("id") or "") for item in items]
-    requested_ids = [str(item).strip() for item in ordered_item_ids if str(item).strip()]
+    if item_id:
+        requested_ids = _move_composition_ids(current_ids, item_id, after_item_id)
+        if requested_ids is None:
+            return {"ok": False, "error": "item_id 或 after_item_id 不存在于当前草稿。", "current_item_ids": current_ids}
+    else:
+        requested_ids = [str(item).strip() for item in (ordered_item_ids or []) if str(item).strip()]
     if len(requested_ids) != len(items) or set(requested_ids) != set(current_ids):
         return {
             "ok": False,
-            "error": "ordered_item_ids 必须恰好包含当前草稿中的每一个 item id 各一次。请先 get_composition_workbench 获取完整顺序。",
+            "error": "ordered_item_ids 必须包含当前草稿中的每一个 item id 各一次；单项调整请使用 item_id + after_item_id。",
             "current_item_ids": current_ids,
         }
     item_map = {str(item["id"]): item for item in items}
@@ -728,11 +2323,145 @@ def reorder_composition_workbench(
     return {"ok": True, "dry_run": False, "action": "reorder_items", "draft": saved}
 
 
+def _move_composition_ids(current_ids: list[str], item_id: str, after_item_id: str | None) -> list[str] | None:
+    clean_item_id = str(item_id or "").strip()
+    clean_after_id = str(after_item_id or "").strip()
+    if clean_item_id not in current_ids or (clean_after_id and clean_after_id not in current_ids):
+        return None
+    if clean_after_id == clean_item_id:
+        return current_ids[:]
+    result = [value for value in current_ids if value != clean_item_id]
+    if not clean_after_id:
+        result.insert(0, clean_item_id)
+        return result
+    result.insert(result.index(clean_after_id) + 1, clean_item_id)
+    return result
+
+
+@server.tool()
+def move_composition_item(
+    item_id: str,
+    after_item_id: str | None = None,
+    draft_id: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """移动一个工作台对象；after_item_id 为空时移动到最前。"""
+    return reorder_composition_workbench(
+        draft_id=draft_id,
+        dry_run=dry_run,
+        item_id=item_id,
+        after_item_id=after_item_id,
+    )
+
+
+@server.tool()
+def remove_items_from_composition_workbench(
+    item_ids: list[str],
+    draft_id: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """删除指定工作台对象，不影响正式题库。"""
+    draft, error = _get_compose_draft_or_error(draft_id)
+    if error:
+        return error
+    lock_error = _compose_lock_error(draft)
+    if lock_error:
+        return lock_error
+    requested = list(dict.fromkeys(str(item_id).strip() for item_id in item_ids if str(item_id).strip()))
+    current = list(draft.get("items") or [])
+    current_ids = {str(item.get("id") or "") for item in current}
+    missing = [item_id for item_id in requested if item_id not in current_ids]
+    removed = [item_id for item_id in requested if item_id in current_ids]
+    next_items = [item for item in current if str(item.get("id") or "") not in set(removed)]
+    if dry_run:
+        preview = _compose_draft_preview(draft, next_items, action="remove_items")
+        preview.update({"removed_item_ids": removed, "missing_item_ids": missing})
+        return preview
+    saved = _save_compose_draft(draft, next_items)
+    return {"ok": True, "dry_run": False, "action": "remove_items", "draft": saved, "removed_item_ids": removed, "missing_item_ids": missing}
+
+
+@server.tool()
+def update_composition_item(
+    item_id: str,
+    payload: dict[str, Any],
+    draft_id: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """就地编辑工作台对象的标题和 payload。"""
+    draft, error = _get_compose_draft_or_error(draft_id)
+    if error:
+        return error
+    lock_error = _compose_lock_error(draft)
+    if lock_error:
+        return lock_error
+    if not isinstance(payload, dict):
+        return _tool_error("INVALID_ARGUMENT", "payload 必须是对象。", field="payload")
+    items = list(draft.get("items") or [])
+    target = next((item for item in items if str(item.get("id") or "") == str(item_id).strip()), None)
+    if target is None:
+        return _tool_error("ITEM_NOT_FOUND", "工作台对象不存在。", field="item_id", item_id=item_id)
+    if "type" in payload and str(payload["type"]) != str(target.get("type")):
+        return _tool_error("INVALID_ARGUMENT", "不能通过 update_composition_item 修改对象类型。", field="payload.type")
+    updated = dict(target)
+    target_payload = dict(target.get("payload") or {})
+    clean_payload = {key: value for key, value in payload.items() if key != "type"}
+    if "title" in clean_payload:
+        updated["title"] = str(clean_payload.pop("title") or "").strip() or target.get("title")
+    if target.get("type") == "knowledge":
+        knowledge_payload = {**target_payload, **clean_payload}
+        if "content" in clean_payload and "points" not in clean_payload:
+            knowledge_payload["points"] = []
+        content, summary, points = _knowledge_content_fields(knowledge_payload)
+        clean_payload.update({"content": content, "summary": summary, "points": points})
+        if "related_question_ids" in clean_payload:
+            clean_payload["relatedQuestionIds"] = clean_payload.pop("related_question_ids")
+    target_payload.update(clean_payload)
+    updated["payload"] = target_payload
+    next_items = [updated if item is target else item for item in items]
+    if dry_run:
+        return _compose_draft_preview(draft, next_items, action="update_item")
+    saved = _save_compose_draft(draft, next_items)
+    return {"ok": True, "dry_run": False, "action": "update_item", "draft": saved, "updated_item_id": item_id}
+
+
+@server.tool()
+def lock_composition_workbench(
+    locked: bool = True,
+    draft_id: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """锁定或解锁工作台，防止自动保存或并发操作替换内容。"""
+    draft, error = _get_compose_draft_or_error(draft_id)
+    if error:
+        return error
+    metadata = dict(draft.get("metadata") or {})
+    metadata["composition_lock"] = {
+        "locked": bool(locked),
+        "reason": str(reason or "").strip() or None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    request = PaperDraftUpsertRequest(
+        id=draft["id"],
+        base_updated_at=draft.get("updated_at"),
+        title=draft["title"],
+        subtitle=draft.get("subtitle"),
+        source=draft.get("source") or "ai",
+        status=draft.get("status") or "draft",
+        items=[PaperDraftItem(**{**item, "position": index}) for index, item in enumerate(draft.get("items") or [])],
+        metadata=metadata,
+        quality_report=draft.get("quality_report") or {},
+    )
+    saved = _dump_model(_paper_draft_service().save(request))
+    return {"ok": True, "action": "lock_composition_workbench", "locked": bool(locked), "draft": saved}
+
+
 @server.tool()
 def apply_composition_workbench_plan(
     operations: list[dict[str, Any]],
     draft_id: str | None = None,
     ordered_refs: list[str] | None = None,
+    mode: Literal["full", "patch"] = "patch",
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """一次完成组卷计划：批量加入题目、完整知识讲解卡或教学文字并排序。
@@ -745,6 +2474,11 @@ def apply_composition_workbench_plan(
     draft, error = _get_compose_draft_or_error(draft_id)
     if error:
         return error
+    lock_error = _compose_lock_error(draft)
+    if lock_error:
+        return lock_error
+    if mode not in {"full", "patch"}:
+        return _tool_error("INVALID_ARGUMENT", "mode 仅支持 full 或 patch。", field="mode")
     if not operations or len(operations) > 100:
         return {"ok": False, "error": "operations 必须包含 1 至 100 个操作。"}
 
@@ -776,13 +2510,14 @@ def apply_composition_workbench_plan(
             raw_points = raw.get("points") or []
             if not isinstance(raw_points, list):
                 return {"ok": False, "error": f"{ref} 的 points 必须是字符串数组。"}
+            if "content" in raw and raw.get("content") is not None and not isinstance(raw.get("content"), str):
+                return {"ok": False, "error": f"{ref} 的 content 必须是 Markdown 字符串。"}
             related_question_ids = raw.get("related_question_ids") or []
             if not isinstance(related_question_ids, list):
                 return {"ok": False, "error": f"{ref} 的 related_question_ids 必须是题号数组。"}
             if topic3_id:
                 topic_requests.append(topic3_id)
-            summary = str(raw.get("summary") or raw.get("content") or "").strip()
-            points = [str(point).strip() for point in raw_points if str(point).strip()]
+            content, summary, points = _knowledge_content_fields(raw)
             if not summary and not points:
                 return {
                     "ok": False,
@@ -793,6 +2528,7 @@ def apply_composition_workbench_plan(
                 "kind": kind,
                 "topic3_id": topic3_id,
                 "title": title,
+                "content": content,
                 "summary": summary,
                 "points": points,
                 "related_question_ids": [
@@ -856,6 +2592,7 @@ def apply_composition_workbench_plan(
                     "id": knowledge_id,
                     "topic3_id": topic3_id or None,
                     "title": title,
+                    "content": operation["content"],
                     "summary": operation["summary"],
                     "points": operation["points"],
                     "relatedQuestionIds": operation["related_question_ids"],
@@ -876,15 +2613,20 @@ def apply_composition_workbench_plan(
         for ref in (ordered_refs or default_order)
         if str(ref).strip()
     ]
-    if len(requested_order) != len(all_refs) or set(requested_order) != set(all_refs):
-        return {"ok": False, "error": "ordered_refs 必须恰好包含每个保留的既有对象 item:<id> 与每个新增对象 ref 各一次。", "available_refs": list(all_refs), "skipped": skipped}
+    if len(requested_order) != len(set(requested_order)) or any(ref not in all_refs for ref in requested_order):
+        return {"ok": False, "error": "ordered_refs 包含重复或不存在的引用。", "available_refs": list(all_refs), "skipped": skipped}
+    if mode == "full" and (len(requested_order) != len(all_refs) or set(requested_order) != set(all_refs)):
+        return {"ok": False, "error": "mode=full 时 ordered_refs 必须包含每个保留对象和新增对象各一次。", "available_refs": list(all_refs), "skipped": skipped}
+    if mode == "patch":
+        requested_order.extend(ref for ref in default_order if ref not in requested_order)
+        requested_order.extend(ref for ref in all_refs if ref not in requested_order)
     next_items = [all_refs[ref] for ref in requested_order]
     if dry_run:
         preview = _compose_draft_preview(draft, next_items, action="apply_composition_plan")
         preview.update({"available_refs": {ref: item["id"] for ref, item in all_refs.items()}, "skipped": skipped})
         return preview
     try:
-        saved = _save_compose_draft(draft, next_items)
+        saved = _save_compose_draft(_snapshot_compose_draft(draft), next_items)
     except PaperDraftConflictError:
         return _tool_error(
             "DRAFT_CONFLICT",
@@ -896,14 +2638,381 @@ def apply_composition_workbench_plan(
     return {"ok": True, "dry_run": False, "action": "apply_composition_plan", "draft": saved, "skipped": skipped}
 
 
+def _composition_preview_markdown(draft: dict[str, Any]) -> str:
+    lines = [f"# {draft.get('title') or 'Untitled lesson'}"]
+    if draft.get("subtitle"):
+        lines.extend(["", str(draft["subtitle"])])
+    for index, item in enumerate(draft.get("items") or [], start=1):
+        item_type = str(item.get("type") or "item")
+        title = str(item.get("title") or (item.get("payload") or {}).get("title") or item_type)
+        lines.extend(["", f"## {index}. {title}"])
+        payload = item.get("payload") or {}
+        if item_type == "question":
+            lines.append(str(payload.get("stem") or payload.get("title") or item.get("question_id") or ""))
+        elif item_type == "knowledge":
+            lines.append(str(payload.get("content") or payload.get("summary") or ""))
+            lines.extend(f"- {point}" for point in payload.get("points") or [])
+        elif item_type == "text":
+            lines.append(str(payload.get("content") or ""))
+        else:
+            lines.append("---")
+    return "\n".join(lines).strip() + "\n"
+
+
+@server.tool()
+def preview_composition_workbench(
+    draft_id: str | None = None,
+    format: Literal["markdown", "html"] = "markdown",
+) -> dict[str, Any]:
+    """返回工作台的可读 Markdown 或 HTML 预览，不修改草稿。"""
+    draft, error = _get_compose_draft_or_error(draft_id)
+    if error:
+        return error
+    if format not in {"markdown", "html"}:
+        return _tool_error("INVALID_ARGUMENT", "format 仅支持 markdown 或 html。", field="format")
+    markdown = _composition_preview_markdown(draft)
+    content = markdown
+    if format == "html":
+        blocks = "<br>\n".join(html.escape(line) for line in markdown.splitlines())
+        content = f'<article class="composition-workbench-preview">{blocks}</article>'
+    return {"ok": True, "draft_id": draft["id"], "format": format, "content": content}
+
+
+def _composition_draft_to_lesson_package(draft: dict[str, Any]) -> dict[str, Any]:
+    question_ids = [
+        str(item.get("question_id") or "").strip()
+        for item in draft.get("items") or []
+        if item.get("type") == "question" and str(item.get("question_id") or "").strip()
+    ]
+    questions = _dump_model(_search_service().get_by_ids(BatchQuestionFetchRequest(question_ids=question_ids))) if question_ids else []
+    knowledge_cards: dict[str, dict[str, Any]] = {}
+    text_blocks: dict[str, dict[str, Any]] = {}
+    nodes: list[dict[str, Any]] = []
+    for item in draft.get("items") or []:
+        item_type = str(item.get("type") or "")
+        payload = dict(item.get("payload") or {})
+        item_id = str(item.get("id") or "")
+        if item_type == "question":
+            nodes.append({"type": "question", "id": item_id, "questionId": item.get("question_id")})
+        elif item_type == "knowledge":
+            knowledge_id = str(payload.get("topic3_id") or payload.get("id") or item_id)
+            knowledge_cards[knowledge_id] = {"id": knowledge_id, **payload, "title": payload.get("title") or item.get("title") or "Knowledge"}
+            nodes.append({"type": "knowledge", "id": item_id, "knowledgeId": knowledge_id})
+        elif item_type == "text":
+            text_id = str(payload.get("id") or item_id)
+            text_blocks[text_id] = {"id": text_id, **payload, "title": payload.get("title") or item.get("title") or "Text"}
+            nodes.append({"type": "text", "id": item_id, "textBlockId": text_id})
+        else:
+            nodes.append({"type": "page_break", "id": item_id, "title": item.get("title")})
+    return {
+        "id": draft["id"],
+        "document_kind": "workbench_draft",
+        "title": draft.get("title") or "Untitled lesson",
+        "subtitle": draft.get("subtitle") or "",
+        "source": draft.get("source") or "compose",
+        "questions": questions,
+        "knowledgeCards": list(knowledge_cards.values()),
+        "textBlocks": list(text_blocks.values()),
+        "nodes": nodes,
+        "styleConfig": (draft.get("metadata") or {}).get("styleConfig") or {},
+        "headerFooter": (draft.get("metadata") or {}).get("headerFooter") or {},
+        "formatSpec": (draft.get("metadata") or {}).get("formatSpec") or {},
+    }
+
+
+@server.tool()
+def export_composition_workbench(
+    draft_id: str | None = None,
+    format: Literal["word", "pptx"] = "word",
+    include_answers: bool | None = None,
+    include_analysis: bool | None = None,
+    file_name: str | None = None,
+    template_id: str | None = None,
+    format_spec: dict[str, Any] | None = None,
+    answer_position: Literal["after_question", "end"] | None = None,
+) -> dict[str, Any]:
+    """把工作台转换为现有导出任务并返回下载任务信息。"""
+    draft, error = _get_compose_draft_or_error(draft_id)
+    if error:
+        return error
+    if format not in {"word", "pptx"}:
+        return _tool_error("INVALID_ARGUMENT", "format 仅支持 word 或 pptx。", field="format")
+    try:
+        package = _composition_draft_to_lesson_package(draft)
+        package["formatSpec"] = format_spec_for_template(
+            template_id,
+            format_spec if format_spec is not None else (None if template_id else package.get("formatSpec") or None),
+        )
+        return _submit_export_job(
+            format,
+            package,
+            include_answers=include_answers,
+            include_analysis=include_analysis,
+            file_name=file_name,
+            answer_position=answer_position,
+            context=_task_action_context("composition_workbench", draft["id"], "MCP user"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _tool_error("EXPORT_FAILED", str(exc), retryable=False, draft_id=draft["id"])
+
+
+@server.tool()
+def list_word_export_templates() -> dict[str, Any]:
+    """列出可复用的 Word 排版模板；只读。"""
+    return {"ok": True, "items": _list_word_export_templates_store(), "schema": "physics-vault/word-export-format/v1"}
+
+
+@server.tool()
+def get_word_export_template(template_id: str) -> dict[str, Any]:
+    """读取一个 Word 排版模板；只读。"""
+    # The local tool name shadows the imported service function; resolve by id from the list instead.
+    template = next((item for item in _list_word_export_templates_store() if item.get("id") == str(template_id or "").strip()), None)
+    if not template:
+        return _tool_error("TEMPLATE_NOT_FOUND", f"Word 排版模板不存在：{template_id}。", field="template_id")
+    return {"ok": True, "template": template}
+
+
+@server.tool()
+def propose_word_export_format(
+    purpose: Literal["formal_exam", "student_practice", "teacher_handout", "custom"] = "formal_exam",
+    requirements: str | None = None,
+) -> dict[str, Any]:
+    """根据用途返回结构化 Word 排版方案，供智能体预览、修改和保存。"""
+    template_id = None if purpose == "custom" else purpose
+    if template_id:
+        template = next((item for item in _list_word_export_templates_store() if item.get("id") == template_id), None)
+        if not template:
+            return _tool_error("TEMPLATE_NOT_FOUND", f"内置 Word 排版模板不存在：{template_id}。")
+        spec = template.get("formatSpec") or {}
+        name = template.get("name")
+    else:
+        spec = format_spec_for_template(None)
+        name = "自定义 Word 排版"
+    return {
+        "ok": True,
+        "purpose": purpose,
+        "template_id": template_id,
+        "formatSpec": spec,
+        "requirements": requirements or "",
+        "assumptions": ["未指定的内容沿用模板默认值。", "图片使用题目中的可访问资源路径。", "答案和解析是否导出由 output 配置决定。"],
+        "name": name,
+    }
+
+
+@server.tool()
+def validate_word_export_format(format_spec: dict[str, Any]) -> dict[str, Any]:
+    """校验 Word 排版规格并返回规范化结果；不修改模板或文档。"""
+    return validate_format_spec(format_spec)
+
+
+@server.tool()
+def save_word_export_template(
+    name: str,
+    format_spec: dict[str, Any],
+    template_id: str | None = None,
+    description: str | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """保存或更新一个可复用的 Word 排版模板。"""
+    return _save_word_export_template_store(name, format_spec, template_id=template_id, description=description, overwrite=overwrite)
+
+
+@server.tool()
+def rename_word_export_template(template_id: str, name: str) -> dict[str, Any]:
+    """重命名用户自定义 Word 排版模板；内置模板不可改名。"""
+    return _rename_word_export_template_store(template_id, name)
+
+
+@server.tool()
+def list_saved_handouts(limit: int = 100) -> dict[str, Any]:
+    """列出已保存讲义；不会返回工作台草稿。"""
+    return {"ok": True, "document_kind": "saved_handout", "items": _list_saved_handouts_store(limit)}
+
+
+@server.tool()
+def get_saved_handout(document_id: str) -> dict[str, Any]:
+    """读取一份已保存讲义的完整内容；不会读取工作台草稿。"""
+    document = _get_saved_handout_store(document_id)
+    if not document:
+        return _tool_error("SAVED_HANDOUT_NOT_FOUND", f"已保存讲义不存在：{document_id}。", field="document_id", next_tools=["list_saved_handouts"])
+    return {"ok": True, **document, "document_kind": "saved_handout"}
+
+
+@server.tool()
+def list_saved_handout_versions(document_id: str) -> dict[str, Any]:
+    """列出已保存讲义的版本摘要；不会返回工作台草稿版本。"""
+    versions = _list_saved_handout_versions_store(document_id)
+    if versions is None:
+        return _tool_error("SAVED_HANDOUT_NOT_FOUND", f"已保存讲义不存在：{document_id}。", field="document_id")
+    return {"ok": True, "document_kind": "saved_handout", "document_id": document_id, "items": versions}
+
+
+@server.tool()
+def restore_saved_handout_version(document_id: str, version: int, confirmed: bool = False) -> dict[str, Any]:
+    """恢复已保存讲义的指定版本；必须 confirmed=true，恢复会生成新的当前版本。"""
+    versions = _list_saved_handout_versions_store(document_id)
+    if versions is None:
+        return _tool_error("SAVED_HANDOUT_NOT_FOUND", f"已保存讲义不存在：{document_id}。", field="document_id")
+    selected = next((item for item in versions if int(item.get("version") or 0) == int(version)), None)
+    if selected is None:
+        return _tool_error("VERSION_NOT_FOUND", f"讲义版本不存在：{version}。", field="version", available_versions=versions)
+    if not confirmed:
+        return {
+            "ok": False,
+            "confirmation_required": True,
+            "document_kind": "saved_handout",
+            "document_id": document_id,
+            "version": version,
+            "message": "恢复不会删除历史版本，但会把当前内容替换为指定版本并生成新版本；请确认后再次以 confirmed=true 调用。",
+        }
+    try:
+        document = _restore_saved_handout_version_store(document_id, version)
+    except ValueError as exc:
+        return _tool_error("VERSION_NOT_FOUND", str(exc), field="version")
+    return {"ok": True, "document_kind": "saved_handout", "restored_from_version": version, "document": document}
+
+
+@server.tool()
+def rename_saved_handout(document_id: str, title: str) -> dict[str, Any]:
+    """重命名已保存讲义；不会修改工作台草稿。"""
+    try:
+        document = _rename_saved_handout_store(document_id, title)
+    except ValueError as exc:
+        return _tool_error("INVALID_ARGUMENT", str(exc), field="title")
+    if not document:
+        return _tool_error("SAVED_HANDOUT_NOT_FOUND", f"已保存讲义不存在：{document_id}。", field="document_id")
+    return {"ok": True, **document, "document_kind": "saved_handout"}
+
+
+@server.tool()
+def apply_word_format_to_saved_handout(
+    document_id: str,
+    template_id: str | None = None,
+    format_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """把 Word 排版规格应用到已保存讲义；不会修改工作台草稿。"""
+    document = _get_saved_handout_store(document_id)
+    if not document:
+        return _tool_error("SAVED_HANDOUT_NOT_FOUND", f"已保存讲义不存在：{document_id}。", field="document_id")
+    package = document.get("lessonPackage") if isinstance(document.get("lessonPackage"), dict) else {}
+    current_spec = package.get("formatSpec") if isinstance(package.get("formatSpec"), dict) else None
+    before_spec = current_spec or {}
+    before_template_id = document.get("formatTemplateId")
+    spec = format_spec_for_template(template_id, format_spec if format_spec is not None else (None if template_id else current_spec))
+    checked = validate_format_spec(spec)
+    if not checked["ok"]:
+        return checked
+    updated = _update_saved_handout_format_store(document_id, checked["formatSpec"], template_id=template_id)
+    return {
+        "ok": True,
+        "document_kind": "saved_handout",
+        "document": updated,
+        "formatSpec": checked["formatSpec"],
+        "changes": _format_spec_diff(
+            before_spec,
+            checked["formatSpec"],
+            before_template_id=before_template_id,
+            after_template_id=template_id,
+        ),
+    }
+
+
+@server.tool()
+def apply_word_format_to_workbench(
+    draft_id: str | None = None,
+    template_id: str | None = None,
+    format_spec: dict[str, Any] | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """把 Word 排版规格应用到工作台草稿；默认仅预览，执行后仍属于 workbench_draft。"""
+    draft, error = _get_compose_draft_or_error(draft_id)
+    if error:
+        return error
+    metadata = dict(draft.get("metadata") or {})
+    current_spec = metadata.get("formatSpec") if isinstance(metadata.get("formatSpec"), dict) else None
+    before_spec = current_spec or {}
+    before_template_id = metadata.get("formatTemplateId")
+    spec = format_spec_for_template(template_id, format_spec if format_spec is not None else (None if template_id else current_spec))
+    checked = validate_format_spec(spec)
+    if not checked["ok"]:
+        return checked
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "document_kind": "workbench_draft",
+            "draft_id": draft["id"],
+            "formatSpec": checked["formatSpec"],
+            "changes": _format_spec_diff(
+                before_spec,
+                checked["formatSpec"],
+                before_template_id=before_template_id,
+                after_template_id=template_id,
+            ),
+        }
+    metadata["formatSpec"] = checked["formatSpec"]
+    metadata["formatTemplateId"] = template_id
+    saved = _save_compose_draft({**draft, "metadata": metadata}, list(draft.get("items") or []))
+    return {
+        "ok": True,
+        "dry_run": False,
+        "document_kind": "workbench_draft",
+        "draft": saved,
+        "formatSpec": checked["formatSpec"],
+        "changes": _format_spec_diff(
+            before_spec,
+            checked["formatSpec"],
+            before_template_id=before_template_id,
+            after_template_id=template_id,
+        ),
+    }
+
+
+@server.tool()
+def export_saved_handout(
+    document_id: str,
+    format: Literal["word"] = "word",
+    include_answers: bool | None = None,
+    include_analysis: bool | None = None,
+    answer_position: Literal["after_question", "end"] | None = None,
+    template_id: str | None = None,
+    format_spec: dict[str, Any] | None = None,
+    file_name: str | None = None,
+) -> dict[str, Any]:
+    """导出已保存讲义；只读取 saved_handout，不会把工作台草稿当作导出源。"""
+    if format != "word":
+        return _tool_error("INVALID_ARGUMENT", "已保存讲义目前仅支持 Word 导出。", field="format")
+    document = _get_saved_handout_store(document_id)
+    if not document:
+        return _tool_error("SAVED_HANDOUT_NOT_FOUND", f"已保存讲义不存在：{document_id}。", field="document_id")
+    package = document.get("lessonPackage") if isinstance(document.get("lessonPackage"), dict) else None
+    if not isinstance(package, dict):
+        return _tool_error("INVALID_DOCUMENT", "已保存讲义缺少 lessonPackage。", field="document_id")
+    current_spec = package.get("formatSpec") if isinstance(package.get("formatSpec"), dict) else None
+    spec = format_spec_for_template(template_id, format_spec if format_spec is not None else (None if template_id else current_spec))
+    checked = validate_format_spec(spec)
+    if not checked["ok"]:
+        return checked
+    package = {**package, "formatSpec": checked["formatSpec"]}
+    output = checked["formatSpec"].get("output") or {}
+    return _submit_export_job(
+        "word",
+        package,
+        include_answers=bool(output.get("includeAnswers")) if include_answers is None else include_answers,
+        include_analysis=bool(output.get("includeAnalysis")) if include_analysis is None else include_analysis,
+        answer_position=answer_position or str(output.get("answerPosition") or "after_question"),
+        file_name=file_name,
+        context=_task_action_context("saved_handout", document_id, "MCP user"),
+    )
+
+
 def _find_composition_candidates(query: str, limit: int = 500) -> list[dict[str, Any]]:
     keyword = str(query or "").strip()
     if not keyword:
         return []
-    terms = list(dict.fromkeys([keyword, *[term for term in _candidate_query_tokens(keyword) if len(term.strip()) >= 2], re.sub(r"(定理|规律|专题|知识点)$", "", keyword).strip()]))
-    terms = [term for term in terms if term]
+    terms = _comprehensive_query_terms(keyword)
     searchable_columns = [
-        "q.question_id", "q.canonical_title", "q.module", "q.source", "qti.title_text", "qti.stem_text", "qti.source_text",
+        "q.question_id", "q.canonical_title", "q.module", "q.topic2", "q.topic3", "q.source", "qti.title_text", "qti.stem_text", "qti.tags_json", "qti.source_text",
         "kp.topic1_name", "kp.topic2_name", "kp.topic3_name", "kp.source_chapter",
     ]
     where = " OR ".join(
@@ -914,13 +3023,15 @@ def _find_composition_candidates(query: str, limit: int = 500) -> list[dict[str,
         rows = conn.execute(
             f"""
             SELECT DISTINCT q.question_id, q.canonical_title, q.question_type, q.difficulty, q.module, q.source,
-                   qti.title_text, qti.stem_text, qti.source_text
+                   qti.title_text, qti.stem_text, qti.tags_json, qti.source_text,
+                   GROUP_CONCAT(DISTINCT kp.topic3_name) AS knowledge_topic3_names
             FROM questions q
             LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
             LEFT JOIN question_knowledge_points qkp ON qkp.question_id = q.question_id
             LEFT JOIN knowledge_points kp ON kp.topic3_id = qkp.topic3_id
-            WHERE (q.status IS NULL OR q.status NOT IN ('deleted', 'archived'))
+            WHERE (q.status IS NULL OR q.status NOT IN ('deleted', 'archived', 'archived_duplicate'))
               AND ({where})
+            GROUP BY q.question_id
             ORDER BY q.updated_at DESC, q.question_id
             LIMIT ?
             """,
@@ -936,14 +3047,30 @@ def _select_balanced_composition_candidates(candidates: list[dict[str, Any]], ta
     seen_types: set[str] = set()
     seen_difficulties: set[str] = set()
     keyword = str(query).casefold()
+    expanded_terms = _comprehensive_query_terms(query)
     while remaining and len(selected) < target_count:
         def score(row: dict[str, Any]) -> tuple[int, str]:
             source = str(row.get("source_text") or row.get("source") or "未标注")
             question_type = str(row.get("question_type") or "未标注")
             difficulty = str(row.get("difficulty") if row.get("difficulty") is not None else "未标注")
             title = str(row.get("title_text") or row.get("canonical_title") or "").casefold()
+            stem = str(row.get("stem_text") or "").casefold()
+            metadata = " ".join(
+                str(row.get(field) or "")
+                for field in ("module", "tags_json", "knowledge_topic3_names")
+            ).casefold()
+            relevance = max(
+                (
+                    8 if term.casefold() == keyword and term.casefold() in title else
+                    6 if term.casefold() in title else
+                    5 if term.casefold() in metadata else
+                    3 if term.casefold() in stem else 0
+                )
+                for term in expanded_terms
+            )
             return (
-                (4 if source not in seen_sources else 0)
+                relevance
+                + (4 if source not in seen_sources else 0)
                 + (3 if question_type not in seen_types else 0)
                 + (2 if difficulty not in seen_difficulties else 0)
                 + (2 if keyword and keyword in title else 0),
@@ -1076,6 +3203,31 @@ def get_question_knowledge_points(question_id: str) -> dict[str, Any]:
 
 
 @server.tool()
+def maintain_question_knowledge_points(
+    question_ids: list[str],
+    auto_fix: bool = True,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """诊断并维护正式题目的三级知识点绑定。
+
+    每题采用“1 个主知识点 + 最多 2 个辅助知识点”。诊断只依据题干和解析，
+    不让旧标签自证正确；auto_fix=true 时仅自动应用高置信度修复，疑难项保留为
+    needs_review。修改只涉及检索元数据，并返回可回滚的 audit_batch_id。
+    """
+    clean_ids = list(dict.fromkeys(str(item or "").strip() for item in question_ids if str(item or "").strip()))
+    if not clean_ids:
+        return _tool_error("INVALID_ARGUMENT", "question_ids 至少需要一个题号。", field="question_ids")
+    try:
+        return _metadata_management_service().maintain_question_knowledge_points(
+            clean_ids,
+            auto_fix=bool(auto_fix),
+            reason=reason,
+        )
+    except (FileNotFoundError, sqlite3.Error, ValueError) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
+
+
+@server.tool()
 def create_knowledge_points(points: list[dict[str, Any]]) -> dict[str, Any]:
     """直接新增正式知识树节点。知识目录是智能体可自治维护的元数据，不需要审核。"""
     try:
@@ -1126,9 +3278,102 @@ def batch_update_question_metadata(
     updates: list[dict[str, Any]],
     reason: str | None = None,
 ) -> dict[str, Any]:
-    """直接统一标签、知识点、难度、题型和规范化来源；不能修改题目正文或发布状态。"""
+    """直接统一标签、知识点、难度、题型、来源和试卷关联；不能修改题目正文或发布状态。"""
     try:
         return _metadata_management_service().batch_update_question_metadata(updates, reason=reason)
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
+
+
+@server.tool()
+def create_paper(
+    paper_id: str,
+    name: str,
+    year: int,
+    region: str,
+    exam_type: str,
+) -> dict[str, Any]:
+    """在正式库创建试卷记录；同 paper_id 幂等，不覆盖冲突记录。"""
+    clean_id = str(paper_id or "").strip()
+    clean_name = " ".join(str(name or "").split())
+    clean_region = " ".join(str(region or "").split())
+    clean_exam_type = " ".join(str(exam_type or "").split())
+    if not clean_id:
+        return _tool_error("INVALID_ARGUMENT", "paper_id 不能为空。", field="paper_id")
+    if not clean_name:
+        return _tool_error("INVALID_ARGUMENT", "name 不能为空。", field="name")
+    if len(clean_id) > 120 or len(clean_name) > 200:
+        return _tool_error("INVALID_ARGUMENT", "paper_id 或 name 超出长度限制。", field="paper_id")
+    try:
+        clean_year = int(year)
+    except (TypeError, ValueError):
+        return _tool_error("INVALID_ARGUMENT", "year 必须是有效年份。", field="year")
+    if clean_year < 1900 or clean_year > 2100:
+        return _tool_error("INVALID_ARGUMENT", "year 必须在 1900 到 2100 之间。", field="year")
+    if not clean_region or not clean_exam_type:
+        return _tool_error("INVALID_ARGUMENT", "region 和 exam_type 不能为空。", field="region")
+    try:
+        with _connect_formal_write_db() as conn:
+            existing = conn.execute(
+                "SELECT paper_id, paper_name, year, region, exam_type, subject, status FROM papers WHERE paper_id = ?",
+                (clean_id,),
+            ).fetchone()
+            requested = {
+                "paper_id": clean_id,
+                "paper_name": clean_name,
+                "year": clean_year,
+                "region": clean_region,
+                "exam_type": clean_exam_type,
+            }
+            if existing is not None:
+                current = dict(existing)
+                comparable = {key: current.get(key) for key in requested}
+                if comparable != requested:
+                    return _tool_error(
+                        "PAPER_CONFLICT",
+                        f"paper_id 已存在且字段不一致：{clean_id}",
+                        paper_id=clean_id,
+                        existing=current,
+                        requested=requested,
+                    )
+                return {"ok": True, "created": False, "paper": current}
+            conn.execute(
+                """
+                INSERT INTO papers (paper_id, year, exam_type, region, paper_name, subject, status)
+                VALUES (?, ?, ?, ?, ?, 'PHY', 'structured')
+                """,
+                (clean_id, clean_year, clean_exam_type, clean_region, clean_name),
+            )
+            conn.commit()
+            created = conn.execute(
+                "SELECT paper_id, paper_name, year, region, exam_type, subject, status FROM papers WHERE paper_id = ?",
+                (clean_id,),
+            ).fetchone()
+        return {"ok": True, "created": True, "paper": dict(created) if created else requested}
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
+
+
+@server.tool()
+def associate_questions_to_paper(
+    question_ids: list[str],
+    paper_id: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """将正式题目批量关联到已存在的试卷，不修改题目正文。"""
+    normalized_ids = list(dict.fromkeys(str(item).strip() for item in question_ids if str(item).strip()))
+    clean_paper_id = str(paper_id or "").strip()
+    if not normalized_ids:
+        return _tool_error("INVALID_ARGUMENT", "question_ids 至少需要一个有效题号。", field="question_ids")
+    if not clean_paper_id:
+        return _tool_error("INVALID_ARGUMENT", "paper_id 不能为空。", field="paper_id")
+    if len(normalized_ids) > 100:
+        return _tool_error("LIMIT_EXCEEDED", "一次最多关联 100 道题。", field="question_ids")
+    try:
+        return _metadata_management_service().batch_update_question_metadata(
+            [{"question_id": question_id, "primary_paper_id": clean_paper_id} for question_id in normalized_ids],
+            reason=reason or f"associate questions to paper {clean_paper_id}",
+        )
     except (FileNotFoundError, sqlite3.Error) as exc:
         return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
 
@@ -1238,9 +3483,13 @@ def database_boundary_report() -> dict[str, Any]:
             "same_file": same_file,
         },
         "routing": {
-            "review_center_first": ["list_review_tasks", "get_review_task", "get_review_task_full", "clean_review_task_latex", "update_review_task_draft"],
+            "review_center_first": ["list_review_tasks", "get_review_task", "get_review_task_full", "validate_review_task", "split_merged_options", "clean_review_task_latex", "update_review_task_draft"],
             "canonical_read_only": ["search_questions", "get_questions_by_ids", "list_knowledge_tree", "search_knowledge_points", "get_question_knowledge_points", "find_similar_questions"],
-            "canonical_metadata_write": ["create_knowledge_points", "batch_update_question_metadata"],
+            "canonical_metadata_write": [
+                "create_knowledge_points",
+                "batch_update_question_metadata",
+                "maintain_question_knowledge_points",
+            ],
             "canonical_controlled_content_workflow": ["return_question_to_review", "rollback_change_batch"],
             "rule": "用户说送审、校对中心、草稿、审核任务、那 15 道题时，先走审核库工具；用户明确说正式题库/已入库/组卷找题时，才走正式库检索。",
         },
@@ -1740,7 +3989,12 @@ def list_review_tasks(
                 str(item.get(key) or "")
                 for key in ("task_id", "task_type", "batch_id", "title", "source")
             )
-            if str(keyword).strip().casefold() not in haystack.casefold():
+            normalized_keyword = _review_search_key(keyword)
+            normalized_haystack = _review_search_key(haystack)
+            if (
+                str(keyword).strip().casefold() not in haystack.casefold()
+                and (not normalized_keyword or normalized_keyword not in normalized_haystack)
+            ):
                 continue
         items.append(item)
         if len(items) >= limit:
@@ -1751,29 +4005,24 @@ def list_review_tasks(
 @server.tool()
 def get_review_task(task_id: str, content_limit: int = 20) -> dict[str, Any]:
     """读取审核库中一个校对任务的草稿内容摘要。只读。"""
-    tid = str(task_id or "").strip()
-    if not tid:
-        return _tool_error("INVALID_ARGUMENT", "task_id 不能为空。", field="task_id")
-    with _connect_review_db() as conn:
-        if not _table_exists(conn, "import_pipeline_tasks"):
-            return {"ok": False, "table_missing": True, "error": "import_pipeline_tasks 表不存在。"}
-        row = conn.execute(
-            """
-            SELECT task_id, task_type, status, created_at, updated_at,
-                   input_summary_json, result_json, error
-            FROM import_pipeline_tasks
-            WHERE task_id = ?
-            """,
-            (tid,),
-        ).fetchone()
-    if row is None:
-        return {"ok": False, "status": "missing", "task_id": tid, "error": "校对任务不存在。"}
+    tid, row, error = _load_review_task(task_id)
+    if error is not None:
+        return error
+    assert tid is not None and row is not None
 
     limit = min(max(int(content_limit or 20), 1), 80)
     summary = _parse_json_dict(row["input_summary_json"])
     result = _parse_json_dict(row["result_json"])
     questions = result.get("questions") if isinstance(result.get("questions"), list) else []
     knowledge_drafts = result.get("knowledge_drafts") if isinstance(result.get("knowledge_drafts"), list) else []
+    risk_counts: dict[str, int] = {}
+    validation = validate_review_task(tid)
+    if validation.get("ok"):
+        risk_counts = {
+            str(item.get("question_id") or ""): int(item.get("risk_count") or 0)
+            for item in validation.get("items", [])
+            if isinstance(item, dict)
+        }
     return {
         "ok": True,
         "task": {
@@ -1790,7 +4039,16 @@ def get_review_task(task_id: str, content_limit: int = 20) -> dict[str, Any]:
             "warnings": [str(item) for item in result.get("warnings") or []],
             "error": row["error"],
         },
-        "questions": [_review_question_summary(item, index) for index, item in enumerate(questions[:limit], start=1)],
+        "questions": [
+            _review_question_summary(
+                item,
+                index,
+                risk_count=risk_counts.get(
+                    str(item.get("question_id") or item.get("id") or item.get("draft_id") or "").strip(),
+                ),
+            )
+            for index, item in enumerate(questions[:limit], start=1)
+        ],
         "knowledge_drafts": [
             _review_knowledge_summary(item, index)
             for index, item in enumerate(knowledge_drafts[:limit], start=1)
@@ -1806,23 +4064,10 @@ def get_review_task_full(
     include_knowledge: bool = True,
 ) -> dict[str, Any]:
     """读取审核库中校对任务的完整草稿字段，不截断题干。只读。"""
-    tid = str(task_id or "").strip()
-    if not tid:
-        return _tool_error("INVALID_ARGUMENT", "task_id 不能为空。", field="task_id")
-    with _connect_review_db() as conn:
-        if not _table_exists(conn, "import_pipeline_tasks"):
-            return {"ok": False, "table_missing": True, "error": "import_pipeline_tasks 表不存在。"}
-        row = conn.execute(
-            """
-            SELECT task_id, task_type, status, created_at, updated_at,
-                   input_summary_json, result_json, error
-            FROM import_pipeline_tasks
-            WHERE task_id = ?
-            """,
-            (tid,),
-        ).fetchone()
-    if row is None:
-        return {"ok": False, "status": "missing", "task_id": tid, "error": "校对任务不存在。"}
+    tid, row, error = _load_review_task(task_id)
+    if error is not None:
+        return error
+    assert tid is not None and row is not None
 
     summary = _parse_json_dict(row["input_summary_json"])
     result = _parse_json_dict(row["result_json"])
@@ -1855,6 +4100,364 @@ def get_review_task_full(
         "questions": questions,
         "knowledge_drafts": knowledge if include_knowledge else [],
         "full_content": True,
+    }
+
+
+def _review_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(_review_text(item) for item in value.values())
+    if isinstance(value, list):
+        return " ".join(_review_text(item) for item in value)
+    return str(value or "").strip()
+
+
+def _review_normalized_text(value: Any) -> str:
+    # Keep mathematical operators: removing + / - made distinct algebraic
+    # options such as "F/3 + μmg" and "F/3 - μmg" look identical.
+    return re.sub(r"[\s_，。；、：,.;:!?！？（）()\[\]{}]+", "", _review_text(value), flags=re.UNICODE).casefold()
+
+
+def _review_search_key(value: Any) -> str:
+    """让任务号、批次号搜索忽略空格、短横线和常见 OCR 标点差异。"""
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").casefold())
+
+
+def _review_question_type(item: dict[str, Any]) -> str:
+    return str(item.get("question_type") or item.get("type") or "").strip().casefold()
+
+
+def _review_options(item: dict[str, Any]) -> list[tuple[str, str]]:
+    raw = item.get("options") or item.get("choices") or []
+    if isinstance(raw, dict):
+        raw = [{"label": key, "text": value} for key, value in raw.items()]
+    if not isinstance(raw, list):
+        return []
+    options: list[tuple[str, str]] = []
+    for index, option in enumerate(raw):
+        if isinstance(option, dict):
+            label = str(option.get("label") or option.get("key") or option.get("option") or "").strip()
+            text = option.get("text") or option.get("content") or option.get("value") or ""
+        else:
+            label = ""
+            text = option
+        label = label.rstrip(".、．") or chr(65 + index)
+        options.append((label.upper(), _review_text(text)))
+    return options
+
+
+_REVIEW_FIGURE_PLACEHOLDER_RE = re.compile(r"!\[fig:[^\]]+\]", flags=re.IGNORECASE)
+
+
+def _review_duplicate_value(value: Any) -> str:
+    """Compare question content while ignoring copied image placeholder IDs."""
+    without_figure_ids = _REVIEW_FIGURE_PLACEHOLDER_RE.sub("", _review_text(value))
+    return re.sub(r"[\s\W_]+", "", without_figure_ids, flags=re.UNICODE).casefold()
+
+
+def _review_exact_duplicate_signature(item: dict[str, Any]) -> tuple[Any, ...] | None:
+    """Return a conservative content signature for safe in-task deduplication."""
+    title = _review_duplicate_value(
+        item.get("title") or item.get("stem") or item.get("stem_text") or item.get("question_body") or item.get("content")
+    )
+    answer = _review_duplicate_value(item.get("answer") or item.get("correct_answer"))
+    analysis = _review_duplicate_value(item.get("analysis") or item.get("explanation") or item.get("solution"))
+    source = _review_duplicate_value(item.get("source") or item.get("origin") or item.get("source_name"))
+    options = tuple((label, _review_duplicate_value(text)) for label, text in _review_options(item))
+    # An incomplete record is not reliable enough to remove automatically. Short titles are
+    # allowed only when the worked analysis independently makes the match specific.
+    if (len(title) < 18 and len(analysis) < 40) or not answer or not source:
+        return None
+    return (_review_question_type(item), title, options, answer, analysis, source)
+
+
+def _review_figures(item: dict[str, Any]) -> tuple[set[str], list[str]]:
+    raw = item.get("figures") or item.get("images") or item.get("question_figures") or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    figure_ids: set[str] = set()
+    duplicate_ids: list[str] = []
+    if isinstance(raw, list):
+        for figure in raw:
+            if not isinstance(figure, dict):
+                continue
+            figure_id = str(
+                figure.get("fig_uuid")
+                or figure.get("placeholder_key")
+                or figure.get("asset_id")
+                or figure.get("image_id")
+                or figure.get("id")
+                or ""
+            ).strip()
+            if not figure_id:
+                continue
+            if figure_id in figure_ids:
+                duplicate_ids.append(figure_id)
+            figure_ids.add(figure_id)
+    return figure_ids, duplicate_ids
+
+
+def _review_risk(code: str, severity: str, field: str, message: str, suggestion: str) -> dict[str, str]:
+    return {
+        "code": code,
+        "severity": severity,
+        "field": field,
+        "message": message,
+        "suggestion": suggestion,
+    }
+
+
+def _is_informational_import_warning(value: Any) -> bool:
+    """Keep successful import metadata extraction out of the actionable risk queue."""
+    text = _review_text(value)
+    return bool(
+        re.fullmatch(r"已从(?:答案|题干|原文)中提取(?:难度|知识点|来源)元数据。?", text)
+        or re.fullmatch(r"题干具有明确的多步骤实验结构，题型已修正为实验题。?", text)
+    )
+
+
+def _review_workflow_guidance(items: list[dict[str, Any]], task_id: str) -> dict[str, Any]:
+    """把风险代码转换成下一步可执行的 MCP 工作流提示。"""
+    codes = {
+        str(risk.get("code") or "")
+        for item in items
+        if isinstance(item, dict)
+        for risk in (item.get("risks") or [])
+        if isinstance(risk, dict)
+    }
+    next_tools: list[str] = []
+    actions: list[dict[str, Any]] = []
+
+    if codes & {"missing_options", "too_few_options", "answer_option_mismatch", "duplicate_options", "choice_type_mismatch", "question_type_suspect"}:
+        next_tools.append("split_merged_options")
+        actions.append({
+            "risk_codes": sorted(codes & {"missing_options", "too_few_options", "answer_option_mismatch", "duplicate_options", "choice_type_mismatch", "question_type_suspect"}),
+            "tool": "split_merged_options",
+            "mode": "dry_run_then_apply",
+            "message": "先检查 raw_text 和选项分段；必要时预览拆分合并选项，确认后写回，再重新校验。",
+        })
+    if codes & {"unbalanced_latex", "malformed_latex"}:
+        next_tools.extend(["clean_review_task_latex", "get_review_task_full", "update_review_task_draft"])
+        actions.append({
+            "risk_codes": sorted(codes & {"unbalanced_latex", "malformed_latex"}),
+            "tool": "clean_review_task_latex",
+            "mode": "dry_run_then_apply",
+            "message": "先预览标准 LaTeX 清洗；写回后必须重新校验。",
+        })
+        actions.append({
+            "risk_codes": sorted(codes & {"unbalanced_latex", "malformed_latex"}),
+            "tool": "update_review_task_draft",
+            "mode": "manual_standardization",
+            "message": "自动清洗后仍有 LaTeX 风险时，先用 get_review_task_full 读取受影响字段，再逐题手动生成并写回标准格式补丁：行内公式用 $...$，独立块公式用 $$...$$，开闭分隔符必须成对且类型一致；写回后重新校验。不要只提示老师手动修改。",
+        })
+    if codes & {"missing_knowledge"}:
+        next_tools.append("organize_knowledge_tree")
+        actions.append({
+            "risk_codes": ["missing_knowledge"],
+            "tool": "organize_knowledge_tree",
+            "mode": "apply",
+            "message": "让 AI 根据题干和解析匹配或创建知识点，再回读审核草稿确认。",
+        })
+    if codes & {"missing_source"}:
+        next_tools.append("update_review_task_draft")
+        actions.append({
+            "risk_codes": ["missing_source"],
+            "tool": "update_review_task_draft",
+            "mode": "dry_run_then_apply",
+            "message": "补充试题来源或年份等元数据后重新校验。",
+        })
+    if codes & {"missing_figure", "unused_figure", "duplicate_figure_id"}:
+        next_tools.append("update_review_task_draft")
+        actions.append({
+            "risk_codes": sorted(codes & {"missing_figure", "unused_figure", "duplicate_figure_id"}),
+            "tool": "update_review_task_draft",
+            "mode": "dry_run_then_apply",
+            "message": "检查图片素材 ID、引用位置和配图关系；必要时更新 figures/题干内容。",
+        })
+    if codes & {"duplicate_question"}:
+        actions.append({
+            "risk_codes": ["duplicate_question"],
+            "tool": "delete_review_tasks",
+            "mode": "manual_confirm",
+            "message": "重复题不能自动猜测保留哪一题，需要人工确认后再删除或合并。",
+        })
+
+    # 保持工具名去重，同时把完整任务号传给后续调用方。
+    next_tools = list(dict.fromkeys(next_tools))
+    if not actions and not codes:
+        next_tools = ["get_review_task_full"]
+    return {
+        "task_id": task_id,
+        "state": "clean" if not codes else ("needs_manual_review" if codes & {"duplicate_question"} else "needs_cleanup"),
+        "next_tools": next_tools,
+        "actions": actions,
+    }
+
+
+def _latex_delimiter_status(text: str) -> tuple[bool, bool]:
+    """按顺序匹配 $ 与 $$，区分分隔符混用和单纯未闭合。"""
+    mode: str | None = None
+    malformed = False
+    index = 0
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text.startswith("$$", index):
+            if mode is None:
+                mode = "display"
+            elif mode == "display":
+                mode = None
+            else:
+                malformed = True
+                mode = None
+            index += 2
+            continue
+        if text[index] == "$":
+            if mode is None:
+                mode = "inline"
+            elif mode == "inline":
+                mode = None
+            else:
+                malformed = True
+                mode = None
+            index += 1
+            continue
+        index += 1
+    return malformed, mode is not None
+
+
+@server.tool()
+def validate_review_task(
+    task_id: str,
+    question_ids: list[str] | None = None,
+    require_knowledge: bool = True,
+    require_source: bool = True,
+    risks_only: bool = False,
+) -> dict[str, Any]:
+    """检查审核草稿的题型、答案、选项、图片引用、LaTeX 和元数据风险；只读。"""
+    # Read the complete draft before writing it back.  ``question_ids`` only
+    # narrows the repair target; fetching a filtered subset here would replace
+    # the whole task with that subset on save.
+    full = get_review_task_full(task_id, include_knowledge=False)
+    if not full.get("ok"):
+        return full
+
+    questions = full.get("questions") if isinstance(full.get("questions"), list) else []
+    items: list[dict[str, Any]] = []
+    title_fingerprints: dict[str, list[str]] = {}
+    total_counts = {"danger": 0, "warning": 0, "suggestion": 0}
+
+    for index, raw in enumerate(questions, start=1):
+        if not isinstance(raw, dict):
+            raw = {"content": raw}
+        question_id = str(raw.get("question_id") or raw.get("id") or raw.get("draft_id") or f"draft-{index}").strip()
+        title = raw.get("title") or raw.get("stem") or raw.get("stem_text") or raw.get("question_body") or raw.get("content")
+        options = _review_options(raw)
+        question_type = _review_question_type(raw)
+        answer = _review_text(raw.get("answer") or raw.get("correct_answer"))
+        analysis = _review_text(raw.get("analysis") or raw.get("explanation") or raw.get("solution"))
+        knowledge = raw.get("knowledge_points") or raw.get("knowledge_point") or raw.get("topic3_id") or raw.get("topic3_name")
+        source = raw.get("source") or raw.get("origin") or raw.get("source_name")
+        stem = raw.get("stem") or raw.get("stem_text") or raw.get("question_body") or raw.get("content")
+        full_text = _review_text({"title": title, "stem": stem, "options": options, "answer": answer, "analysis": analysis})
+        risks: list[dict[str, str]] = []
+
+        if not _review_text(title):
+            risks.append(_review_risk("empty_title", "danger", "title", "题干为空。", "补充完整题干后再提交。"))
+        fingerprint = _review_normalized_text(title)
+        if fingerprint:
+            title_fingerprints.setdefault(fingerprint, []).append(question_id)
+
+        choice = any(token in question_type for token in ("choice", "select", "选择", "single", "multiple", "multi"))
+        if choice and not options:
+            risks.append(_review_risk("missing_options", "danger", "options", "选择题没有识别到选项。", "补充选项或修正题型。"))
+        elif choice and len(options) < 2:
+            risks.append(_review_risk("too_few_options", "warning", "options", "选择题选项少于 2 个。", "检查图片解析和选项分段。"))
+        normalized_options = [_review_normalized_text(text) for _label, text in options if text]
+        if len(normalized_options) != len(set(normalized_options)):
+            risks.append(_review_risk("duplicate_options", "warning", "options", "存在内容重复的选项。", "检查 OCR 重复或重新分割选项。"))
+
+        if not answer:
+            risks.append(_review_risk("missing_answer", "warning", "answer", "未识别到答案。", "补充答案，或明确标记为待确认。"))
+        elif choice and options:
+            labels = {label.rstrip(".、．") for label, _text in options}
+            selected = set(re.findall(r"(?<![A-Z])[A-H](?![A-Z])", answer.upper()))
+            if not selected and answer.strip().upper() in labels:
+                selected = {answer.strip().upper()}
+            missing = sorted(selected - labels)
+            if missing:
+                risks.append(_review_risk("answer_option_mismatch", "danger", "answer", f"答案引用了不存在的选项：{'、'.join(missing)}。", "检查答案字母和选项分段是否一致。"))
+            if "single" in question_type and len(selected) > 1:
+                risks.append(_review_risk("choice_type_mismatch", "danger", "question_type", "题目标记为单选题，但答案包含多个选项。", "检查题型是否误识别为单选题，或检查答案是否被错误拼接。"))
+            if ("multi" in question_type or "multiple" in question_type) and len(selected) == 1:
+                risks.append(_review_risk("question_type_suspect", "warning", "question_type", "题目标记为多选题，但当前答案只包含一个选项。", "检查选项排版和原始识别结果，确认题型及答案是否正确。"))
+
+        if require_knowledge and not _review_text(knowledge):
+            risks.append(_review_risk("missing_knowledge", "warning", "knowledge_points", "题目没有知识点。", "让 AI 根据题干和解析补充知识点标签。"))
+        if require_source and not _review_text(source):
+            risks.append(_review_risk("missing_source", "suggestion", "source", "题目没有试题来源。", "补充试卷名称、年份或导入文件来源。"))
+
+        figure_ids, duplicate_figure_ids = _review_figures(raw)
+        references = set(re.findall(r"(?:fig:|image:|图片[:：]?)\s*([A-Za-z0-9_.-]+)", full_text, flags=re.IGNORECASE))
+        if duplicate_figure_ids:
+            risks.append(_review_risk("duplicate_figure_id", "danger", "figures", f"图片素材 ID 重复：{'、'.join(sorted(set(duplicate_figure_ids)))}。", "保留唯一素材 ID，并重新关联图片。"))
+        missing_refs = sorted(references - figure_ids)
+        unused_figures = sorted(figure_ids - references)
+        if missing_refs:
+            risks.append(_review_risk("missing_figure", "danger", "figures", f"题目引用了不存在的图片：{'、'.join(missing_refs)}。", "从素材缓存重新选择图片，或修正图片引用。"))
+        if unused_figures:
+            risks.append(_review_risk("unused_figure", "warning", "figures", f"存在未被题目内容引用的图片：{'、'.join(unused_figures)}。", "确认图片位置，避免导出时多图或错图。"))
+
+        malformed_display, unbalanced_latex = _latex_delimiter_status(full_text)
+        if malformed_display:
+            risks.append(_review_risk("malformed_latex", "warning", "latex", "LaTeX 块公式分隔符混用或未完整闭合。", "把 $$...$ 或 $...$$ 修正为完整的 $$...$$，再重新校验。"))
+        elif unbalanced_latex:
+            risks.append(_review_risk("unbalanced_latex", "warning", "latex", "LaTeX 行内分隔符数量不成对。", "检查 $...$ 或 $$...$$ 的开闭分隔符。"))
+
+        imported_warnings = raw.get("validation_warnings") or raw.get("warnings") or []
+        if imported_warnings:
+            values = imported_warnings if isinstance(imported_warnings, list) else [imported_warnings]
+            for warning in values:
+                if _is_informational_import_warning(warning):
+                    continue
+                risks.append(_review_risk("import_warning", "warning", "question", _preview_text(warning, 240), "根据提示检查原文识别结果。"))
+
+        for risk in risks:
+            total_counts[risk["severity"]] += 1
+        items.append({
+            "question_id": question_id,
+            "question_number": index,
+            "risk_count": len(risks),
+            "risks": risks,
+        })
+
+    duplicate_groups = [ids for ids in title_fingerprints.values() if len(ids) > 1]
+    if duplicate_groups:
+        for group in duplicate_groups:
+            for item in items:
+                if item["question_id"] in group:
+                    risk = _review_risk("duplicate_question", "warning", "title", f"题干与题目 {'、'.join(item_id for item_id in group if item_id != item['question_id'])} 重复。", "确认是否为重复导入；必要时删除或合并题目。")
+                    item["risks"].append(risk)
+                    item["risk_count"] += 1
+                    total_counts["warning"] += 1
+
+    risk_question_count = sum(1 for item in items if item["risk_count"])
+    returned_items = [item for item in items if item["risk_count"]] if risks_only else items
+    guidance = _review_workflow_guidance(items, str(full.get("task", {}).get("task_id") or task_id).strip())
+    return {
+        "ok": True,
+        "task_id": str(full.get("task", {}).get("task_id") or task_id).strip(),
+        "question_count": len(items),
+        "returned_question_count": len(returned_items),
+        "risks_only": bool(risks_only),
+        "risk_question_count": risk_question_count,
+        "risk_count": sum(total_counts.values()),
+        "summary": total_counts,
+        "clean": not any(total_counts.values()),
+        "items": returned_items,
+        "task_warnings": full.get("task", {}).get("warnings", []),
+        "workflow": guidance,
+        "message": "未发现结构化风险。" if not any(total_counts.values()) else f"发现 {risk_question_count} 道题存在 {sum(total_counts.values())} 项风险。",
     }
 
 
@@ -1918,7 +4521,7 @@ def suggest_knowledge_points_for_task(
         [item for item in questions if isinstance(item, dict)],
         max_suggestions=max_suggestions,
     )
-    result["task_id"] = str(task_id).strip()
+    result["task_id"] = str(full.get("task", {}).get("task_id") or task_id).strip()
     return result
 
 
@@ -1928,11 +4531,17 @@ def clean_review_task_latex(
     question_ids: list[str] | None = None,
     dry_run: bool = True,
     reason: str | None = None,
+    expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
-    """清理当前校对草稿中的 Markdown 斜体公式。默认预览，确认后 dry_run=false 才写入。"""
+    """清理当前校对草稿中的 Markdown 斜体公式。
+
+    默认预览，确认后 dry_run=false 才写入。若仍有 LaTeX 风险，调用方必须
+    回读完整题目，并用 update_review_task_draft 逐字段写回标准 LaTeX 格式。
+    """
     full = get_review_task_full(task_id)
     if not full.get("ok"):
         return full
+    resolved_task_id = str(full.get("task", {}).get("task_id") or task_id).strip()
     questions = full.get("questions") if isinstance(full.get("questions"), list) else []
     wanted = {str(item).strip() for item in (question_ids or []) if str(item).strip()}
     changed: list[dict[str, Any]] = []
@@ -1958,21 +4567,287 @@ def clean_review_task_latex(
             total_replacements += replacements
 
     if not dry_run and changed:
-        _update_review_task_questions(
-            task_id,
-            cleaned_questions,
-            changed,
-            kind="latex_cleanup",
-            reason=reason,
-        )
+        try:
+            _update_review_task_questions(
+                resolved_task_id,
+                cleaned_questions,
+                changed,
+                kind="latex_cleanup",
+                reason=reason,
+                expected_updated_at=expected_updated_at,
+            )
+        except ReviewTaskConflictError as exc:
+            return _tool_error(
+                "REVIEW_TASK_CONFLICT",
+                str(exc),
+                field="expected_updated_at",
+                task_id=exc.task_id,
+                expected_updated_at=exc.expected,
+                current_updated_at=exc.current,
+                next_tools=["get_review_task_full", "validate_review_task"],
+            )
+    remaining = None
+    if not dry_run and changed:
+        remaining = validate_review_task(resolved_task_id, question_ids=question_ids)
+    remaining_items = (remaining or {}).get("items", []) if isinstance(remaining, dict) else []
     return {
         "ok": True,
-        "task_id": str(task_id).strip(),
+        "task_id": resolved_task_id,
         "dry_run": dry_run,
         "changed_count": len(changed),
         "replacement_count": total_replacements,
         "items": changed,
-        "message": "预览完成，未写入当前草稿。" if dry_run else "已直接更新当前校对草稿。",
+        "remaining_risks": remaining_items,
+        "manual_action_required": bool(remaining_items),
+        "workflow": (remaining or {}).get("workflow") if isinstance(remaining, dict) else None,
+        "manual_format_guidance": (
+            {
+                "standard": [
+                    "行内公式统一使用 $...$。",
+                    "独立成行的块公式统一使用 $$...$$。",
+                    "每个开分隔符必须以同类型的闭分隔符结束，不混用 $ 与 $$。",
+                ],
+                "next_steps": [
+                    "用 get_review_task_full 读取 remaining_risks 对应题目的完整字段。",
+                    "用 update_review_task_draft 为 title、stem、options、answer 或 analysis 生成逐题补丁；先 dry_run=true 预览，获得明确修复要求时写回。",
+                    "再次调用 validate_review_task，只在相关风险已消除后报告完成。",
+                ],
+            }
+            if remaining_items
+            else None
+        ),
+        "message": (
+            "预览完成，未写入当前草稿。"
+            if dry_run
+            else (
+                "已完成自动清洗，但仍有风险需要人工处理。"
+                if remaining_items
+                else "已完成自动清洗，复核未发现剩余风险。"
+            )
+        ),
+    }
+
+
+_MERGED_OPTION_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-H])\s*(?:[\.．、:：]|(?=\s{2,}))\s*",
+    flags=re.IGNORECASE,
+)
+
+
+def _merged_option_source(item: dict[str, Any]) -> str:
+    for key in ("raw_text", "raw_content", "source_text", "original_text", "content", "stem"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+_OPTION_METADATA_BOUNDARY_RE = re.compile(r"\n\s*(?:【\s*)?(?:答案|解析|详解|难度|知识点)", flags=re.IGNORECASE)
+
+
+def _extract_option_block(source: str) -> str:
+    """Limit OCR option parsing to the quoted option block before answer metadata."""
+    source = source or ""
+    first_option = re.search(r"(?:^|\n)\s*>\s*[A-H]\s*(?:[\.．、:：]|(?=\s{2,}))", source, flags=re.IGNORECASE)
+    if first_option is None:
+        return source
+    start = first_option.start()
+    end_match = _OPTION_METADATA_BOUNDARY_RE.search(source, first_option.end())
+    return source[start:end_match.start() if end_match else len(source)]
+
+
+def _split_merged_option_text(source: str) -> list[tuple[str, str]]:
+    option_block = _extract_option_block(source)
+    matches = list(_MERGED_OPTION_RE.finditer(option_block))
+    if len(matches) < 2:
+        return []
+    labels = [match.group(1).upper() for match in matches]
+    if len(labels) != len(set(labels)):
+        return []
+    result: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(option_block)
+        text = re.sub(r"(?m)^\s*>\s?", "", option_block[match.end():end]).strip(" \t\r\n;；")
+        if not text:
+            return []
+        result.append((labels[index], text))
+    return result
+
+
+def _build_split_options(raw_options: Any, split_options: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    template = raw_options[0] if isinstance(raw_options, list) and raw_options and isinstance(raw_options[0], dict) else {}
+    if "opt" in template:
+        return [{"opt": label, "content": text} for label, text in split_options]
+    if "option" in template:
+        return [{"option": label, "text": text} for label, text in split_options]
+    if "key" in template:
+        return [{"key": label, "value": text} for label, text in split_options]
+    return [{"label": label, "text": text} for label, text in split_options]
+
+
+@server.tool()
+def split_merged_options(
+    task_id: str,
+    question_ids: list[str] | None = None,
+    dry_run: bool = True,
+    reason: str | None = None,
+    expected_updated_at: str | None = None,
+) -> dict[str, Any]:
+    """从原始识别文本中拆分被合并到一个选项里的 A/B/C/D 选项。默认只预览。"""
+    full = get_review_task_full(task_id, question_ids=question_ids, include_knowledge=False)
+    if not full.get("ok"):
+        return full
+    resolved_task_id = str(full.get("task", {}).get("task_id") or task_id).strip()
+    questions = full.get("questions") if isinstance(full.get("questions"), list) else []
+    wanted = {str(item).strip() for item in (question_ids or []) if str(item).strip()}
+    changed: list[dict[str, Any]] = []
+    updated_questions: list[Any] = []
+    for raw in questions:
+        if not isinstance(raw, dict):
+            updated_questions.append(raw)
+            continue
+        qid = str(raw.get("question_id") or raw.get("id") or raw.get("draft_id") or "").strip()
+        if wanted and qid not in wanted:
+            updated_questions.append(raw)
+            continue
+        existing = _review_options(raw)
+        source = _merged_option_source(raw)
+        split_options = _split_merged_option_text(source)
+        if len(split_options) < 2 or len(split_options) <= len(existing):
+            updated_questions.append(raw)
+            continue
+        updated = dict(raw)
+        raw_options = raw.get("options") if raw.get("options") is not None else raw.get("choices")
+        updated["options"] = _build_split_options(raw_options, split_options)
+        updated_questions.append(updated)
+        changed.append(
+            {
+                "question_id": qid,
+                "source_preview": _preview_text(source, 240),
+                "options": [{"label": label, "text": text} for label, text in split_options],
+            }
+        )
+
+    if not dry_run and changed:
+        try:
+            _update_review_task_questions(
+                resolved_task_id,
+                updated_questions,
+                changed,
+                kind="split_merged_options",
+                reason=reason,
+                expected_updated_at=expected_updated_at,
+            )
+        except ReviewTaskConflictError as exc:
+            return _tool_error(
+                "REVIEW_TASK_CONFLICT",
+                str(exc),
+                field="expected_updated_at",
+                task_id=exc.task_id,
+                expected_updated_at=exc.expected,
+                current_updated_at=exc.current,
+                next_tools=["get_review_task_full", "validate_review_task"],
+            )
+    validation = None
+    if not dry_run and changed:
+        validation = validate_review_task(resolved_task_id, question_ids=question_ids)
+    return {
+        "ok": True,
+        "task_id": resolved_task_id,
+        "dry_run": dry_run,
+        "changed_count": len(changed),
+        "items": changed,
+        "validation": validation,
+        "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
+        "manual_action_required": bool((validation or {}).get("risk_count")) if isinstance(validation, dict) else False,
+        "workflow": (validation or {}).get("workflow") if isinstance(validation, dict) else None,
+        "message": "预览完成，未写入当前草稿。" if dry_run else (
+            "已拆分合并选项，但仍有风险需要继续处理。"
+            if isinstance(validation, dict) and validation.get("risk_count")
+            else "已拆分合并选项并通过复核。"
+        ),
+    }
+
+
+@server.tool()
+def deduplicate_review_task_questions(
+    task_id: str,
+    dry_run: bool = True,
+    reason: str | None = None,
+    expected_updated_at: str | None = None,
+) -> dict[str, Any]:
+    """删除当前审核草稿中内容完全一致的重复题；默认只预览。
+
+    仅在题型、题干、选项、答案、解析和来源都一致时才判为重复，图片占位符 ID
+    的差异不会阻止识别。每组保留导入顺序最靠前的一题。
+    """
+    full = get_review_task_full(task_id, include_knowledge=False)
+    if not full.get("ok"):
+        return full
+    resolved_task_id = str(full.get("task", {}).get("task_id") or task_id).strip()
+    questions = full.get("questions") if isinstance(full.get("questions"), list) else []
+    groups: dict[tuple[Any, ...], list[tuple[str, Any]]] = {}
+    for raw in questions:
+        if not isinstance(raw, dict):
+            continue
+        qid = str(raw.get("question_id") or raw.get("id") or raw.get("draft_id") or "").strip()
+        signature = _review_exact_duplicate_signature(raw)
+        if qid and signature is not None:
+            groups.setdefault(signature, []).append((qid, raw))
+
+    duplicate_groups = [items for items in groups.values() if len(items) > 1]
+    removed_ids = {qid for items in duplicate_groups for qid, _raw in items[1:]}
+    kept_ids = {items[0][0] for items in duplicate_groups}
+    items = [
+        {
+            "kept_question_id": entries[0][0],
+            "removed_question_ids": [qid for qid, _raw in entries[1:]],
+            "count": len(entries),
+        }
+        for entries in duplicate_groups
+    ]
+    updated_questions = [
+        raw for raw in questions
+        if not isinstance(raw, dict)
+        or str(raw.get("question_id") or raw.get("id") or raw.get("draft_id") or "").strip() not in removed_ids
+    ]
+    if not dry_run and removed_ids:
+        try:
+            _update_review_task_questions(
+                resolved_task_id,
+                updated_questions,
+                items,
+                kind="deduplicate_review_questions",
+                reason=reason,
+                expected_updated_at=expected_updated_at,
+            )
+        except ReviewTaskConflictError as exc:
+            return _tool_error(
+                "REVIEW_TASK_CONFLICT",
+                str(exc),
+                field="expected_updated_at",
+                task_id=exc.task_id,
+                expected_updated_at=exc.expected,
+                current_updated_at=exc.current,
+                next_tools=["get_review_task_full", "deduplicate_review_task_questions", "validate_review_task"],
+            )
+    validation = validate_review_task(resolved_task_id) if not dry_run and removed_ids else None
+    return {
+        "ok": True,
+        "task_id": resolved_task_id,
+        "dry_run": dry_run,
+        "duplicate_group_count": len(duplicate_groups),
+        "removed_count": len(removed_ids),
+        "kept_count": len(kept_ids),
+        "remaining_question_count": len(updated_questions),
+        "items": items,
+        "validation": validation,
+        "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
+        "message": (
+            "重复题预览完成，未写入当前草稿。"
+            if dry_run
+            else f"已删除 {len(removed_ids)} 道内容完全重复的审核草稿题，保留每组首题。"
+        ),
     }
 
 
@@ -1982,6 +4857,7 @@ def update_review_task_draft(
     updates: list[dict[str, Any]],
     dry_run: bool = True,
     reason: str | None = None,
+    expected_updated_at: str | None = None,
 ) -> dict[str, Any]:
     """按题号直接更新当前校对草稿的字段。默认预览，不会生成新校对任务。"""
     if len(updates) > 100:
@@ -1989,10 +4865,12 @@ def update_review_task_draft(
     full = get_review_task_full(task_id)
     if not full.get("ok"):
         return full
+    resolved_task_id = str(full.get("task", {}).get("task_id") or task_id).strip()
     allowed_fields = {
         "title",
         "stem",
         "question_body",
+        "figures",
         "options",
         "answer",
         "analysis",
@@ -2074,20 +4952,43 @@ def update_review_task_draft(
         preview_items.append({"question_id": qid, "before": before, "after": after, "status": "changed" if changed else "unchanged"})
 
     if not dry_run and changed_count:
-        _update_review_task_questions(
-            task_id,
-            updated_questions,
-            [item for item in preview_items if item["status"] == "changed"],
-            kind="draft_update",
-            reason=reason,
-        )
+        try:
+            _update_review_task_questions(
+                resolved_task_id,
+                updated_questions,
+                [item for item in preview_items if item["status"] == "changed"],
+                kind="draft_update",
+                reason=reason,
+                expected_updated_at=expected_updated_at,
+            )
+        except ReviewTaskConflictError as exc:
+            return _tool_error(
+                "REVIEW_TASK_CONFLICT",
+                str(exc),
+                field="expected_updated_at",
+                task_id=exc.task_id,
+                expected_updated_at=exc.expected,
+                current_updated_at=exc.current,
+                next_tools=["get_review_task_full", "validate_review_task"],
+            )
+    validation = None
+    if not dry_run and changed_count:
+        validation = validate_review_task(resolved_task_id)
     return {
         "ok": True,
-        "task_id": str(task_id).strip(),
+        "task_id": resolved_task_id,
         "dry_run": dry_run,
         "changed_count": changed_count,
         "items": preview_items,
-        "message": "预览完成，未写入当前草稿。" if dry_run else "已直接更新当前校对草稿。",
+        "validation": validation,
+        "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
+        "manual_action_required": bool((validation or {}).get("risk_count")) if isinstance(validation, dict) else False,
+        "workflow": (validation or {}).get("workflow") if isinstance(validation, dict) else None,
+        "message": "预览完成，未写入当前草稿。" if dry_run else (
+            "已更新当前校对草稿，但仍有风险需要继续处理。"
+            if isinstance(validation, dict) and validation.get("risk_count")
+            else "已更新当前校对草稿并通过复核。"
+        ),
     }
 
 
@@ -2155,6 +5056,62 @@ def list_question_tags(
 
 
 @server.tool()
+def diagnose_tag_maintenance(
+    query: str | None = None,
+    limit: int = 50,
+    min_similarity: float = 0.86,
+) -> dict[str, Any]:
+    """诊断正式题库标签混乱：近义/重复标签、未使用标签。只读。"""
+    try:
+        return _diagnose_tag_maintenance(
+            query=str(query or "").strip() or None,
+            limit=min(max(int(limit or 50), 1), 200),
+            min_similarity=max(min(float(min_similarity or 0.86), 1.0), 0.5),
+            db_path=_formal_db_path(),
+        )
+    except (FileNotFoundError, sqlite3.Error, ValueError) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
+
+
+@server.tool()
+def suggest_question_tags(question_ids: list[str]) -> dict[str, Any]:
+    """根据方法索引和高置信内容规则，为题目建议可补充的教学标签。只读。"""
+    try:
+        return _suggest_question_tags(
+            question_ids=question_ids,
+            db_path=_formal_db_path(),
+        )
+    except (FileNotFoundError, sqlite3.Error, ValueError) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
+
+
+@server.tool()
+def maintain_question_tags(
+    question_ids: list[str] | None = None,
+    add_tags: list[str] | None = None,
+    remove_tags: list[str] | None = None,
+    merge_map: dict[str, list[str]] | None = None,
+    dry_run: bool = True,
+    reason: str | None = None,
+    create_catalog_tags: bool = True,
+) -> dict[str, Any]:
+    """新增、删除或合并正式题库标签。默认只预览；dry_run=false 必须填写 reason。"""
+    try:
+        return _maintain_question_tags(
+            question_ids=question_ids or [],
+            add_tags=add_tags or [],
+            remove_tags=remove_tags or [],
+            merge_map=merge_map or {},
+            dry_run=bool(dry_run),
+            reason=reason,
+            create_catalog_tags=bool(create_catalog_tags),
+            db_path=_formal_db_path(),
+        )
+    except (FileNotFoundError, sqlite3.Error, ValueError) as exc:
+        return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
+
+
+@server.tool()
 def list_change_batches(
     change_type: str | None = None,
     status: str | None = None,
@@ -2182,12 +5139,27 @@ def rollback_change_batch(
     allow_conflicts: bool = False,
 ) -> dict[str, Any]:
     """按审计批次回滚正式库变更。默认只预览；确认后 dry_run=false 才执行。"""
-    return _change_audit_service().rollback_batch(
+    result = _change_audit_service().rollback_batch(
         batch_id,
         dry_run=dry_run,
         reason=reason,
         allow_conflicts=allow_conflicts,
     )
+    if not result.get("ok") or dry_run or result.get("change_type") != "return_to_review":
+        return result
+    with _connect_formal_write_db() as conn:
+        _ensure_review_queue_outbox_schema(conn)
+        cursor = conn.execute(
+            """
+            UPDATE review_queue_outbox
+            SET delivery_status = 'cancelled', last_error = 'Cancelled because the change batch was rolled back.'
+            WHERE audit_batch_id = ? AND delivery_status != 'delivered'
+            """,
+            (batch_id,),
+        )
+        conn.commit()
+    result["cancelled_outbox_count"] = cursor.rowcount
+    return result
 
 
 @server.tool()
@@ -2306,13 +5278,18 @@ def return_question_to_review(
     question_id: str,
     reason: str = "题目需要回炉重造",
     dry_run: bool = True,
+    operation_id: str | None = None,
 ) -> dict[str, Any]:
-    """受控把正式题库题目打回审核库校对中心。默认只预览；确认后 dry_run=false 才执行并审计。"""
+    """受控把正式题库题目打回审核库，并以持久化 outbox 保证可重试投递。"""
     qid = str(question_id or "").strip()
     if not qid:
         return {"ok": False, "error": "question_id 不能为空。"}
+    requested_operation_id = str(operation_id or "").strip()
+    if requested_operation_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", requested_operation_id):
+        return _tool_error("INVALID_ARGUMENT", "operation_id 仅允许字母、数字、下划线和连字符，长度不超过 80。", field="operation_id")
 
     with _connect_formal_write_db() as conn:
+        _ensure_review_queue_outbox_schema(conn)
         row = conn.execute(
             """
             SELECT question_id, canonical_title, status, review_status, review_comment
@@ -2324,7 +5301,26 @@ def return_question_to_review(
         if row is None:
             return {"ok": False, "status": "missing", "question_id": qid, "error": "题目不存在。"}
 
-        review_id = f"REV-{_short_id()}"
+        active_outbox = conn.execute(
+            """
+            SELECT operation_id, review_id, audit_batch_id, delivery_status
+            FROM review_queue_outbox
+            WHERE question_id = ? AND delivery_status != 'delivered'
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (qid,),
+        ).fetchone()
+        resolved_operation_id = requested_operation_id or (
+            str(active_outbox["operation_id"]) if active_outbox is not None else f"RTREV-{_short_id()}"
+        )
+        existing_outbox = conn.execute(
+            """
+            SELECT operation_id, review_id, audit_batch_id, delivery_status
+            FROM review_queue_outbox WHERE operation_id = ?
+            """,
+            (resolved_operation_id,),
+        ).fetchone()
+        review_id = str(existing_outbox["review_id"]) if existing_outbox is not None else f"REV-{_short_id()}"
         item = {
             "question_id": qid,
             "title": row["canonical_title"],
@@ -2337,10 +5333,18 @@ def return_question_to_review(
             "before_value": {"status": row["status"], "review_status": row["review_status"]},
             "after_value": {"status": "待校对", "review_status": "reviewing"},
         }
-        if not dry_run:
+        if dry_run:
+            batch_id = None
+        elif existing_outbox is not None:
+            batch_id = existing_outbox["audit_batch_id"]
+        else:
             _ensure_change_audit_schema(conn)
             payload_json = json.dumps(
-                {"source": "claude_mcp", "action": "return_to_review"},
+                {
+                    "source": "claude_mcp",
+                    "action": "return_to_review",
+                    "operation_id": resolved_operation_id,
+                },
                 ensure_ascii=False,
             )
             conn.execute(
@@ -2362,31 +5366,58 @@ def return_question_to_review(
                 field_name="questions.status",
                 risk_level="medium",
             )
+            conn.execute(
+                """
+                INSERT INTO review_queue_outbox (
+                    operation_id, review_id, question_id, reason, payload_json, audit_batch_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (resolved_operation_id, review_id, qid, reason, payload_json, batch_id),
+            )
             conn.commit()
-            with _connect_review_db() as review_conn:
-                review_conn.execute(
-                    """
-                    INSERT OR REPLACE INTO review_queue (
-                        review_id, entity_type, entity_id, queue_type, status,
-                        priority, reason, payload_json, created_at, updated_at
-                    ) VALUES (?, 'question', ?, 'rework', 'pending', 5, ?, ?,
-                              CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    """,
-                    (review_id, qid, reason, payload_json),
-                )
-                review_conn.commit()
-        else:
-            batch_id = None
+    delivery = _deliver_review_queue_outbox(resolved_operation_id) if not dry_run else None
 
     return {
         "ok": True,
         "dry_run": dry_run,
+        "operation_id": resolved_operation_id,
         "canonical_database_path": str(_formal_db_path()),
         "review_database_path": str(_review_db_path()),
         "audit_batch_id": batch_id,
+        "delivery_status": delivery["delivery_status"] if delivery else "preview",
+        "delivery": delivery,
         "requires_confirmation": dry_run,
         "item": item,
-        "message": "预览完成，未写入数据库；确认后才可 dry_run=false。" if dry_run else "已更新正式题库状态，并送入审核库校对队列。",
+        "message": "预览完成，未写入数据库；确认后才可 dry_run=false。" if dry_run else (
+            "已更新正式题库状态，并送入审核库校对队列。" if delivery and delivery.get("ok")
+            else "已更新正式题库状态；审核队列将由对账工具重试投递。"
+        ),
+    }
+
+
+@server.tool()
+def reconcile_review_queue_outbox(limit: int = 20) -> dict[str, Any]:
+    """重试投递尚未进入审核库的正式题库回炉操作。不会重复修改正式题目。"""
+    safe_limit = min(max(int(limit or 20), 1), 100)
+    with _connect_formal_write_db() as conn:
+        _ensure_review_queue_outbox_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT operation_id FROM review_queue_outbox
+            WHERE delivery_status = 'pending'
+            ORDER BY created_at ASC LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        conn.commit()
+    deliveries = [_deliver_review_queue_outbox(str(row["operation_id"])) for row in rows]
+    delivered = sum(1 for item in deliveries if item.get("delivery_status") == "delivered")
+    return {
+        "ok": all(item.get("ok") for item in deliveries),
+        "attempted_count": len(deliveries),
+        "delivered_count": delivered,
+        "pending_count": len(deliveries) - delivered,
+        "items": deliveries,
     }
 
 
@@ -2549,6 +5580,646 @@ def find_similar_questions(
     return _dump_model(result)
 
 
+def _canonical_duplicate_candidates(
+    *,
+    prefer_persisted_hashes: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build conservative exact-duplicate groups from canonical question content."""
+    # Once the canonical hashes have been backfilled, a duplicate scan does
+    # not need to normalise every stem and option again.  Keep the complete
+    # calculation as the fallback for an incomplete or legacy database, so a
+    # scan remains correct before the one-time backfill has happened.
+    if prefer_persisted_hashes:
+        with _connect_formal_read_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT q.question_id, q.question_type, q.status, q.created_at, q.content_hash,
+                       qti.title_text, qti.stem_text, qti.options_json, qti.answer_text,
+                       qti.source_text
+                FROM questions q
+                JOIN question_text_index qti ON qti.question_id = q.question_id
+                """
+            ).fetchall()
+        by_fingerprint: dict[str, list[dict[str, Any]]] = {}
+        hash_updates: list[dict[str, Any]] = []
+        for row in rows:
+            fingerprint = str(row["content_hash"] or "").strip()
+            if not fingerprint:
+                fingerprint = canonical_question_fingerprint(
+                    question_type=row["question_type"],
+                    title=row["title_text"],
+                    stem=row["stem_text"],
+                    options=row["options_json"],
+                    answer=row["answer_text"],
+                ) or ""
+                if fingerprint:
+                    hash_updates.append(
+                        {
+                            "question_id": str(row["question_id"]),
+                            "before_value": None,
+                            "after_value": fingerprint,
+                            "status": "changed",
+                        }
+                    )
+            if not fingerprint:
+                continue
+            by_fingerprint.setdefault(fingerprint, []).append(
+                {
+                    "question_id": str(row["question_id"]),
+                    "title": str(row["title_text"] or ""),
+                    "status": str(row["status"] or ""),
+                    "source": str(row["source_text"] or ""),
+                    "created_at": str(row["created_at"] or ""),
+                }
+            )
+        return _canonical_duplicate_groups_from_members(by_fingerprint), hash_updates
+
+    with _connect_formal_read_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT q.question_id, q.question_type, q.status, q.created_at, q.content_hash,
+                   qti.title_text, qti.stem_text, qti.options_json, qti.answer_text,
+                   qti.source_text
+            FROM questions q
+            JOIN question_text_index qti ON qti.question_id = q.question_id
+            """
+        ).fetchall()
+    by_fingerprint: dict[str, list[dict[str, Any]]] = {}
+    hash_updates: list[dict[str, Any]] = []
+    for row in rows:
+        fingerprint = canonical_question_fingerprint(
+            question_type=row["question_type"],
+            title=row["title_text"],
+            stem=row["stem_text"],
+            options=row["options_json"],
+            answer=row["answer_text"],
+        )
+        if not fingerprint:
+            continue
+        item = {
+            "question_id": str(row["question_id"]),
+            "title": str(row["title_text"] or ""),
+            "status": str(row["status"] or ""),
+            "source": str(row["source_text"] or ""),
+            "created_at": str(row["created_at"] or ""),
+        }
+        by_fingerprint.setdefault(fingerprint, []).append(item)
+        existing_hash = str(row["content_hash"] or "")
+        if existing_hash != fingerprint:
+            hash_updates.append({
+                "question_id": item["question_id"],
+                "before_value": existing_hash or None,
+                "after_value": fingerprint,
+                "status": "changed",
+            })
+    groups = _canonical_duplicate_groups_from_members(by_fingerprint)
+    return groups, hash_updates
+
+
+def _canonical_duplicate_groups_from_members(
+    by_fingerprint: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for fingerprint, members in by_fingerprint.items():
+        if len(members) < 2:
+            continue
+        ordered_members = sorted(members, key=lambda item: (item["created_at"], item["question_id"]))
+        groups.append(
+            {
+                "group_id": f"DUP-{fingerprint[:12]}",
+                "content_hash": fingerprint,
+                "recommended_primary_question_id": ordered_members[0]["question_id"],
+                "duplicate_question_ids": [item["question_id"] for item in ordered_members[1:]],
+                "members": ordered_members,
+                "member_count": len(ordered_members),
+            }
+        )
+    groups.sort(key=lambda item: (-int(item["member_count"]), item["group_id"]))
+    return groups
+
+
+def _ensure_canonical_duplicate_archive_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS canonical_duplicate_archives (
+            archive_id TEXT PRIMARY KEY,
+            merge_batch_id TEXT NOT NULL,
+            primary_question_id TEXT NOT NULL,
+            duplicate_question_id TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            previous_status TEXT,
+            previous_review_comment TEXT,
+            primary_tags_before_json TEXT NOT NULL DEFAULT '[]',
+            primary_tags_after_json TEXT NOT NULL DEFAULT '[]',
+            moved_source_ids_json TEXT NOT NULL DEFAULT '[]',
+            added_knowledge_link_ids_json TEXT NOT NULL DEFAULT '[]',
+            added_asset_link_ids_json TEXT NOT NULL DEFAULT '[]',
+            state TEXT NOT NULL DEFAULT 'archived',
+            reason TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            restored_at TEXT,
+            restore_reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_canonical_duplicate_archives_batch
+            ON canonical_duplicate_archives(merge_batch_id, state);
+        CREATE INDEX IF NOT EXISTS idx_canonical_duplicate_archives_primary
+            ON canonical_duplicate_archives(primary_question_id, state);
+        """
+    )
+
+
+def _canonical_duplicate_merge_plan(
+    primary_question_id: str,
+    duplicate_question_ids: list[str],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    primary_id = str(primary_question_id or "").strip()
+    duplicate_ids = list(dict.fromkeys(str(item).strip() for item in duplicate_question_ids if str(item).strip()))
+    if not primary_id:
+        return None, _tool_error("INVALID_ARGUMENT", "primary_question_id 不能为空。", field="primary_question_id")
+    if not duplicate_ids:
+        return None, _tool_error("INVALID_ARGUMENT", "duplicate_question_ids 不能为空。", field="duplicate_question_ids")
+    if primary_id in duplicate_ids:
+        return None, _tool_error("INVALID_ARGUMENT", "主题题不能同时出现在重复题列表中。", field="duplicate_question_ids")
+
+    with _connect_formal_read_db() as conn:
+        placeholders = ",".join("?" for _ in [primary_id, *duplicate_ids])
+        rows = conn.execute(
+            f"""
+            SELECT q.question_id, q.question_type, q.status, q.review_comment, q.created_at,
+                   qti.title_text, qti.stem_text, qti.options_json, qti.answer_text, qti.tags_json
+            FROM questions q
+            JOIN question_text_index qti ON qti.question_id = q.question_id
+            WHERE q.question_id IN ({placeholders})
+            """,
+            [primary_id, *duplicate_ids],
+        ).fetchall()
+        by_id = {str(row["question_id"]): row for row in rows}
+        if primary_id not in by_id:
+            return None, _tool_error("QUESTION_NOT_FOUND", f"主题题不存在：{primary_id}。", field="primary_question_id")
+        missing_ids = [item for item in duplicate_ids if item not in by_id]
+        if missing_ids:
+            return None, _tool_error("QUESTION_NOT_FOUND", f"重复题不存在：{'、'.join(missing_ids)}。", field="duplicate_question_ids")
+
+        def fingerprint(row: sqlite3.Row) -> str | None:
+            return canonical_question_fingerprint(
+                question_type=row["question_type"], title=row["title_text"], stem=row["stem_text"],
+                options=row["options_json"], answer=row["answer_text"],
+            )
+
+        primary_row = by_id[primary_id]
+        primary_hash = fingerprint(primary_row)
+        if not primary_hash:
+            return None, _tool_error("DUPLICATE_SIGNATURE_INCOMPLETE", "主题题关键信息不足，不能安全合并。", field="primary_question_id")
+        non_matching = [item for item in duplicate_ids if fingerprint(by_id[item]) != primary_hash]
+        if non_matching:
+            return None, _tool_error(
+                "DUPLICATE_SIGNATURE_MISMATCH",
+                f"这些题与主题题不是完全重复，不能合并：{'、'.join(non_matching)}。",
+                field="duplicate_question_ids",
+            )
+        already_archived = (
+            conn.execute(
+                f"""
+                SELECT duplicate_question_id FROM canonical_duplicate_archives
+                WHERE duplicate_question_id IN ({','.join('?' for _ in duplicate_ids)}) AND state = 'archived'
+                """,
+                duplicate_ids,
+            ).fetchall()
+            if _table_exists(conn, "canonical_duplicate_archives")
+            else []
+        )
+        if already_archived:
+            ids = [str(row["duplicate_question_id"]) for row in already_archived]
+            return None, _tool_error("DUPLICATE_ALREADY_ARCHIVED", f"这些重复题已归档：{'、'.join(ids)}。")
+
+        primary_tags = _parse_tags(primary_row["tags_json"])
+        merged_tags = list(primary_tags)
+        for duplicate_id in duplicate_ids:
+            for tag in _parse_tags(by_id[duplicate_id]["tags_json"]):
+                if tag not in merged_tags:
+                    merged_tags.append(tag)
+
+        primary_topics = {
+            str(row["topic3_id"])
+            for row in conn.execute("SELECT topic3_id FROM question_knowledge_points WHERE question_id = ?", (primary_id,)).fetchall()
+        }
+        planned_topics: list[str] = []
+        skipped_topics: list[str] = []
+        for duplicate_id in duplicate_ids:
+            for row in conn.execute(
+                "SELECT topic3_id FROM question_knowledge_points WHERE question_id = ? ORDER BY rank", (duplicate_id,)
+            ).fetchall():
+                topic_id = str(row["topic3_id"])
+                if topic_id in primary_topics or topic_id in planned_topics or topic_id in skipped_topics:
+                    continue
+                if len(primary_topics) + len(planned_topics) < 3:
+                    planned_topics.append(topic_id)
+                else:
+                    skipped_topics.append(topic_id)
+
+        primary_assets = {
+            str(row["asset_id"])
+            for row in conn.execute("SELECT asset_id FROM question_assets WHERE question_id = ?", (primary_id,)).fetchall()
+        } if _table_exists(conn, "question_assets") else set()
+        planned_assets: list[str] = []
+        if _table_exists(conn, "question_assets"):
+            for duplicate_id in duplicate_ids:
+                for row in conn.execute("SELECT asset_id FROM question_assets WHERE question_id = ? ORDER BY sort_order", (duplicate_id,)).fetchall():
+                    asset_id = str(row["asset_id"])
+                    if asset_id not in primary_assets and asset_id not in planned_assets:
+                        planned_assets.append(asset_id)
+
+        source_count = 0
+        if _table_exists(conn, "question_sources"):
+            source_count = int(conn.execute(
+                f"SELECT COUNT(*) FROM question_sources WHERE question_id IN ({','.join('?' for _ in duplicate_ids)})", duplicate_ids
+            ).fetchone()[0])
+
+    return {
+        "primary_question_id": primary_id,
+        "duplicate_question_ids": duplicate_ids,
+        "content_hash": primary_hash,
+        "primary_tags_before": primary_tags,
+        "primary_tags_after": merged_tags,
+        "knowledge_topic3_ids_to_add": planned_topics,
+        "knowledge_topic3_ids_not_merged_due_to_limit": skipped_topics,
+        "asset_ids_to_add": planned_assets,
+        "source_records_to_reassign": source_count,
+        "items": [
+            {
+                "question_id": duplicate_id,
+                "before_status": by_id[duplicate_id]["status"],
+                "before_review_comment": by_id[duplicate_id]["review_comment"],
+                "after_status": "archived_duplicate",
+                "status": "changed",
+            }
+            for duplicate_id in duplicate_ids
+        ],
+    }, None
+
+
+@server.tool()
+def scan_canonical_duplicate_questions(limit: int = 100) -> dict[str, Any]:
+    """扫描正式题库的完全重复候选；只读，不删除、不归档、不修改题目。"""
+    safe_limit = min(max(int(limit or 100), 1), 500)
+    groups, hash_updates = _canonical_duplicate_candidates(prefer_persisted_hashes=True)
+    return {
+        "ok": True,
+        "database_scope": "canonical_read_only",
+        "match_rule": "题型、题干、选项和答案规范化后完全一致；解析与来源不参与判重。",
+        "group_count": len(groups),
+        "duplicate_question_count": sum(int(group["member_count"]) - 1 for group in groups),
+        "content_hash_backfill_count": sum(1 for item in hash_updates if not item.get("before_value")),
+        "stale_content_hash_count": sum(1 for item in hash_updates if item.get("before_value")),
+        "groups": groups[:safe_limit],
+        "next_step": "先人工核对每组，再决定保留题；调用 backfill_canonical_question_hashes 可让后续入库自动拦截同一内容。",
+    }
+
+
+@server.tool()
+def backfill_canonical_question_hashes(
+    dry_run: bool = True,
+    reason: str = "为正式题库建立重复题内容指纹",
+    overwrite_existing: bool = False,
+) -> dict[str, Any]:
+    """为正式题库回填内容指纹；可选择重算旧规则产生的既有指纹。"""
+    _groups, candidates = _canonical_duplicate_candidates()
+    stale_updates = [item for item in candidates if item.get("before_value")]
+    updates = candidates if overwrite_existing else [item for item in candidates if not item.get("before_value")]
+    preview = {
+        "ok": True,
+        "database_scope": "canonical",
+        "dry_run": dry_run,
+        "overwrite_existing": overwrite_existing,
+        "changed_count": len(updates),
+        "stale_existing_count": len(stale_updates),
+        "requires_confirmation": dry_run and bool(updates),
+        "items": updates[:100],
+        "message": (
+            "预览完成，未写入正式题库。"
+            if dry_run else "已回填正式题库内容指纹；后续同内容入库会被自动拦截。"
+        ),
+    }
+    if dry_run or not updates:
+        return preview
+
+    with _connect_formal_write_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _ensure_change_audit_schema(conn)
+        for item in updates:
+            conn.execute(
+                """
+                UPDATE questions
+                SET content_hash = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE question_id = ?
+                """,
+                (item["after_value"], item["question_id"]),
+            )
+        batch_id = _record_change_batch(
+            conn,
+            change_type="content_hash_backfill",
+            reason=reason,
+            items=updates,
+            field_name="questions.content_hash",
+            risk_level="low",
+        )
+        conn.commit()
+    return {**preview, "audit_batch_id": batch_id}
+
+
+@server.tool()
+def merge_canonical_duplicate_questions(
+    primary_question_id: str,
+    duplicate_question_ids: list[str],
+    dry_run: bool = True,
+    reason: str = "合并正式题库完全重复题",
+) -> dict[str, Any]:
+    """合并正式题库完全重复题：保留主题题，汇集关联信息，并软归档重复题。"""
+    plan, error = _canonical_duplicate_merge_plan(primary_question_id, duplicate_question_ids)
+    if error:
+        return error
+    assert plan is not None
+    result = {
+        "ok": True,
+        "database_scope": "canonical",
+        "dry_run": dry_run,
+        "requires_confirmation": dry_run,
+        "merge_plan": plan,
+        "message": "预览完成，尚未修改正式题库。" if dry_run else "已合并关联信息并软归档重复题；可用 restore_canonical_duplicate_merge 恢复。",
+    }
+    if dry_run:
+        return result
+
+    with _connect_formal_write_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _ensure_canonical_duplicate_archive_schema(conn)
+        duplicate_ids = list(plan["duplicate_question_ids"])
+        existing_archives = conn.execute(
+            f"SELECT duplicate_question_id FROM canonical_duplicate_archives WHERE duplicate_question_id IN ({','.join('?' for _ in duplicate_ids)}) AND state = 'archived'",
+            duplicate_ids,
+        ).fetchall()
+        if existing_archives:
+            conn.rollback()
+            return _tool_error(
+                "DUPLICATE_ALREADY_ARCHIVED",
+                f"这些重复题已归档：{'、'.join(str(row['duplicate_question_id']) for row in existing_archives)}。",
+            )
+
+        batch_id = _record_change_batch(
+            conn,
+            change_type="canonical_duplicate_merge",
+            reason=reason,
+            items=[
+                {
+                    "question_id": item["question_id"],
+                    "before_value": {"status": item["before_status"], "review_comment": item["before_review_comment"]},
+                    "after_value": {"status": "archived_duplicate", "primary_question_id": plan["primary_question_id"]},
+                    "status": "changed",
+                }
+                for item in plan["items"]
+            ],
+            field_name="questions.status",
+            risk_level="high",
+        )
+        primary_id = str(plan["primary_question_id"])
+        primary_tags_before = list(plan["primary_tags_before"])
+        primary_tags_after = list(plan["primary_tags_after"])
+        if primary_tags_before != primary_tags_after:
+            conn.execute(
+                "UPDATE question_text_index SET tags_json = ?, updated_at = CURRENT_TIMESTAMP WHERE question_id = ?",
+                (json.dumps(primary_tags_after, ensure_ascii=False), primary_id),
+            )
+
+        primary_topics = {
+            str(row["topic3_id"])
+            for row in conn.execute("SELECT topic3_id FROM question_knowledge_points WHERE question_id = ?", (primary_id,)).fetchall()
+        }
+        next_rank = int(conn.execute(
+            "SELECT COALESCE(MAX(rank), 0) FROM question_knowledge_points WHERE question_id = ?", (primary_id,)
+        ).fetchone()[0]) + 1
+        added_knowledge_links: list[str] = []
+        for topic_id in plan["knowledge_topic3_ids_to_add"]:
+            if topic_id in primary_topics or next_rank > 3:
+                continue
+            link_id = f"QKP-{primary_id}-{next_rank}-{_short_id()}"
+            conn.execute(
+                """
+                INSERT INTO question_knowledge_points
+                    (link_id, question_id, topic3_id, rank, source, confidence, note, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'duplicate_merge', 1.0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (link_id, primary_id, topic_id, next_rank, f"Merged from duplicate batch {batch_id}"),
+            )
+            added_knowledge_links.append(link_id)
+            primary_topics.add(topic_id)
+            next_rank += 1
+
+        added_asset_links: list[str] = []
+        if _table_exists(conn, "question_assets"):
+            existing_assets = {
+                str(row["asset_id"])
+                for row in conn.execute("SELECT asset_id FROM question_assets WHERE question_id = ?", (primary_id,)).fetchall()
+            }
+            next_asset_order = int(conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) FROM question_assets WHERE question_id = ?", (primary_id,)
+            ).fetchone()[0]) + 1
+            for duplicate_id in duplicate_ids:
+                asset_rows = conn.execute(
+                    """
+                    SELECT asset_id, role, placeholder_key, is_primary, is_verified
+                    FROM question_assets WHERE question_id = ? ORDER BY sort_order, link_id
+                    """,
+                    (duplicate_id,),
+                ).fetchall()
+                for asset_row in asset_rows:
+                    asset_id = str(asset_row["asset_id"])
+                    if asset_id in existing_assets:
+                        continue
+                    link_id = f"QAS-{primary_id}-{_short_id()}"
+                    conn.execute(
+                        """
+                        INSERT INTO question_assets
+                            (link_id, question_id, asset_id, role, sort_order, placeholder_key, is_primary, is_verified, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        """,
+                        (link_id, primary_id, asset_id, asset_row["role"], next_asset_order, asset_row["placeholder_key"], asset_row["is_verified"]),
+                    )
+                    added_asset_links.append(link_id)
+                    existing_assets.add(asset_id)
+                    next_asset_order += 1
+
+        moved_sources: dict[str, list[str]] = {duplicate_id: [] for duplicate_id in duplicate_ids}
+        if _table_exists(conn, "question_sources"):
+            source_rows = conn.execute(
+                f"SELECT source_id, question_id FROM question_sources WHERE question_id IN ({','.join('?' for _ in duplicate_ids)})",
+                duplicate_ids,
+            ).fetchall()
+            for row in source_rows:
+                source_id = str(row["source_id"])
+                duplicate_id = str(row["question_id"])
+                conn.execute("UPDATE question_sources SET question_id = ?, updated_at = CURRENT_TIMESTAMP WHERE source_id = ?", (primary_id, source_id))
+                moved_sources[duplicate_id].append(source_id)
+
+        for item in plan["items"]:
+            duplicate_id = str(item["question_id"])
+            conn.execute(
+                """
+                UPDATE questions
+                SET status = 'archived_duplicate',
+                    review_comment = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE question_id = ?
+                """,
+                (f"Duplicate of {primary_id}; merge batch {batch_id}", duplicate_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO canonical_duplicate_archives (
+                    archive_id, merge_batch_id, primary_question_id, duplicate_question_id, content_hash,
+                    previous_status, previous_review_comment, primary_tags_before_json, primary_tags_after_json,
+                    moved_source_ids_json, added_knowledge_link_ids_json, added_asset_link_ids_json, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"DUPARC-{_short_id()}", batch_id, primary_id, duplicate_id, plan["content_hash"],
+                    item["before_status"], item["before_review_comment"],
+                    json.dumps(primary_tags_before, ensure_ascii=False), json.dumps(primary_tags_after, ensure_ascii=False),
+                    json.dumps(moved_sources[duplicate_id], ensure_ascii=False),
+                    json.dumps(added_knowledge_links, ensure_ascii=False), json.dumps(added_asset_links, ensure_ascii=False), reason,
+                ),
+            )
+        conn.commit()
+    return {**result, "audit_batch_id": batch_id, "archived_count": len(duplicate_ids)}
+
+
+@server.tool()
+def restore_canonical_duplicate_merge(
+    merge_batch_id: str,
+    dry_run: bool = True,
+    reason: str = "恢复重复题合并",
+) -> dict[str, Any]:
+    """恢复一次正式题库重复题合并：撤销软归档并还原该批次移动的关联。"""
+    batch_id = str(merge_batch_id or "").strip()
+    if not batch_id:
+        return _tool_error("INVALID_ARGUMENT", "merge_batch_id 不能为空。", field="merge_batch_id")
+    with _connect_formal_read_db() as conn:
+        if not _table_exists(conn, "canonical_duplicate_archives"):
+            return _tool_error("MERGE_BATCH_NOT_FOUND", "没有可恢复的重复题合并批次。", field="merge_batch_id")
+        rows = conn.execute(
+            "SELECT * FROM canonical_duplicate_archives WHERE merge_batch_id = ? AND state = 'archived' ORDER BY created_at DESC, archive_id DESC",
+            (batch_id,),
+        ).fetchall()
+    if not rows:
+        return _tool_error("MERGE_BATCH_NOT_FOUND", f"不存在可恢复的合并批次：{batch_id}。", field="merge_batch_id")
+    preview_items = [
+        {
+            "question_id": str(row["duplicate_question_id"]),
+            "before_status": "archived_duplicate",
+            "after_status": row["previous_status"],
+            "status": "will_restore",
+        }
+        for row in rows
+    ]
+    result = {
+        "ok": True,
+        "database_scope": "canonical",
+        "merge_batch_id": batch_id,
+        "dry_run": dry_run,
+        "requires_confirmation": dry_run,
+        "items": preview_items,
+        "message": "预览完成，尚未恢复。" if dry_run else "已恢复该批次归档的重复题和关联信息。",
+    }
+    if dry_run:
+        return result
+
+    with _connect_formal_write_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for row in rows:
+            duplicate_id = str(row["duplicate_question_id"])
+            conn.execute(
+                "UPDATE questions SET status = ?, review_comment = ?, updated_at = CURRENT_TIMESTAMP WHERE question_id = ? AND status = 'archived_duplicate'",
+                (row["previous_status"], row["previous_review_comment"], duplicate_id),
+            )
+            source_ids = _decode_json_list(row["moved_source_ids_json"])
+            if source_ids and _table_exists(conn, "question_sources"):
+                conn.execute(
+                    f"UPDATE question_sources SET question_id = ?, updated_at = CURRENT_TIMESTAMP WHERE source_id IN ({','.join('?' for _ in source_ids)})",
+                    [duplicate_id, *source_ids],
+                )
+        first = rows[-1]
+        primary_id = str(first["primary_question_id"])
+        tags_after = str(rows[0]["primary_tags_after_json"])
+        tags_before = str(first["primary_tags_before_json"])
+        current_tags = conn.execute("SELECT tags_json FROM question_text_index WHERE question_id = ?", (primary_id,)).fetchone()
+        if current_tags is not None and str(current_tags["tags_json"] or "[]") == tags_after:
+            conn.execute("UPDATE question_text_index SET tags_json = ?, updated_at = CURRENT_TIMESTAMP WHERE question_id = ?", (tags_before, primary_id))
+        link_ids = list(dict.fromkeys(
+            str(link_id)
+            for row in rows
+            for link_id in _decode_json_list(row["added_knowledge_link_ids_json"])
+            if str(link_id)
+        ))
+        if link_ids:
+            conn.execute(f"DELETE FROM question_knowledge_points WHERE link_id IN ({','.join('?' for _ in link_ids)})", link_ids)
+        asset_link_ids = list(dict.fromkeys(
+            str(link_id)
+            for row in rows
+            for link_id in _decode_json_list(row["added_asset_link_ids_json"])
+            if str(link_id)
+        ))
+        if asset_link_ids and _table_exists(conn, "question_assets"):
+            conn.execute(f"DELETE FROM question_assets WHERE link_id IN ({','.join('?' for _ in asset_link_ids)})", asset_link_ids)
+        conn.execute(
+            "UPDATE canonical_duplicate_archives SET state = 'restored', restored_at = CURRENT_TIMESTAMP, restore_reason = ? WHERE merge_batch_id = ? AND state = 'archived'",
+            (reason, batch_id),
+        )
+        conn.commit()
+    return result
+
+
+@server.tool()
+def list_canonical_duplicate_merges(
+    state: Literal["archived", "restored", "all"] = "archived",
+    limit: int = 50,
+) -> dict[str, Any]:
+    """列出正式题库重复题合并批次、主题题和可恢复状态；只读。"""
+    safe_limit = min(max(int(limit or 50), 1), 200)
+    with _connect_formal_read_db() as conn:
+        if not _table_exists(conn, "canonical_duplicate_archives"):
+            return {"ok": True, "database_scope": "canonical_read_only", "items": [], "total": 0}
+        params: list[Any] = []
+        where = ""
+        if state != "all":
+            where = "WHERE state = ?"
+            params.append(state)
+        rows = conn.execute(
+            f"""
+            SELECT merge_batch_id, primary_question_id, state, reason, created_at, restored_at, restore_reason,
+                   GROUP_CONCAT(duplicate_question_id, ',') AS duplicate_question_ids
+            FROM canonical_duplicate_archives
+            {where}
+            GROUP BY merge_batch_id, primary_question_id, state, reason, created_at, restored_at, restore_reason
+            ORDER BY created_at DESC, merge_batch_id DESC
+            LIMIT ?
+            """,
+            [*params, safe_limit],
+        ).fetchall()
+    items = [
+        {
+            "merge_batch_id": str(row["merge_batch_id"]),
+            "primary_question_id": str(row["primary_question_id"]),
+            "duplicate_question_ids": [item for item in str(row["duplicate_question_ids"] or "").split(",") if item],
+            "state": str(row["state"]),
+            "reason": row["reason"],
+            "created_at": row["created_at"],
+            "restored_at": row["restored_at"],
+            "restore_reason": row["restore_reason"],
+        }
+        for row in rows
+    ]
+    return {"ok": True, "database_scope": "canonical_read_only", "items": items, "total": len(items), "limit": safe_limit}
+
+
 @server.tool()
 def submit_ai_generated_review(
     source_text: str,
@@ -2557,6 +6228,21 @@ def submit_ai_generated_review(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """把 AI 生成的试题文本提交到审核工作台草稿。只写草稿，不写正式题库。"""
+    # Large trusted imports are prepared locally as JSON.  Accepting a
+    # project-relative file reference keeps the MCP request small while the
+    # actual write still goes through the normal review-workbench service.
+    # This is intentionally limited to the project tree; arbitrary file reads
+    # are not permitted through this shortcut.
+    file_prefix = "@file:"
+    if source_text.startswith(file_prefix):
+        candidate = (ROOT / source_text.removeprefix(file_prefix).strip()).resolve()
+        try:
+            candidate.relative_to(ROOT.resolve())
+        except ValueError as exc:
+            raise ValueError("导入文件必须位于项目目录内") from exc
+        if not candidate.is_file():
+            raise FileNotFoundError(f"导入文件不存在: {candidate}")
+        source_text = candidate.read_text(encoding="utf-8")
     task = _import_service().create_ai_generated_review_task(
         source_text=source_text,
         source=source,
@@ -2632,9 +6318,12 @@ def submit_ai_clean_job(
 @server.tool()
 def submit_word_export_job(
     lesson_package: dict[str, Any],
-    include_answers: bool = False,
-    include_analysis: bool = False,
+    include_answers: bool | None = None,
+    include_analysis: bool | None = None,
     file_name: str | None = None,
+    template_id: str | None = None,
+    format_spec: dict[str, Any] | None = None,
+    answer_position: Literal["after_question", "end"] | None = None,
     source: str = "physics_vault_mcp",
     session_id: str | None = None,
     operator: str = "MCP user",
@@ -2646,6 +6335,9 @@ def submit_word_export_job(
         include_answers=include_answers,
         include_analysis=include_analysis,
         file_name=file_name,
+        template_id=template_id,
+        format_spec=format_spec,
+        answer_position=answer_position,
         context=_task_action_context(source, session_id, operator),
     )
 
@@ -2866,13 +6558,35 @@ def _submit_export_job(
     export_format: Literal["word", "pptx"],
     lesson_package: dict[str, Any],
     *,
-    include_answers: bool,
-    include_analysis: bool,
+    include_answers: bool | None,
+    include_analysis: bool | None,
     file_name: str | None,
     context: TaskActionContext,
+    template_id: str | None = None,
+    format_spec: dict[str, Any] | None = None,
+    answer_position: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(lesson_package, dict) or not str(lesson_package.get("id") or "").strip():
         return _tool_error("INVALID_ARGUMENT", "lesson_package.id 不能为空。", field="lesson_package.id")
+    if export_format == "word":
+        existing_spec = lesson_package.get("formatSpec") if isinstance(lesson_package.get("formatSpec"), dict) else None
+        resolved_spec = format_spec_for_template(template_id, format_spec if format_spec is not None else (None if template_id else existing_spec))
+        checked = validate_format_spec(resolved_spec)
+        if not checked["ok"]:
+            return checked
+        lesson_package = {
+            **lesson_package,
+            "formatSpec": checked["formatSpec"],
+            "styleConfig": checked["formatSpec"].get("styleConfig") or lesson_package.get("styleConfig") or {},
+            "headerFooter": checked["formatSpec"].get("headerFooter") or lesson_package.get("headerFooter") or {},
+        }
+        output = checked["formatSpec"].get("output") or {}
+        include_answers = bool(output.get("includeAnswers")) if include_answers is None else include_answers
+        include_analysis = bool(output.get("includeAnalysis")) if include_analysis is None else include_analysis
+        answer_position = answer_position or str(output.get("answerPosition") or "after_question")
+    else:
+        include_answers = bool(include_answers)
+        include_analysis = bool(include_analysis)
     service = _task_center_service()
     submitter = getattr(service, "submit_export_job", None)
     if not callable(submitter):
@@ -2888,6 +6602,7 @@ def _submit_export_job(
             lesson_package,
             include_answers=include_answers,
             include_analysis=include_analysis,
+            answer_position=answer_position or "after_question",
             file_name=file_name,
             context=context,
         )
@@ -3038,6 +6753,8 @@ _REVIEW_LATEX_TEXT_KEYS = {
 _REVIEW_MATH_ITALIC_RE = re.compile(
     r"(?<!\*)\*([A-Za-z][A-Za-z0-9_{}\\]*(?:\s*[-+/]\s*[A-Za-z][A-Za-z0-9_{}\\]*)?)\*(?!\*)"
 )
+_REVIEW_SPLIT_MATH_OPERATOR_RE = re.compile(r"(\$[^$\n]*\s)\$(?=\s*[<>=])")
+_REVIEW_TRAILING_ESCAPED_DOLLAR_RE = re.compile(r"\\\$(?=\s*$)")
 
 
 def _clean_latex_value(value: Any, key: str | None = None) -> tuple[Any, int]:
@@ -3055,9 +6772,14 @@ def _clean_latex_value(value: Any, key: str | None = None) -> tuple[Any, int]:
             return f"${expression}$"
 
         cleaned, table_count = _normalize_ocr_tables_in_text(value)
+        cleaned, trailing_count = _REVIEW_TRAILING_ESCAPED_DOLLAR_RE.subn("", cleaned)
+        cleaned, split_count = _REVIEW_SPLIT_MATH_OPERATOR_RE.subn(r"\1", cleaned)
         cleaned = _REVIEW_MATH_ITALIC_RE.sub(replace, cleaned)
         cleaned, delimiter_count = normalize_math_delimiters(cleaned)
-        return cleaned, count + table_count + delimiter_count
+        cleaned, inline_count = repair_unbalanced_inline_math(cleaned)
+        standardized = normalize_standard_latex(cleaned)
+        standard_count = int(standardized != cleaned)
+        return standardized, count + table_count + trailing_count + split_count + delimiter_count + inline_count + standard_count
     if isinstance(value, list):
         cleaned = []
         count = 0
@@ -3161,14 +6883,21 @@ def _update_review_task_questions(
     *,
     kind: str,
     reason: str | None,
+    expected_updated_at: str | None = None,
 ) -> None:
     with _connect_review_db() as conn:
+        # 读取并整体写回 JSON 草稿必须在同一个写事务内，避免自动保存与 MCP 修改互相覆盖。
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT result_json FROM import_pipeline_tasks WHERE task_id = ?",
+            "SELECT result_json, updated_at FROM import_pipeline_tasks WHERE task_id = ?",
             (str(task_id).strip(),),
         ).fetchone()
         if row is None:
             raise ValueError("校对任务不存在。")
+        current_updated_at = str(row["updated_at"] or "")
+        expected = str(expected_updated_at or "").strip()
+        if expected and expected != current_updated_at:
+            raise ReviewTaskConflictError(str(task_id).strip(), expected, current_updated_at)
         result = _parse_json_dict(row["result_json"])
         result["questions"] = updated_questions
         history = result.get("draft_edit_history")
@@ -3292,7 +7021,7 @@ def _preview_text(raw: Any, limit: int = 180) -> str:
     return f"{text[:limit].rstrip()}..."
 
 
-def _review_question_summary(item: Any, index: int) -> dict[str, Any]:
+def _review_question_summary(item: Any, index: int, risk_count: int | None = None) -> dict[str, Any]:
     if not isinstance(item, dict):
         return {"index": index, "raw_preview": _preview_text(item)}
     question_id = str(item.get("question_id") or item.get("id") or item.get("draft_id") or "").strip()
@@ -3301,6 +7030,7 @@ def _review_question_summary(item: Any, index: int) -> dict[str, Any]:
     tags = item.get("tags") or item.get("tag_names") or []
     knowledge = item.get("knowledge_points") or item.get("knowledge_point") or item.get("module") or ""
     risks = item.get("risks") or item.get("warnings") or item.get("validation_warnings") or []
+    risk_list = risks if isinstance(risks, list) else [str(risks)]
     return {
         "index": index,
         "question_id": question_id,
@@ -3312,7 +7042,8 @@ def _review_question_summary(item: Any, index: int) -> dict[str, Any]:
         "tags": _normalize_tags(tags),
         "knowledge_points": knowledge,
         "status": item.get("status"),
-        "risks": risks if isinstance(risks, list) else [str(risks)],
+        "risk_count": len(risk_list) if risk_count is None else risk_count,
+        "risks": risk_list,
     }
 
 

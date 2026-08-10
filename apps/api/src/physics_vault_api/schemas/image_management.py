@@ -37,6 +37,30 @@ class AddImageRequest(BaseModel):
     is_primary: bool = False
 
 
+class AddCachedImageRequest(BaseModel):
+    relative_path: str = Field(..., min_length=1, max_length=1000)
+    role: str = "stem"
+    sort_order: int | None = None
+    is_primary: bool = False
+
+
+class CachedImageAsset(BaseModel):
+    """One temporary image that can be inserted into a question."""
+
+    relative_path: str
+    filename: str
+    file_path: str
+    mime_type: str = "application/octet-stream"
+    size: int = 0
+
+
+class CacheUploadResponse(BaseModel):
+    """Images extracted from files dropped into the temporary image cache."""
+
+    images: list[CachedImageAsset] = Field(default_factory=list)
+    skipped: list[str] = Field(default_factory=list)
+
+
 class ReplaceImageRequest(BaseModel):
     old_asset_id: str
     new_asset_id: str

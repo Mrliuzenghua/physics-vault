@@ -58,7 +58,9 @@ class AssetsManagerService:
         resolved_db = Path(db_path) if db_path else default_db_path()
         self._db_path = resolved_db if resolved_db.exists() else None
         self._scan_cache: tuple[float, list[AssetItem], bool] | None = None
-        self._cache_ttl_seconds = 10.0
+        # Paging, sorting and searching should not rescan thousands of image files.
+        # Explicit refreshes and mutations invalidate this cache immediately.
+        self._cache_ttl_seconds = 60.0
         self._analysis_cache: dict[str, tuple[float, StorageAnalysisResponse]] = {}
 
     # ------------------------------------------------------------------
@@ -162,6 +164,34 @@ class AssetsManagerService:
             active_batches=active_batches,
         )
 
+    def get_unused_cache_cleanup_preview(self, batch_id: str = "") -> CacheCleanupPreviewResponse:
+        """Preview cleanup for every unused asset, regardless of storage folder."""
+        assets, reference_scan_available = self._scan_assets(force_refresh=True)
+        cache_assets = [
+            asset for asset in assets
+            if not asset.is_referenced and (not batch_id or asset.batch_id == batch_id)
+        ]
+        batch_ids = {asset.batch_id for asset in cache_assets if asset.batch_id}
+        active_batches = sorted(batch for batch in batch_ids if self._is_batch_active(batch))
+        if not reference_scan_available:
+            return CacheCleanupPreviewResponse(
+                batch_id=batch_id or None,
+                protected_count=len(cache_assets),
+                active_batches=active_batches,
+            )
+        candidates = [
+            asset for asset in cache_assets
+            if not asset.batch_id or asset.batch_id not in active_batches
+        ]
+        return CacheCleanupPreviewResponse(
+            batch_id=batch_id or None,
+            batch_count=len({asset.batch_id for asset in candidates if asset.batch_id}),
+            candidate_count=len(candidates),
+            reclaimable_bytes=sum(asset.size_bytes for asset in candidates),
+            protected_count=len(cache_assets) - len(candidates),
+            active_batches=active_batches,
+        )
+
     def cleanup_import_cache(self, batch_id: str = "") -> CleanupResponse:
         """Delete only unreferenced image files from inactive import batches."""
         ref_set, reference_scan_available = self._build_reference_set()
@@ -186,6 +216,42 @@ class AssetsManagerService:
             is_active = active_cache[item_batch_id]
             if is_active or self._reference_ids(entry, rel_path, ref_set, source):
                 continue
+            if not self._is_safe_to_delete(entry):
+                errors.append(f"Safety check blocked: {entry}")
+                continue
+            try:
+                size = entry.stat().st_size
+                entry.unlink()
+                deleted += 1
+                freed += size
+            except OSError as exc:
+                errors.append(f"Delete failed {entry}: {exc}")
+
+        self._scan_cache = None
+        self._analysis_cache.clear()
+        return CleanupResponse(deleted_count=deleted, freed_bytes=freed, errors=errors)
+
+    def cleanup_unused_cache(self, batch_id: str = "") -> CleanupResponse:
+        """Delete unused assets from both managed folders while preserving active batches."""
+        ref_set, reference_scan_available = self._build_reference_set()
+        if not reference_scan_available:
+            return CleanupResponse(errors=["Reference database unavailable; cache cleanup was not performed."])
+
+        deleted = 0
+        freed = 0
+        errors: list[str] = []
+        active_cache: dict[str, bool] = {}
+        for entry, rel_path, source in self._iter_asset_files():
+            item_batch_id = self._batch_id_from_path(rel_path) if source == "import_batch" else None
+            if batch_id and item_batch_id != batch_id:
+                continue
+            if self._reference_ids(entry, rel_path, ref_set, source):
+                continue
+            if item_batch_id:
+                if item_batch_id not in active_cache:
+                    active_cache[item_batch_id] = self._is_batch_active(item_batch_id)
+                if active_cache[item_batch_id]:
+                    continue
             if not self._is_safe_to_delete(entry):
                 errors.append(f"Safety check blocked: {entry}")
                 continue
@@ -390,12 +456,6 @@ class AssetsManagerService:
             return DeleteAssetResponse(success=False, message="Reference database unavailable; deletion was blocked.")
         rel_path = self._relative_asset_path(actual_path)
         source = "import_batch" if self._is_under(actual_path, self._import_batches_dir) else "question_bank"
-        if source == "import_batch":
-            return DeleteAssetResponse(
-                success=False,
-                message="Import cache files must be managed at batch level to protect review work.",
-            )
-
         if self._reference_ids(actual_path, rel_path, ref_set, source):
             return DeleteAssetResponse(
                 success=False,
@@ -473,7 +533,11 @@ class AssetsManagerService:
         value = identifier.replace("\\", "/").lstrip("/")
         candidates: list[Path] = []
 
-        if value.startswith("data/assets/questions/") or value.startswith("data/import-batches/"):
+        if value.startswith("data/assets/questions/"):
+            candidates.append(self._assets_dir / value.removeprefix("data/assets/questions/"))
+            candidates.append(self._project_root / value)
+        elif value.startswith("data/import-batches/"):
+            candidates.append(self._import_batches_dir / value.removeprefix("data/import-batches/"))
             candidates.append(self._project_root / value)
         elif "/" in value:
             candidates.append(self._assets_dir / value)
@@ -504,6 +568,23 @@ class AssetsManagerService:
 
         ref_map: dict[str, set[str]] = {}
 
+        def add_reference(path: str, question_id: str) -> None:
+            """Index a path and its suffixes once for O(1) asset lookups.
+
+            Older records can keep absolute file paths while managed assets use
+            project-relative paths.  The suffix aliases preserve that compatibility
+            without comparing every image to every database reference.
+            """
+            normalized = self._normalize_ref_path(path)
+            if not normalized:
+                return
+            ref_map.setdefault(normalized, set()).add(question_id)
+            parts = normalized.split("/")
+            for index in range(1, len(parts) - 1):
+                suffix = "/".join(parts[index:])
+                if "/" in suffix:
+                    ref_map.setdefault(suffix, set()).add(question_id)
+
         try:
             with closing(connect_db(self._db_path, writable=False)) as conn:
                 # Source 1: image_assets.file_path
@@ -519,7 +600,7 @@ class AssetsManagerService:
                         path = str(row["file_path"]).strip()
                         question_id = str(row["question_id"]).strip()
                         if path and question_id:
-                            ref_map.setdefault(self._normalize_ref_path(path), set()).add(question_id)
+                            add_reference(path, question_id)
                 except sqlite3.OperationalError:
                     pass
 
@@ -537,7 +618,7 @@ class AssetsManagerService:
                         path = str(row["file_path"]).strip()
                         question_id = str(row["question_id"]).strip()
                         if path and question_id:
-                            ref_map.setdefault(self._normalize_ref_path(path), set()).add(question_id)
+                            add_reference(path, question_id)
                 except sqlite3.OperationalError:
                     pass
 
@@ -560,7 +641,7 @@ class AssetsManagerService:
                                     for key in ("local_path", "file_path", "relative_path", "filename"):
                                         path_value = str(fig.get(key) or "").strip()
                                         if path_value and question_id:
-                                            ref_map.setdefault(self._normalize_ref_path(path_value), set()).add(question_id)
+                                            add_reference(path_value, question_id)
                         except (json.JSONDecodeError, TypeError):
                             pass
                 except sqlite3.OperationalError:
@@ -581,7 +662,7 @@ class AssetsManagerService:
                                 for f in filenames:
                                     path = str(f).strip()
                                     if path and question_id:
-                                        ref_map.setdefault(self._normalize_ref_path(path), set()).add(question_id)
+                                        add_reference(path, question_id)
                         except (json.JSONDecodeError, TypeError):
                             pass
                 except sqlite3.OperationalError:
@@ -616,13 +697,6 @@ class AssetsManagerService:
         for candidate in candidates:
             if candidate in ref_set:
                 reference_ids.update(ref_set[candidate])
-
-        for ref_path, refs in ref_set.items():
-            normalized_ref = self._normalize_ref_path(ref_path)
-            if normalized_ref in candidates:
-                continue
-            if any(normalized_ref.endswith("/" + candidate) for candidate in candidates if "/" in candidate):
-                reference_ids.update(refs)
 
         return reference_ids
 

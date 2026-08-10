@@ -27,7 +27,7 @@ def build_assets_manager_router(
         response_model=AssetListResponse,
         summary="获取素材列表及引用状态",
     )
-    async def list_assets(
+    def list_assets(
         source: str = Query(default="all", pattern="^(all|question_bank|import_batch)$"),
         batch_id: str = Query(default=""),
         sort_by: str = Query(default="modified_at", pattern="^(name|modified_at|size_bytes|reference_count)$"),
@@ -105,6 +105,34 @@ def build_assets_manager_router(
             raise HTTPException(
                 status_code=500,
                 detail={"message": "Cache cleanup failed", "detail": str(exc)},
+            ) from exc
+
+    @router.get(
+        "/unused-cache-preview",
+        response_model=CacheCleanupPreviewResponse,
+        summary="Preview cleanup of all unused assets",
+    )
+    async def unused_cache_preview(batch_id: str = Query(default="")) -> CacheCleanupPreviewResponse:
+        try:
+            return service.get_unused_cache_cleanup_preview(batch_id=batch_id)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"message": "Unused cache preview failed", "detail": str(exc)},
+            ) from exc
+
+    @router.post(
+        "/cleanup-unused-cache",
+        response_model=CleanupResponse,
+        summary="Clear all unused assets",
+    )
+    async def cleanup_unused_cache(payload: CacheCleanupRequest) -> CleanupResponse:
+        try:
+            return service.cleanup_unused_cache(batch_id=payload.batch_id or "")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"message": "Unused cache cleanup failed", "detail": str(exc)},
             ) from exc
 
     @router.post(
