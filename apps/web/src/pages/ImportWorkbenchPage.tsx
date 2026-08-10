@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import DocumentPreviewModal from '../components/import/DocumentPreviewModal';
 import StructuredTextEditor from '../components/editor/StructuredTextEditor';
 import { analyzeQuestionQuality, findDuplicateQuestionIds, type QuestionQualityCode } from '../services/questionQuality';
 import { normalizeShortInlineDisplayMath } from '../utils/mathText';
@@ -14,6 +13,8 @@ import {
   type PersistedImportBatchSummary,
 } from '../services/importApi';
 import type { Figure, ImportMediaAsset, Option, QuestionType } from '../types';
+
+const DocumentPreviewModal = lazy(() => import('../components/import/DocumentPreviewModal'));
 
 type ImportStrategy = 'auto' | 'document' | 'vision' | 'extract_images';
 type JobStatus = 'queued' | 'running' | 'ready' | 'failed';
@@ -82,6 +83,10 @@ const STRATEGIES: { value: ImportStrategy; title: string; desc: string }[] = [
   { value: 'vision', title: 'OCR 识别', desc: '适合 PDF、截图、扫描件，按页面或图片识别。' },
   { value: 'extract_images', title: '仅提取图片', desc: '只整理素材，不调用模型，不生成题目草稿。' },
 ];
+
+function PreviewLoading() {
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 text-sm text-white">正在加载文档预览…</div>;
+}
 
 function makeJobId(): string {
   return `import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -737,7 +742,11 @@ export default function ImportWorkbenchPage() {
           )}
         </section>
       </div>
-      {previewFile && <DocumentPreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />}
+      {previewFile && (
+        <Suspense fallback={<PreviewLoading />}>
+          <DocumentPreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
+        </Suspense>
+      )}
     </div>
   );
 }

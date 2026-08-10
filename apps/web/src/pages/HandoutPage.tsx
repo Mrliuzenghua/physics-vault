@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { PagedHandoutDocument, getHandoutPaginationReport } from '../components/handout/HandoutDocument';
 import PrintPreflightPanel from '../components/handout/PrintPreflightPanel';
 import HandoutStylePresetPanel from '../components/handout/HandoutStylePresetPanel';
-import DocumentPreviewModal from '../components/import/DocumentPreviewModal';
 import LessonPackageTree from '../components/lesson/LessonPackageTree';
 import { DEFAULT_CONFIG as DEFAULT_HF_CONFIG } from '../components/handout/HandoutHeaderFooterConfigPanel';
 import HandoutHeaderFooterConfigPanel from '../components/handout/HandoutHeaderFooterConfigPanel';
@@ -12,6 +11,8 @@ import { DEFAULT_STYLE_CONFIG } from '../components/handout/handoutStylePresets'
 import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Input } from '../components/ui/Input';
+
+const DocumentPreviewModal = lazy(() => import('../components/import/DocumentPreviewModal'));
 import {
   deleteSavedLessonPackage,
   createLessonFolder,
@@ -39,6 +40,10 @@ import type { TeachingArtifactStatus } from '../types/teachingProject';
 import { parseLessonPackage } from '../services/lessonPackageSchema';
 
 type SyncStatus = 'idle' | 'syncing' | 'synced' | 'error';
+
+function PreviewLoading() {
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 text-sm text-white">正在加载文档预览…</div>;
+}
 
 function markHandoutEdited(status: TeachingArtifactStatus): TeachingArtifactStatus {
   if (status === 'published') return 'changed_after_publish';
@@ -682,7 +687,11 @@ export default function HandoutPage() {
         </aside>
       )}
 
-      {wordPreviewFile && <DocumentPreviewModal file={wordPreviewFile} onClose={() => setWordPreviewFile(null)} />}
+      {wordPreviewFile && (
+        <Suspense fallback={<PreviewLoading />}>
+          <DocumentPreviewModal file={wordPreviewFile} onClose={() => setWordPreviewFile(null)} />
+        </Suspense>
+      )}
     </div>
   );
 }
