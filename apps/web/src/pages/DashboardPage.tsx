@@ -12,9 +12,10 @@ import {
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
-import { archiveTeachingProject, duplicateTeachingProject, fetchMcpStatus, fetchProcessingRuns, fetchReviewTasks, listTeachingProjects } from '../services/api';
+import { archiveTeachingProject, duplicateTeachingProject, fetchMcpStatus, fetchProcessingRuns, listTeachingProjects } from '../services/api';
 import { fetchMistakeCount } from '../services/favoritesApi';
 import { searchQuestions } from '../services/questionApi';
+import { fetchReviewTasks } from '../services/reviewApi';
 import { buildClassroomFollowUpTasks, hydrateAllClassroomReflections, listClassroomReflections, setClassroomFollowUpTaskCompleted, type ClassroomFollowUpTask } from '../services/classroomReflection';
 import type { TaskLog } from '../types';
 

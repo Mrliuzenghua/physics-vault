@@ -7,8 +7,8 @@ import {
   addToBasket,
   fetchAgentConfig,
   streamQuestionPickerAgent,
-  submitAiGeneratedReview,
 } from '../services/api';
+import { submitAiGeneratedReview } from '../services/reviewApi';
 import LatexRenderer from '../components/render/LatexRenderer';
 import { useBasket } from '../hooks/useBasket';
 import { AI_CONTEXT_CACHE_STORAGE_KEY, readAiContextCache } from '../utils/aiContextCache';
