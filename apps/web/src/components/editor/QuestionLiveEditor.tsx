@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { FileText, WandSparkles } from 'lucide-react';
 import type { Option, Question, QuestionImageDetail } from '../../types';
 import { completeQuestionAnalysis, refineQuestionFormat } from '../../services/api';
@@ -150,7 +150,7 @@ export default function QuestionLiveEditor({
   // example, an MCP update or the “规范格式” action), without resetting the
   // cursor for the normal parent echo caused by the editor itself.
   const lastEmittedQuestionText = useRef(questionToDraft(question));
-  const options = question.options || [];
+  const options = useMemo(() => question.options || [], [question.options]);
   const isExperiment = question.question_type === 'experiment';
   const previewClass = compact ? 'text-[13px] leading-6' : 'text-[15px] leading-8';
 
@@ -173,7 +173,7 @@ export default function QuestionLiveEditor({
       title,
       options: [],
     });
-  }, [isExperiment, onChange, options, question.question_id, question.title]);
+  }, [isExperiment, onChange, options, question, question.question_id, question.title]);
 
   function handleDraftChange(value: string) {
     setDraftText(value);

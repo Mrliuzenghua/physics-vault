@@ -185,19 +185,21 @@ export default function HandoutPage() {
   const [renderedPageCount, setRenderedPageCount] = useState<number | null>(null);
   const printRequestedRef = useRef(false);
   const [config, setConfig] = useState<HandoutConfig>(() => normalizeHandoutConfig(null, lessonPackage));
+  const projectId = project?.id;
+  const projectUpdatedAt = project?.updatedAt;
 
   useEffect(() => {
     if (project) setConfig(normalizeHandoutConfig(project.handout.config, lessonPackage));
   }, [lessonPackage, project]);
 
   useEffect(() => {
-    if (!project) return;
+    if (!projectId) return;
     let cancelled = false;
-    void hydrateTeachingProject(project.id).then((remoteProject) => {
-      if (!cancelled && remoteProject && remoteProject.updatedAt !== project.updatedAt) setProject(remoteProject);
+    void hydrateTeachingProject(projectId).then((remoteProject) => {
+      if (!cancelled && remoteProject && remoteProject.updatedAt !== projectUpdatedAt) setProject(remoteProject);
     });
     return () => { cancelled = true; };
-  }, [project?.id]);
+  }, [projectId, projectUpdatedAt]);
 
   useEffect(() => {
     const localPackages = listSavedLessonPackages()

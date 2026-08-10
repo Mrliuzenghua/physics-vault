@@ -76,14 +76,16 @@ function buildMixedPages(lessonPackage: LessonPackage, deck: SlideDeck): MixedPa
 export default function ClassroomPage() {
   const lessonPackage = useMemo(() => loadCurrentLessonPackage(), []);
   const [project, setProject] = useState(() => (lessonPackage ? getOrCreateTeachingProject(lessonPackage) : null));
+  const projectId = project?.id;
+  const projectUpdatedAt = project?.updatedAt;
   useEffect(() => {
-    if (!project) return;
+    if (!projectId) return;
     let cancelled = false;
-    void hydrateTeachingProject(project.id).then((remoteProject) => {
-      if (!cancelled && remoteProject && remoteProject.updatedAt !== project.updatedAt) setProject(remoteProject);
+    void hydrateTeachingProject(projectId).then((remoteProject) => {
+      if (!cancelled && remoteProject && remoteProject.updatedAt !== projectUpdatedAt) setProject(remoteProject);
     });
     return () => { cancelled = true; };
-  }, [project?.id]);
+  }, [projectId, projectUpdatedAt]);
   const publishedDeck = project?.slides.publishedSnapshot?.deck || null;
   const classroomPackage = project?.slides.publishedSnapshot?.lessonPackage || lessonPackage;
   const pages = useMemo(

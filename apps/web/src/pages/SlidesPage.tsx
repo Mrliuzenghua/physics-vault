@@ -96,6 +96,8 @@ export default function SlidesPage() {
   const [savedPackages, setSavedPackages] = useState(() => listSavedLessonPackages());
   const [folders, setFolders] = useState(() => listLessonFolders());
   const [activeFolderId, setActiveFolderId] = useState<string | null>(() => lessonPackage?.folderId || null);
+  const projectId = project?.id;
+  const projectUpdatedAt = project?.updatedAt;
   const pages = useMemo(() => (lessonPackage && project ? buildMixedPages(lessonPackage, project.slides.deck) : []), [lessonPackage, project]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [editMode, setEditMode] = useState(false);
@@ -105,13 +107,13 @@ export default function SlidesPage() {
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
-    if (!project) return;
+    if (!projectId) return;
     let cancelled = false;
-    void hydrateTeachingProject(project.id).then((remoteProject) => {
-      if (!cancelled && remoteProject && remoteProject.updatedAt !== project.updatedAt) setProject(remoteProject);
+    void hydrateTeachingProject(projectId).then((remoteProject) => {
+      if (!cancelled && remoteProject && remoteProject.updatedAt !== projectUpdatedAt) setProject(remoteProject);
     });
     return () => { cancelled = true; };
-  }, [project?.id]);
+  }, [projectId, projectUpdatedAt]);
 
   const currentPage = pages[currentIndex];
   const questionCount = pages.filter((page) => page.kind === 'question').length;
