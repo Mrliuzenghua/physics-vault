@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type SetStateAction } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type SetStateAction } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Virtuoso } from 'react-virtuoso';
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
@@ -6,7 +6,6 @@ import { SortableContext, arrayMove, sortableKeyboardCoordinates, verticalListSo
 import { ArrowDown, ArrowUp, Copy, Files, Trash2 } from 'lucide-react';
 
 import PageRuler from '../components/compose/PageRuler';
-import QuestionLiveEditor from '../components/editor/QuestionLiveEditor';
 import StructuredTextEditor from '../components/editor/StructuredTextEditor';
 import HandoutDocument, { getHandoutPaginationReport, type HandoutPaginationReport } from '../components/handout/HandoutDocument';
 import { DEFAULT_CONFIG as DEFAULT_HF_CONFIG } from '../components/handout/HandoutHeaderFooterConfigPanel';
@@ -59,6 +58,8 @@ import type {
 import type { Question } from '../types';
 import type { SlideDeckTemplate } from '../types/slides';
 import { getQuestionSourceLabel } from '../utils/questionSource';
+
+const QuestionLiveEditor = lazy(() => import('../components/editor/QuestionLiveEditor'));
 
 const FONT_FAMILY_OPTIONS: Array<{ value: HandoutStyleConfig['fontFamily']; label: string }> = [
   { value: 'songti', label: '宋体' },
@@ -1378,7 +1379,9 @@ export default function ComposePage() {
                                 </div>
                               </div>
                               {selectedItem.type === 'question' && selectedItem.question ? (
-                                <QuestionLiveEditor question={selectedItem.question} onChange={updateSelectedQuestion} compact showPreview={false} showHeader={false} />
+                                <Suspense fallback={<InlineEditorLoading />}>
+                                  <QuestionLiveEditor question={selectedItem.question} onChange={updateSelectedQuestion} compact showPreview={false} showHeader={false} />
+                                </Suspense>
                               ) : (
                                 <ObjectItemEditor
                                   item={selectedItem}
@@ -2130,6 +2133,10 @@ function ObjectItemEditor({
       </CompactEditorField>
     </PanelCard>
   );
+}
+
+function InlineEditorLoading() {
+  return <div className="rounded-md border border-dashed border-[#cfdbe8] bg-white px-4 py-8 text-center text-sm text-[#60778f]">正在加载题目编辑器…</div>;
 }
 
 function CompactEditorField({ label, children }: { label: string; children: React.ReactNode }) {
