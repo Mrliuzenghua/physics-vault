@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { FileText, WandSparkles } from 'lucide-react';
 import type { Option, Question, QuestionImageDetail } from '../../types';
 import { completeQuestionAnalysis, refineQuestionFormat } from '../../services/aiApi';
@@ -6,7 +6,6 @@ import { addCachedQuestionImage } from '../../services/assetsApi';
 import ImportStemRenderer from '../import/ImportStemRenderer';
 import LatexRenderer from '../render/LatexRenderer';
 import ImageManager from '../shared/ImageManager';
-import ImageCachePickerDialog from './ImageCachePickerDialog';
 import type { CachedImageAsset } from './ImageCachePickerDialog';
 import StructuredTextEditor from './StructuredTextEditor';
 import type { FigureInsertRequest } from './StructuredTextEditor';
@@ -30,6 +29,8 @@ interface Props {
 
 type DraftSection = 'title' | 'options' | 'answer' | 'analysis';
 type FormatPatch = Pick<Question, 'title' | 'options' | 'answer' | 'analysis'>;
+
+const ImageCachePickerDialog = lazy(() => import('./ImageCachePickerDialog'));
 
 const QUESTION_TYPE_OPTIONS: Array<{ value: Question['question_type']; label: string }> = [
   { value: 'single_choice', label: '单选题' },
@@ -483,14 +484,18 @@ export default function QuestionLiveEditor({
           </div>
         </div>}
       </div>
-      <ImageCachePickerDialog
-        open={imageCacheOpen}
-        usedPaths={new Set((question.figures || []).map((figure) => figure.local_path))}
-        busyPath={busyImagePath}
-        error={imageCacheError}
-        onClose={() => setImageCacheOpen(false)}
-        onSelect={insertCachedImage}
-      />
+      {imageCacheOpen && (
+        <Suspense fallback={<div className="fixed inset-0 z-[90] grid place-items-center bg-slate-950/40 text-sm text-white">正在加载图片缓存…</div>}>
+          <ImageCachePickerDialog
+            open
+            usedPaths={new Set((question.figures || []).map((figure) => figure.local_path))}
+            busyPath={busyImagePath}
+            error={imageCacheError}
+            onClose={() => setImageCacheOpen(false)}
+            onSelect={insertCachedImage}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
