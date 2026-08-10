@@ -7,7 +7,8 @@ import SideNav from './SideNav';
 import StatusBar from './StatusBar';
 import { useTheme } from '../../hooks/useTheme';
 import { useBasket } from '../../hooks/useBasket';
-import { getSettings, saveSettings, fetchDatabaseStatus, fetchTasks, fetchMcpStatus, fetchMcpRuntimeConfig, getMcpConfig, pushMcpConfigToBackend } from '../../services/api';
+import { getSettings, saveSettings, fetchDatabaseStatus, fetchTasks, getMcpConfig, pushMcpConfigToBackend } from '../../services/api';
+import { fetchMcpRuntimeConfig, fetchMcpStatus } from '../../services/aiApi';
 import type { McpRuntimeStatus } from '../../types';
 
 const PersistentAiChatPage = lazy(() => import('../../pages/AiChatPage'));

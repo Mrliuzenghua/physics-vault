@@ -3,7 +3,7 @@ import { Bot, CheckCircle2, LoaderCircle, RefreshCw, Send, Settings2, Sparkles, 
 import { useNavigate } from 'react-router-dom';
 
 import LatexRenderer from '../render/LatexRenderer';
-import { fetchAgentConfig, streamQuestionPickerAgent } from '../../services/api';
+import { fetchAgentConfig, streamQuestionPickerAgent } from '../../services/aiApi';
 import type { AgentAction, AiChatMessage, QuestionPickerAgentResponse } from '../../types';
 
 interface Props {

@@ -212,7 +212,7 @@ export async function generateClassroomReflectionAdvice(
     `下次改进：${reflection.followUp || '未填写'}`,
   ].join('\n');
   try {
-    const { sendAiAssistantChat } = await import('./api.ts');
+    const { sendAiAssistantChat } = await import('./aiApi.ts');
     const result = await sendAiAssistantChat([
       { role: 'system', content: '你是教学复盘助手。请基于授课记录，输出简洁的“问题诊断、保留做法、下次行动、建议补充题型”四点建议，使用中文，不要编造学生数据。' },
       { role: 'user', content: prompt },

@@ -2,16 +2,18 @@ import { useCallback, useEffect, useState } from 'react';
 
 import {
   DEFAULT_AI_CONFIG,
+  getMcpConfig,
+  pushMcpConfigToBackend,
+  saveMcpConfig,
+} from '../services/api';
+import {
   fetchAgentConfig,
   fetchMcpRuntimeConfig,
   fetchMcpStatus,
-  getMcpConfig,
-  pushMcpConfigToBackend,
   saveAgentConfig,
-  saveMcpConfig,
   testClaudeCodeAgent,
   testMcpConnection,
-} from '../services/api';
+} from '../services/aiApi';
 import type {
   AgentConfig,
   AgentConfigResponse,

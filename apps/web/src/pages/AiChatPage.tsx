@@ -5,9 +5,8 @@ import { useLocation, useNavigate } from 'react-router-dom';
 
 import {
   addToBasket,
-  fetchAgentConfig,
-  streamQuestionPickerAgent,
 } from '../services/api';
+import { fetchAgentConfig, streamQuestionPickerAgent } from '../services/aiApi';
 import { submitAiGeneratedReview } from '../services/reviewApi';
 import LatexRenderer from '../components/render/LatexRenderer';
 import { useBasket } from '../hooks/useBasket';
