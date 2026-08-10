@@ -1,7 +1,8 @@
 import { Node } from '@tiptap/core';
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from '@tiptap/react';
 import { GripVertical, ImagePlus, Minus, Plus } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { moveNodeToPointer } from './nodeViewDrag';
 
 type TableCells = string[][];
 
@@ -11,11 +12,38 @@ function normalizeCells(value: unknown): TableCells {
   return rows.length >= 2 && rows.every((row) => row.length >= 2) ? rows : [['项目', '内容'], ['示例', '']];
 }
 
-function RichImageView({ node, selected, updateAttributes }: NodeViewProps) {
+function RichImageView({ node, selected, updateAttributes, editor, getPos }: NodeViewProps) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const cleanupMoveRef = useRef<((event?: PointerEvent) => void) | null>(null);
   const [hovered, setHovered] = useState(false);
   const [dragging, setDragging] = useState(false);
   const width = Math.min(100, Math.max(20, Number(node.attrs.width ?? 100)));
+
+  const beginMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    cleanupMoveRef.current?.();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let moved = false;
+
+    const onMove = (moveEvent: PointerEvent) => {
+      if (!moved && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 4) return;
+      moved = true;
+      setDragging(true);
+    };
+    const onUp = (upEvent?: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      cleanupMoveRef.current = null;
+      setDragging(false);
+      if (moved && upEvent) moveNodeToPointer(editor, getPos, node, upEvent.clientX, upEvent.clientY);
+    };
+
+    cleanupMoveRef.current = onUp;
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
+  };
 
   const resize = (event: React.PointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -36,18 +64,20 @@ function RichImageView({ node, selected, updateAttributes }: NodeViewProps) {
     window.addEventListener('pointerup', onUp, { once: true });
   };
 
+  useEffect(() => () => cleanupMoveRef.current?.(), []);
+
   return (
     <NodeViewWrapper
       as="div"
       ref={wrapperRef}
-      className={`pv-rich-image-node ${selected ? 'is-selected' : ''} ${dragging ? 'is-resizing' : ''}`}
+      className={`pv-rich-image-node ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''}`}
       style={{ width: `${width}%` }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => !dragging && setHovered(false)}
     >
       <img src={String(node.attrs.src || '')} alt={String(node.attrs.alt || '知识点图片')} draggable={false} />
       {(selected || hovered || dragging) && <>
-        <button type="button" className="pv-tiptap-image-drag-handle" aria-label="拖动图片位置" title="拖动图片位置" contentEditable={false} data-drag-handle><GripVertical size={12} /></button>
+        <button type="button" className="pv-tiptap-image-drag-handle" aria-label="拖动图片位置" title="拖动图片位置" contentEditable={false} data-drag-handle onPointerDown={beginMove}><GripVertical size={12} /></button>
         <span className="pv-rich-image-size">{width}%</span>
         <button type="button" className="pv-rich-image-resize" aria-label="调整图片大小" contentEditable={false} onPointerDown={resize} />
       </>}

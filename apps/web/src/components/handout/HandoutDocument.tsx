@@ -94,6 +94,31 @@ function buildPrintStyles(config: HandoutConfig) {
   const orientation = config.styleConfig.pageOrientation || 'portrait';
 
   return `
+  .handout-document .handout-text-flow {
+    min-width: 0;
+    max-width: 100%;
+    width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .handout-document .handout-page-body,
+  .handout-document .question-block {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .handout-document .handout-text-flow .katex-display {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .handout-document .handout-markdown-rule {
+    border: 0;
+    border-top: 1px solid #d8dee8;
+    margin: 12px 0;
+  }
+
   @page {
     size: ${pageSize} ${orientation};
     margin: 0;
@@ -135,6 +160,53 @@ function buildPrintStyles(config: HandoutConfig) {
     .handout-document {
       display: block !important;
       padding: 0 !important;
+      width: 100% !important;
+      max-width: none !important;
+      box-sizing: border-box !important;
+    }
+
+    .handout-page {
+      width: 100% !important;
+      max-width: none !important;
+      box-sizing: border-box !important;
+      color: #111827 !important;
+    }
+
+    .handout-page-body {
+      min-width: 0 !important;
+      column-fill: auto !important;
+    }
+
+    .handout-document,
+    .handout-document * {
+      scrollbar-width: none !important;
+    }
+
+    .handout-document::-webkit-scrollbar,
+    .handout-document *::-webkit-scrollbar {
+      display: none !important;
+      width: 0 !important;
+      height: 0 !important;
+    }
+
+    .handout-document .katex-display {
+      overflow: visible !important;
+    }
+
+    .question-block {
+      orphans: 3;
+      widows: 3;
+    }
+
+    .question-block img,
+    .pv-question-stem-figure {
+      max-width: 100% !important;
+      break-inside: avoid !important;
+      page-break-inside: avoid !important;
+    }
+
+    .handout-page-body > * {
+      max-width: 100% !important;
     }
 
     .handout-page + .handout-page {
@@ -229,8 +301,15 @@ function buildPagedEngineStyles(config: HandoutConfig) {
       ${pageFooter !== 'none' ? `@bottom-center { content: ${pageFooter}; font-size: 8pt; color: #94a3b8; }` : ''}
     }
     .pv-paged-flow { font-family: ${getDocumentFontFamily(config)}; color: #1f2937; }
-    .pv-paged-flow .question-block { break-inside: ${sc.keepQuestionTogether === false ? 'auto' : 'avoid'}; page-break-inside: ${sc.keepQuestionTogether === false ? 'auto' : 'avoid'}; }
-    .pv-paged-flow .pv-question-stem-figure { break-inside: ${sc.keepFigureWithStem === false ? 'auto' : 'avoid'}; page-break-inside: ${sc.keepFigureWithStem === false ? 'auto' : 'avoid'}; }
+    .pv-paged-flow .pv-handout-question { break-inside: ${sc.keepQuestionTogether === false ? 'auto' : 'avoid'} !important; page-break-inside: ${sc.keepQuestionTogether === false ? 'auto' : 'avoid'} !important; }
+    /* A question with a large figure may be taller than the remaining space.
+       Keep its number, stem and figure together, but allow options and answers
+       to continue on the next page instead of wasting the preceding page. */
+    .pv-paged-flow .pv-handout-question--with-figures { break-inside: auto !important; page-break-inside: auto !important; }
+    .pv-paged-flow .pv-question-leading { break-inside: avoid !important; page-break-inside: avoid !important; }
+    .pv-paged-flow .pv-question-stem-figure { break-inside: ${sc.keepFigureWithStem === false ? 'auto' : 'avoid'} !important; page-break-inside: ${sc.keepFigureWithStem === false ? 'auto' : 'avoid'} !important; }
+    /* Explanatory blocks are prose, so they can flow across pages naturally. */
+    .pv-paged-flow .pv-handout-knowledge { break-inside: auto !important; page-break-inside: auto !important; }
     .pv-paged-flow .pv-paged-manual-break { break-before: page; page-break-before: always; height: 0; }
     .pv-paged-flow-body { column-count: ${config.styleConfig.layoutMode === 'paged-double' ? 2 : 1}; column-gap: 12mm; column-fill: auto; }
     .pv-paged-target .pagedjs_pages { display: grid; gap: 14mm; justify-content: center; }
@@ -244,6 +323,18 @@ function buildPagedEngineStyles(config: HandoutConfig) {
       box-sizing: border-box !important;
     }
     .pv-paged-target .pagedjs_page { margin: 0 !important; box-shadow: 0 10px 28px rgba(74,85,104,.18); }
+    /* Paged.js has already materialized the configured margins inside each
+       page box. Remove the browser's second print margin so PDF output does
+       not ignore or double-apply the settings from the inspector. */
+    @media print {
+      @page { margin: 0 !important; }
+      .pv-paged-target .pagedjs_page,
+      .pv-paged-target .pagedjs_sheet,
+      .pv-paged-target .pagedjs_pagebox {
+        box-shadow: none !important;
+        margin: 0 !important;
+      }
+    }
   `;
 }
 
@@ -307,7 +398,7 @@ function PageFooter({ config, pageNum }: { config: HandoutConfig; pageNum: numbe
 function KnowledgeBlock({ item }: { item: HandoutItem }) {
   return (
     <div
-      className="question-block"
+      className="question-block pv-handout-knowledge"
       style={{
         breakInside: 'avoid',
         pageBreakInside: 'avoid',
@@ -321,7 +412,7 @@ function KnowledgeBlock({ item }: { item: HandoutItem }) {
       </div>
       {item.summary && (
         <div style={{ marginBottom: item.points?.length ? 8 : 0, whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.9, color: '#1e293b' }}>
-          <LatexRenderer text={item.summary} />
+          <LatexRenderer text={item.summary} className="handout-text-flow" />
         </div>
       )}
       <div style={{ display: 'grid', gap: 6 }}>
@@ -332,13 +423,17 @@ function KnowledgeBlock({ item }: { item: HandoutItem }) {
               display: 'flex',
               alignItems: 'flex-start',
               gap: 7,
+              minWidth: 0,
+              maxWidth: '100%',
               fontSize: 14,
               lineHeight: 1.9,
               color: '#1e293b',
             }}
           >
             <span style={{ color: '#64748b' }}>•</span>
-            <LatexRenderer text={point} />
+            <div style={{ flex: '1 1 0%', minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+              <LatexRenderer text={point} className="handout-text-flow" />
+            </div>
           </div>
         ))}
       </div>
@@ -497,10 +592,15 @@ function HandoutFlowContent({ items, config }: Pick<Props, 'items' | 'config'>) 
 }
 
 /** Precise, on-demand browser pagination. It is intentionally separate from the fast edit preview. */
-export function PagedHandoutDocument({ items, config }: Pick<Props, 'items' | 'config'>) {
+export function PagedHandoutDocument({
+  items,
+  config,
+  onReady,
+}: Pick<Props, 'items' | 'config'> & { onReady?: (pageCount: number) => void }) {
   const sourceRef = useRef<HTMLDivElement | null>(null);
   const targetRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<'rendering' | 'ready' | 'error'>('rendering');
+  const pagedStyles = buildPagedEngineStyles(config);
 
   useEffect(() => {
     let cancelled = false;
@@ -512,31 +612,52 @@ export function PagedHandoutDocument({ items, config }: Pick<Props, 'items' | 'c
       void import('pagedjs')
         .then(async ({ Previewer }) => {
           if (cancelled) return;
-          target.replaceChildren();
           const previewer = new Previewer();
           const clone = source.cloneNode(true) as HTMLElement;
           clone.removeAttribute('style');
-          await previewer.preview(clone, [], target);
-          if (!cancelled) setStatus('ready');
+          // Render off-screen first. A range input can issue many rapid layout
+          // changes; rendering straight into `target` lets an older request
+          // finish late and overwrite the most recent page settings.
+          const staging = document.createElement('div');
+          staging.setAttribute('aria-hidden', 'true');
+          staging.style.cssText = `position: fixed; left: -100000px; top: 0; width: ${getPageSizeMm(config).width}mm; pointer-events: none;`;
+          // Paged.js must measure a connected element. Keep this staging area
+          // outside the viewport, then move only the latest completed pages
+          // into the visible preview.
+          document.body.appendChild(staging);
+          try {
+            await previewer.preview(clone, [], staging);
+            if (!cancelled) {
+              const nextPageCount = staging.querySelectorAll('.pagedjs_page').length;
+              target.replaceChildren(...Array.from(staging.childNodes));
+              setStatus('ready');
+              onReady?.(nextPageCount);
+            }
+          } finally {
+            staging.remove();
+          }
         })
         .catch(() => {
           if (!cancelled) setStatus('error');
         });
-    }, 0);
+    }, 120);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [config, items]);
+  }, [config, items, onReady]);
 
   return (
     <>
-      <style>{buildPagedEngineStyles(config)}</style>
+      <style>{pagedStyles}</style>
       <div
         ref={sourceRef}
         aria-hidden="true"
         style={{ position: 'fixed', left: '-100000px', top: 0, width: `${getPageSizeMm(config).width}mm`, pointerEvents: 'none' }}
       >
+        {/* Paged.js receives a clone of this node. Keep the latest page rules
+            inside the clone so preview and PDF export share the same settings. */}
+        <style>{pagedStyles}</style>
         <HandoutFlowContent items={items} config={config} />
       </div>
       {status === 'rendering' && <div className="py-8 text-center text-sm text-[var(--color-text-muted)]">正在进行精确分页…</div>}
@@ -632,10 +753,13 @@ export default function HandoutDocument({ items, config, screenPagesPerRow = 1, 
             {/* Page header */}
             <PageHeader config={config} />
             {/* Page body */}
-            <div
-              className="handout-page-body"
-              style={{
+          <div
+            className="handout-page-body"
+            style={{
                 flex: 1,
+                width: '100%',
+                minWidth: 0,
+                maxWidth: '100%',
                 columnCount,
                 columnGap: columnCount > 1 ? '12mm' : undefined,
                 columnFill: columnCount > 1 ? 'auto' : undefined,
@@ -778,17 +902,25 @@ function estimateItemUnits(item: HandoutItem, config: HandoutConfig) {
 export function getHandoutPaginationReport(items: HandoutItem[], config: HandoutConfig): HandoutPaginationReport {
   const pageCapacity = getEstimatedPageCapacity(config);
   const pages = splitIntoPages(items, config);
+  const totalUnits = items.reduce((total, item) => total + estimateItemUnits(item, config), 0);
+  const estimatedPageCount = config.styleConfig.layoutMode === 'flow'
+    ? Math.max(1, Math.ceil(totalUnits / Math.max(1, pageCapacity * 0.92)))
+    : pages.length;
   const oversizedItemCount = items.filter((item) => item.type !== 'page_break' && estimateItemUnits(item, config) > pageCapacity * 0.9).length;
-  const nearCapacityPageCount = pages.filter((page) => {
-    const units = page.reduce((total, item) => total + estimateItemUnits(item, config), 0);
-    return units > pageCapacity * 0.96;
-  }).length;
-  const sparsePageCount = pages.slice(0, -1).filter((page) => {
-    const units = page.reduce((total, item) => total + estimateItemUnits(item, config), 0);
-    return units < pageCapacity * 0.28;
-  }).length;
+  const nearCapacityPageCount = config.styleConfig.layoutMode === 'flow'
+    ? (totalUnits > pageCapacity * 0.96 ? 1 : 0)
+    : pages.filter((page) => {
+      const units = page.reduce((total, item) => total + estimateItemUnits(item, config), 0);
+      return units > pageCapacity * 0.96;
+    }).length;
+  const sparsePageCount = config.styleConfig.layoutMode === 'flow'
+    ? 0
+    : pages.slice(0, -1).filter((page) => {
+      const units = page.reduce((total, item) => total + estimateItemUnits(item, config), 0);
+      return units < pageCapacity * 0.28;
+    }).length;
 
-  return { estimatedPageCount: pages.length, nearCapacityPageCount, sparsePageCount, oversizedItemCount };
+  return { estimatedPageCount, nearCapacityPageCount, sparsePageCount, oversizedItemCount };
 }
 
 /** Split items into paper pages. Manual page breaks are respected; other content uses a practical height estimate. */

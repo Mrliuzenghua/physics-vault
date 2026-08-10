@@ -1,5 +1,5 @@
 import type { ImportPipelineTaskResponse, LessonPackage } from '../types';
-import type { LessonExportOptions } from './lessonExport';
+import { buildWordFormatSpec, type LessonExportOptions } from './lessonExport';
 import { request, requestResponse } from './apiClient';
 import { downloadResponse } from './fileDownload';
 
@@ -36,14 +36,17 @@ export async function exportLessonOnServer(
   options: LessonExportOptions,
 ): Promise<ImportPipelineTaskResponse> {
   const endpoint = format === 'word' ? '/api/exports/word' : '/api/exports/pptx';
+  const exportPackage = format === 'word'
+    ? { ...lessonPackage, formatSpec: buildWordFormatSpec(lessonPackage, options) }
+    : lessonPackage;
   const submitted = await request<ImportPipelineTaskResponse>(endpoint, {
     method: 'POST',
     body: JSON.stringify({
-      lesson_package: lessonPackage,
+      lesson_package: exportPackage,
       include_answers: options.includeAnswers,
       include_analysis: options.includeAnalysis,
       answer_position: options.answerPosition || 'after_question',
-      file_name: lessonPackage.title,
+      file_name: exportPackage.title,
     }),
   });
   localStorage.setItem(ACTIVE_EXPORT_KEY, JSON.stringify({ taskId: submitted.task_id, format, createdAt: new Date().toISOString() }));

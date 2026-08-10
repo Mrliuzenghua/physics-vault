@@ -18,6 +18,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useRef, type CSSProperties, type ReactNode } from 'react';
 import type { ComposeItem, Question } from '../../types';
+import { getQuestionSourceLabel } from '../../utils/questionSource';
 
 interface Props {
   items: ComposeItem[];
@@ -61,7 +62,7 @@ function buildQuestionChips(question?: Question): string[] {
     question.answer ? `答案 ${normalizeSnippet(question.answer)}` : '缺答案',
     question.difficulty ? `难度 ${question.difficulty}` : '难度 -',
   ];
-  const source = normalizeSnippet(question.source || question.primary_paper_id, '');
+  const source = normalizeSnippet(getQuestionSourceLabel(question), '');
   if (source) chips.push(source);
   const topic = normalizeSnippet(
     question.topic3 || question.topic2 || question.knowledge_point || question.knowledge_points?.[0]?.topic3_name,
@@ -69,7 +70,7 @@ function buildQuestionChips(question?: Question): string[] {
   );
   if (topic) chips.push(topic);
   if (question.review_status) chips.push(question.review_status === 'approved' ? '已审核' : question.review_status);
-  return chips.slice(0, 2);
+  return [chips[0], source].filter(Boolean);
 }
 
 type SortableState = ReturnType<typeof useSortable>;

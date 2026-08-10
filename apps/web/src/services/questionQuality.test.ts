@@ -34,6 +34,29 @@ test('reports structural errors and answer-option mismatch', () => {
   assert.deepEqual(issues.map((item) => item.code), ['empty_title', 'missing_options', 'answer_option_mismatch']);
 });
 
+test('accepts option labels that include OCR punctuation', () => {
+  const issues = analyzeQuestionQuality(question({
+    options: [
+      { opt: 'A.', content: '选项 A' },
+      { opt: 'B、', content: '选项 B' },
+      { opt: 'C)', content: '选项 C' },
+      { opt: 'D．', content: '选项 D' },
+    ],
+    answer: 'D',
+  }));
+  assert.equal(issues.some((item) => item.code === 'answer_option_mismatch'), false);
+});
+
+test('does not treat opposite signed mathematical options as duplicates', () => {
+  const issues = analyzeQuestionQuality(question({
+    options: [
+      { opt: 'A', content: '$\\frac{1}{3}F + \\mu mg$' },
+      { opt: 'B', content: '$\\frac{1}{3}F - \\mu mg$' },
+    ],
+  }));
+  assert.equal(issues.some((item) => item.code === 'duplicate_options'), false);
+});
+
 test('supports disabling rules and overriding severity', () => {
   const issues = analyzeQuestionQuality(question({ answer: '' }), {
     config: {

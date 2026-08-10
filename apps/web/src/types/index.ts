@@ -182,6 +182,7 @@ export interface ComposeKnowledgeItem {
   id: string;
   knowledgeId: string;
   title: string;
+  content?: string;
   summary: string;
   points: string[];
 }
@@ -220,6 +221,7 @@ export type ComposeItem =
 export interface LessonKnowledgeCard {
   id: string;
   title: string;
+  content?: string;
   summary: string;
   points: string[];
   relatedQuestionIds: string[];
@@ -275,7 +277,9 @@ export interface LessonPackage {
   nodes: LessonPackageNode[];
   headerFooter?: HandoutHeaderFooterConfig;
   styleConfig?: HandoutStyleConfig;
+  formatSpec?: Record<string, unknown>;
   slideTemplate?: import('./slides').SlideDeckTemplate;
+  folderId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -322,14 +326,24 @@ export interface SavedLessonPackageSummary {
   questionCount: number;
   knowledgeCount: number;
   nodeCount: number;
+  folderId?: string | null;
+}
+
+export interface LessonFolder {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type TemplateType = 'style' | 'layout' | 'handout' | 'teaching';
+export type TemplateScope = 'all' | 'compose' | 'handout' | 'slides' | 'classroom';
 
 export interface Template {
   id: string;
   name: string;
   type: TemplateType;
+  scope?: TemplateScope;
   config: TemplateConfig;
   created_at?: string;
   updated_at?: string;
@@ -1183,6 +1197,20 @@ export type {
   SlideSectionType,
   SlideItem,
 } from './slides';
+export type {
+  HandoutArtifact,
+  SlideArtifact,
+  TeachingArtifactStatus,
+  TeachingProject,
+  TeachingProjectSummary,
+} from './teachingProject';
+export type {
+  SavedHandoutDocument,
+  SavedHandoutListResponse,
+  SavedHandoutSummary,
+  SavedHandoutVersion,
+  SavedHandoutVersionListResponse,
+} from './lessonDocument';
 
 import type { SlidePage } from './slides';
 

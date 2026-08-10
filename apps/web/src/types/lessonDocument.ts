@@ -3,6 +3,7 @@ import type {
   HandoutStyleConfig,
   HandoutTextBlockKind,
   HandoutTextBlockStyle,
+  LessonPackage,
   Question,
 } from './index';
 import type { SlideDeckTemplate } from './slides';
@@ -38,6 +39,7 @@ export interface LessonDocumentKnowledgeNode {
   type: 'knowledgeCard';
   knowledgeId: string;
   title: string;
+  content?: string;
   summary: string;
   points: string[];
   relatedQuestionIds: string[];
@@ -84,4 +86,56 @@ export interface LessonDocumentV2 {
   };
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SavedHandoutSummary {
+  id: string;
+  title: string;
+  subtitle: string;
+  document_kind: 'saved_handout';
+  source_workbench_id: string | null;
+  created_at: string;
+  updated_at: string;
+  question_count: number;
+  knowledge_count: number;
+  node_count: number;
+  format_template_id: string | null;
+  current_version: number;
+  version_count: number;
+}
+
+export interface SavedHandoutVersion {
+  /** Compatibility index for the existing Handout page state; remove after that state is typed. */
+  [field: string]: unknown;
+  version: number;
+  version_id: string;
+  created_at: string;
+  title: string;
+  current: boolean;
+}
+
+export interface SavedHandoutDocument {
+  id: string;
+  title: string;
+  subtitle: string;
+  document_kind: 'saved_handout';
+  sourceWorkbenchId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  formatTemplateId?: string | null;
+  currentVersion: number;
+  lessonPackage: LessonPackage;
+  summary?: SavedHandoutSummary;
+  restoredFromVersion?: number;
+}
+
+export interface SavedHandoutListResponse {
+  document_kind: 'saved_handout';
+  items: SavedHandoutSummary[];
+}
+
+export interface SavedHandoutVersionListResponse {
+  document_kind: 'saved_handout';
+  document_id: string;
+  items: SavedHandoutVersion[];
 }

@@ -17,10 +17,10 @@ import {
   Undo2,
 } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { QUESTION_EDITOR_NODES, figureNode, formulaNode } from './questionEditorNodes';
+import { QuestionFigureNode, figureNode } from './questionEditorNodes';
 import { imageFileUrl } from '../../utils/imageUrl';
 import { RICH_CONTENT_NODES, richImageNode, richTableNode } from './RichContentNodes';
-import { decodeMathHtmlEntities, mathFormulaToEditorHtml } from '../../utils/mathText';
+import { decodeMathHtmlEntities } from '../../utils/mathText';
 
 export interface FigureAsset {
   fig_uuid: string;
@@ -40,6 +40,7 @@ interface StructuredTextEditorProps {
   document?: Record<string, unknown>;
   onDocumentChange?: (document: JSONContent) => void;
   figures?: FigureAsset[];
+  contentId?: string;
   onFigureScaleChange?: (figureId: string, displayScale: number) => void;
   onFigureAlignChange?: (figureId: string, displayAlign: 'left' | 'center' | 'right') => void;
   storageKey?: string;
@@ -73,9 +74,7 @@ function inlineTextToHtml(value: string, figuresById: Map<string, FigureAsset>):
     const image = part.match(/^!\[([^\]]*)\]\(([^)\n]+)\)$/);
     if (image) return `<img data-rich-image="true" src="${escapeHtml(image[2])}" alt="${escapeHtml(image[1])}" />`;
     const formula = part.match(/^\$\$?([^$\n]+)\$\$?$/);
-    if (formula) {
-      return mathFormulaToEditorHtml(formula[1]);
-    }
+    if (formula) return escapeHtml(part);
     return escapeHtml(part)
       .replace(/`([^`\n]+)`/g, '<code>$1</code>')
       .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
@@ -220,17 +219,35 @@ function saveStoredDocument(storageKey: string | undefined, document: JSONConten
 
 function hydrateFigureNodes(document: JSONContent, figures: FigureAsset[]): JSONContent {
   const figuresById = new Map(figures.map((figure) => [figure.fig_uuid, figure]));
+  const splitLegacyMathText = (node: JSONContent): JSONContent[] => {
+    if (node.type !== 'text' || !node.text || !/(\$\$[\s\S]+?\$\$|(?<!\$)\$[^$\n]+\$(?!\$))/.test(node.text)) {
+      return [node];
+    }
+
+    const result: JSONContent[] = [];
+    const pattern = /(\$\$[\s\S]+?\$\$|(?<!\$)\$[^$\n]+\$(?!\$))/g;
+    let cursor = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(node.text)) !== null) {
+      if (match.index > cursor) result.push({ ...node, text: node.text.slice(cursor, match.index) });
+      const raw = match[0];
+      result.push({
+        type: 'questionFormula',
+        attrs: { latex: decodeMathHtmlEntities(raw.replace(/^\$\$?|\$\$?$/g, '')) },
+      });
+      cursor = match.index + raw.length;
+    }
+    if (cursor < node.text.length) result.push({ ...node, text: node.text.slice(cursor) });
+    return result;
+  };
+
   const hydrate = (node: JSONContent): JSONContent => {
-    const content = node.content?.map((child) => hydrate(child as JSONContent));
+    const content = node.content?.flatMap((child) => {
+      const hydrated = hydrate(child as JSONContent);
+      return node.type === 'codeBlock' ? [hydrated] : splitLegacyMathText(hydrated);
+    });
     if (node.type === 'questionFormula') {
-      return {
-        ...node,
-        ...(content ? { content } : {}),
-        attrs: {
-          ...node.attrs,
-          latex: decodeMathHtmlEntities(String(node.attrs?.latex || '')),
-        },
-      };
+      return { type: 'text', text: `$${decodeMathHtmlEntities(String(node.attrs?.latex || ''))}$` };
     }
     if (node.type !== 'questionFigure') return { ...node, ...(content ? { content } : {}) };
     const figure = figuresById.get(String(node.attrs?.figureId || ''));
@@ -255,6 +272,7 @@ export default function StructuredTextEditor({
   document,
   onDocumentChange,
   figures = [],
+  contentId,
   onFigureScaleChange,
   onFigureAlignChange,
   storageKey,
@@ -272,6 +290,11 @@ export default function StructuredTextEditor({
   const reportedFigureAlignments = useRef(new Map<string, string>());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const insertedRequestRef = useRef(0);
+  const latestValueRef = useRef(value);
+  const latestFiguresRef = useRef(figures);
+  const lastEmittedTextRef = useRef<string | null>(null);
+  const loadedContentIdRef = useRef(contentId);
+  const recoveryScheduledRef = useRef(false);
   const storedDocument = loadStoredDocument(storageKey);
   const suppliedDocument = document as JSONContent | undefined;
   const initialDocument = suppliedDocument && editorText(suppliedDocument) === value
@@ -279,15 +302,23 @@ export default function StructuredTextEditor({
     : storedDocument && editorText(storedDocument) === value
       ? hydrateFigureNodes(storedDocument, figures)
       : null;
+
+  useEffect(() => {
+    latestValueRef.current = value;
+    latestFiguresRef.current = figures;
+  }, [figures, value]);
+
   const editor = useEditor({
-    extensions: [StarterKit.configure({ heading: { levels: [2, 3] } }), ...QUESTION_EDITOR_NODES, ...RICH_CONTENT_NODES, Placeholder.configure({ placeholder })],
+    extensions: [StarterKit.configure({ heading: { levels: [2, 3] } }), QuestionFigureNode, ...RICH_CONTENT_NODES, Placeholder.configure({ placeholder })],
     content: initialDocument || textToHtml(value, figures),
     editorProps: { attributes: { class: 'pv-tiptap-content', 'aria-label': placeholder } },
     onUpdate: ({ editor: currentEditor }) => {
       const document = currentEditor.getJSON();
+      const nextValue = editorText(document);
       const currentBlockText = currentEditor.state.selection.$from.parent.textContent.trim();
       setSlashMenuOpen(currentBlockText.startsWith('/'));
-      onChange(editorText(document));
+      lastEmittedTextRef.current = nextValue;
+      onChange(nextValue);
       const reportFigureLayout = (figure: JSONContent) => {
         if (figure.type === 'questionFigure') {
           const figureId = String(figure.attrs?.figureId || '');
@@ -308,12 +339,41 @@ export default function StructuredTextEditor({
       onDocumentChange?.(document);
       saveStoredDocument(storageKey, document);
     },
-    onTransaction: () => refreshToolbar((current) => current + 1),
+    onTransaction: ({ editor: currentEditor }) => {
+      refreshToolbar((current) => current + 1);
+      // A figure drag/resize can briefly leave Tiptap with an empty document
+      // while the question state still contains text. Without a recovery,
+      // the left editor becomes blank even though the live preview is intact.
+      const expectedValue = latestValueRef.current;
+      if (!expectedValue.trim() || editorText(currentEditor.getJSON()).trim() || recoveryScheduledRef.current) return;
+      recoveryScheduledRef.current = true;
+      window.requestAnimationFrame(() => {
+        recoveryScheduledRef.current = false;
+        const currentValue = editorText(currentEditor.getJSON()).trim();
+        const latestValue = latestValueRef.current;
+        // If the parent has accepted an intentional clear, latestValue is now
+        // empty. Otherwise restore the authoritative structured text.
+        if (currentValue || !latestValue.trim()) return;
+        currentEditor.commands.setContent(textToHtml(latestValue, latestFiguresRef.current), { emitUpdate: false });
+      });
+    },
   });
 
   useEffect(() => {
     if (!editor) return;
+    if (contentId !== undefined) {
+      // The live editor owns selection and document state while the same
+      // question is open. Reload only after switching to another question.
+      if (loadedContentIdRef.current === contentId) return;
+      loadedContentIdRef.current = contentId;
+      editor.commands.setContent(textToHtml(value, figures), { emitUpdate: false });
+      return;
+    }
     const frame = window.requestAnimationFrame(() => {
+      // The editor has already moved on when a fast typist produces another
+      // transaction before this frame. Never write an older parent value back
+      // into it, otherwise the caret jumps and the content visibly flashes.
+      if (latestValueRef.current !== value) return;
       const currentDocument = editor.getJSON();
       const currentValue = editorText(currentDocument);
       if (suppliedDocument && editorText(suppliedDocument) === value) {
@@ -321,12 +381,14 @@ export default function StructuredTextEditor({
         if (JSON.stringify(currentDocument) !== JSON.stringify(hydrated)) {
           editor.commands.setContent(hydrated, { emitUpdate: false });
         }
-      } else if (currentValue !== value) {
+      } else if (currentValue !== value && lastEmittedTextRef.current !== value) {
+        // Only set content for a genuine external change (AI, format action,
+        // or loading another draft), never for the editor's own parent echo.
         editor.commands.setContent(textToHtml(value, figures), { emitUpdate: false });
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [editor, figures, suppliedDocument, value]);
+  }, [contentId, editor, figures, suppliedDocument, value]);
 
   useEffect(() => {
     if (!editor || !insertFigureRequest || insertedRequestRef.current === insertFigureRequest.requestId) return;
@@ -362,7 +424,7 @@ export default function StructuredTextEditor({
     const { $from } = editor.state.selection;
     editor.chain().focus().deleteRange({ from: $from.start(), to: $from.pos }).run();
     if (command === 'heading') editor.chain().focus().toggleHeading({ level: 2 }).run();
-    if (command === 'formula') editor.chain().focus().insertContent(formulaNode()).run();
+    if (command === 'formula') editor.chain().focus().insertContent('$...$').run();
     if (command === 'table') editor.chain().focus().insertContent(richTableNode()).run();
     if (command === 'image') {
       if (onRequestImage) onRequestImage();
@@ -383,9 +445,9 @@ export default function StructuredTextEditor({
         {!compact && <EditorButton label="项目符号" active={editor.isActive('bulletList')} onClick={() => editor.chain().focus().toggleBulletList().run()}><List size={14} /></EditorButton>}
         {!compact && <EditorButton label="编号列表" active={editor.isActive('orderedList')} onClick={() => editor.chain().focus().toggleOrderedList().run()}><ListOrdered size={14} /></EditorButton>}
         {!compact && <EditorButton label="引用" active={editor.isActive('blockquote')} onClick={() => editor.chain().focus().toggleBlockquote().run()}><Quote size={14} /></EditorButton>}
-        <EditorButton label="插入公式模板" onClick={() => editor.chain().focus().insertContent(formulaNode()).run()}><Sigma size={14} /></EditorButton>
+        <EditorButton label="插入公式模板" onClick={() => editor.chain().focus().insertContent('$...$').run()}><Sigma size={14} /></EditorButton>
         {!compact && <EditorButton label="插入表格" onClick={() => editor.chain().focus().insertContent(richTableNode()).run()}><Table2 size={14} /></EditorButton>}
-        {!compact && <EditorButton label={onRequestImage ? '从图片缓存插入' : '上传图片'} onClick={() => onRequestImage ? onRequestImage() : fileInputRef.current?.click()}><ImagePlus size={14} /></EditorButton>}
+        <EditorButton label={onRequestImage ? '从图片缓存插入' : '上传图片'} onClick={() => onRequestImage ? onRequestImage() : fileInputRef.current?.click()}><ImagePlus size={14} /></EditorButton>
         {!compact && figures.map((figure) => (
           <EditorButton key={figure.fig_uuid} label={`插入题图 ${figure.fig_uuid}`} onClick={() => editor.chain().focus().insertContent(figureNode(figure.fig_uuid, imageFileUrl(figure.local_path) || '', Number(figure.display_scale ?? 60), figure.display_align || 'center')).run()}><ImagePlus size={14} /></EditorButton>
         ))}

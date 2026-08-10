@@ -14,6 +14,7 @@ export type LessonLayoutBlock =
       type: 'knowledge';
       knowledgeId: string;
       title: string;
+      content?: string;
       summary: string;
       points: string[];
       relatedQuestionIds: string[];
@@ -64,6 +65,7 @@ export function buildLessonLayoutModel(document: LessonDocumentV2): LessonLayout
           type: 'knowledge',
           knowledgeId: node.knowledgeId,
           title: node.title,
+          content: node.content,
           summary: node.summary,
           points: node.points,
           relatedQuestionIds: node.relatedQuestionIds,
@@ -101,6 +103,7 @@ export function layoutModelToLessonPackage(model: LessonLayoutModel): LessonPack
     knowledgeCards: model.blocks.flatMap((block) => block.type === 'knowledge' ? [{
       id: block.knowledgeId,
       title: block.title,
+      content: block.content,
       summary: block.summary,
       points: block.points,
       relatedQuestionIds: block.relatedQuestionIds,

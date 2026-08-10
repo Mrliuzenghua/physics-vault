@@ -10,16 +10,24 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (!id.includes('node_modules')) {
+          const moduleId = id.replaceAll('\\', '/');
+          if (!moduleId.includes('/node_modules/')) {
             return;
           }
-          if (id.includes('react-router-dom')) {
+          if (moduleId.includes('/node_modules/react-router-dom/')) {
             return 'router';
           }
-          if (id.includes('react')) {
+          // Avoid matching every package whose name merely contains "react"
+          // (lucide-react, react-virtuoso, Radix, etc.).  Those packages are
+          // route-specific and should stay behind the existing lazy routes.
+          if (
+            moduleId.includes('/node_modules/react/')
+            || moduleId.includes('/node_modules/react-dom/')
+            || moduleId.includes('/node_modules/scheduler/')
+          ) {
             return 'react';
           }
-          if (id.includes('katex')) {
+          if (moduleId.includes('/node_modules/katex/')) {
             return 'math';
           }
         },

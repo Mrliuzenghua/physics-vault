@@ -166,6 +166,12 @@ function parseOcrTable(lines: string[], startIndex: number): { tableLines: strin
 }
 
 function splitOcrTableRow(line: string, columnCount: number): string[] | null {
+  // OCR often collapses column gaps into one space. Keep a full math formula
+  // intact, then accept the row when the remaining visible tokens fit the
+  // border-derived column count exactly.
+  const compactCells = line.trim().match(/\$[^$\r\n]+\$|\S+/g) ?? [];
+  if (compactCells.length === columnCount) return compactCells;
+
   const mathCells = line.match(/\$[^$]+\$/g) ?? [];
   if (mathCells.length === columnCount) {
     const leftover = mathCells.reduce((rest, cell) => rest.replace(cell, ' '), line).trim();
@@ -174,11 +180,6 @@ function splitOcrTableRow(line: string, columnCount: number): string[] | null {
 
   const wideSpaceCells = line.trim().split(/\t+|\s{2,}/).filter(Boolean);
   if (wideSpaceCells.length === columnCount) return wideSpaceCells;
-
-  if (columnCount === 2) {
-    const compactCells = line.trim().split(/\s+/).filter(Boolean);
-    if (compactCells.length === 2) return compactCells;
-  }
 
   return null;
 }
@@ -237,6 +238,8 @@ function renderBasicMarkdownText(s: string): string {
     .replace(/^\s*[-•]\s+/gm, '• ')
     .replace(/^>\s?/gm, '│ ')
     .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*\*/g, '')
+    .replace(/^\s*---+\s*$/gm, '<hr class="handout-markdown-rule" />')
     .replace(/~~([^~\n]+?)~~/g, '<s>$1</s>')
     .replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>')
     .replace(/`([^`\n]+?)`/g, '<code>$1</code>');

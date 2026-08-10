@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type SetStateAction } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Virtuoso } from 'react-virtuoso';
-import { useQueryClient } from '@tanstack/react-query';
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { ArrowDown, ArrowUp, Copy, Files, Trash2 } from 'lucide-react';
@@ -9,21 +8,17 @@ import { ArrowDown, ArrowUp, Copy, Files, Trash2 } from 'lucide-react';
 import PageRuler from '../components/compose/PageRuler';
 import QuestionLiveEditor from '../components/editor/QuestionLiveEditor';
 import StructuredTextEditor from '../components/editor/StructuredTextEditor';
-import DocumentPreviewModal from '../components/import/DocumentPreviewModal';
-import HandoutDocument, { PagedHandoutDocument, getHandoutPaginationReport, type HandoutPaginationReport } from '../components/handout/HandoutDocument';
-import HandoutHeaderFooterConfigPanel, {
-  DEFAULT_CONFIG as DEFAULT_HF_CONFIG,
-} from '../components/handout/HandoutHeaderFooterConfigPanel';
-import HandoutStylePresetPanel, { HANDOUT_STYLE_TABS } from '../components/handout/HandoutStylePresetPanel';
-import type { HandoutStyleTab } from '../components/handout/HandoutStylePresetPanel';
+import HandoutDocument, { getHandoutPaginationReport, type HandoutPaginationReport } from '../components/handout/HandoutDocument';
+import { DEFAULT_CONFIG as DEFAULT_HF_CONFIG } from '../components/handout/HandoutHeaderFooterConfigPanel';
 import { DEFAULT_STYLE_CONFIG } from '../components/handout/handoutStylePresets';
 import TeachingSlidePage from '../components/teaching/TeachingSlidePage';
 import { Button } from '../components/ui/Button';
 import { Select } from '../components/ui/Select';
 import { Spinner } from '../components/ui/Spinner';
 import { useBasket } from '../hooks/useBasket';
+import { useComposeDraftSession } from '../hooks/compose/useComposeDraftSession';
 import { useComposeWorkbenchStore } from '../stores/useComposeWorkbenchStore';
-import { fetchLatestPaperDraft, fetchQuestion, fetchQuestionsByIds, savePaperDraft, searchQuestions } from '../services/api';
+import { savePaperDraft, searchQuestions } from '../services/api';
 import { ApiError } from '../services/apiClient';
 import {
   buildComposeDiagnostics,
@@ -38,8 +33,6 @@ import {
   saveCurrentLessonPackage,
   saveLessonPackageToLibrary,
 } from '../services/lessonPackage';
-import { exportLessonAsPptx, exportLessonAsWord } from '../services/lessonExport';
-import { exportLessonOnServer } from '../services/lessonServerExport';
 import {
   lessonDocumentToLessonPackage,
   lessonPackageToDocumentV2,
@@ -50,26 +43,21 @@ import {
   layoutModelToHandoutItems,
   layoutModelToSlideDeck,
 } from '../services/lessonLayoutModel';
-import { applyTemplateToHeaderFooter, applyTemplateToStyleConfig } from '../services/templateApplication';
+import { applyTemplateToHeaderFooter, applyTemplateToStyleConfig, type TemplateApplyMode } from '../services/templateApplication';
+import { getComposeUserSettings, saveComposeUserSettings, type ComposeUserSettings } from '../services/composeSettings';
 import type {
   ComposeItem,
   ComposeSeparatorItem,
   ComposeTextItem,
   HandoutConfig,
   HandoutHeaderFooterConfig,
-  PaperDraft,
   HandoutStyleConfig,
   TemplateConfig,
   TemplateMaterialPackage,
 } from '../types';
 import type { Question } from '../types';
 import type { SlideDeckTemplate } from '../types/slides';
-
-const SLIDE_DECK_TEMPLATE_LABELS: Record<SlideDeckTemplate, string> = {
-  teach_practice_teach: '讲练讲',
-  teach_then_practice: '先讲后练',
-  practice_only: '只出题',
-};
+import { getQuestionSourceLabel } from '../utils/questionSource';
 
 const FONT_FAMILY_OPTIONS: Array<{ value: HandoutStyleConfig['fontFamily']; label: string }> = [
   { value: 'songti', label: '宋体' },
@@ -88,13 +76,6 @@ const ANSWER_EXPORT_OPTIONS: Array<{ value: AnswerExportMode; label: string }> =
   { value: 'after_answer_analysis', label: '题后答案和解析' },
 ];
 
-function resolveAnswerExportOptions(mode: AnswerExportMode) {
-  return {
-    includeAnswers: true,
-    includeAnalysis: mode.endsWith('_analysis'),
-    answerPosition: mode.startsWith('end_') ? 'end' as const : 'after_question' as const,
-  };
-}
 const PX_PER_MM = 96 / 25.4;
 const RULER_LEFT_WIDTH_PX = 34;
 const SPREAD_GAP_MM = 10;
@@ -141,54 +122,12 @@ function getComposePageSizeMm(styleConfig: HandoutStyleConfig) {
     : base;
 }
 
-function buildComposeItemsFromQuestions(questions: Question[]): ComposeItem[] {
-  return questions.map((question) => ({
-    type: 'question',
-    id: question.question_id,
-    questionId: question.question_id,
-    question,
-  }));
-}
-
 function getPrimaryKnowledge(question: Question): string {
   return question.knowledge_points?.[0]?.topic3_name
     || question.knowledge_points?.[0]?.topic2_name
     || question.knowledge_points?.[0]?.topic1_name
     || question.knowledge_point?.split(/[\n,，、;；]+/).map((value) => value.trim()).find(Boolean)
     || '课堂练习';
-}
-
-function buildComposeItemsFromPaperDraft(draft: PaperDraft, questions: Question[]): ComposeItem[] {
-  const questionMap = new Map(questions.map((question) => [question.question_id, question]));
-  return draft.items.map((item) => {
-    const payload = item.payload || {};
-    if (item.type === 'question') {
-      const questionId = item.question_id || item.id;
-      return { type: 'question', id: item.id, questionId, question: questionMap.get(questionId) };
-    }
-    if (item.type === 'knowledge') {
-      return {
-        type: 'knowledge',
-        id: item.id,
-        knowledgeId: String(payload.topic3_id || payload.id || item.id),
-        title: String(payload.title || item.title || '知识点'),
-        summary: String(payload.summary || ''),
-        points: Array.isArray(payload.points) ? payload.points.map(String) : [],
-      };
-    }
-    if (item.type === 'text') {
-      return {
-        type: 'text',
-        id: item.id,
-        title: String(payload.title || item.title || '教学说明'),
-        content: String(payload.content || ''),
-        document: payload.document as Record<string, unknown> | undefined,
-        blockKind: payload.blockKind as ComposeTextItem['blockKind'],
-        style: payload.style as ComposeTextItem['style'],
-      };
-    }
-    return { type: 'separator', id: item.id, title: item.title || '分页' };
-  });
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -204,17 +143,17 @@ function isEditableTarget(target: EventTarget | null): boolean {
 export default function ComposePage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const queryClient = useQueryClient();
   const routeState = location.state as {
     materialPackage?: TemplateMaterialPackage;
     templateConfig?: TemplateConfig;
     templateName?: string;
+    templateApplyMode?: TemplateApplyMode;
+    newDraft?: boolean;
   } | null;
   const incomingPkg = routeState?.materialPackage;
+  const startNewDraft = routeState?.newDraft === true;
   const incomingTemplateConfig = routeState?.templateConfig || incomingPkg?.config;
   const { items: basketItems, remove: removeFromBasket, clear: clearBasket } = useBasket();
-  const sessionIdRef = useRef(`lesson-current-${Date.now()}`);
-  const serverDraftUpdatedAtRef = useRef<string | null>(null);
   const documentCanvasRef = useRef<HTMLDivElement | null>(null);
 
   const composeItems = useComposeWorkbenchStore((state) => state.items);
@@ -233,27 +172,23 @@ export default function ComposePage() {
   const undo = useComposeWorkbenchStore((state) => state.undo);
   const redo = useComposeWorkbenchStore((state) => state.redo);
   const markSaved = useComposeWorkbenchStore((state) => state.markSaved);
-  const [loading, setLoading] = useState(true);
   const [previewMode, setPreviewMode] = useState<'A4' | 'slides'>('A4');
+  const [userSettings] = useState<ComposeUserSettings>(() => getComposeUserSettings());
   const [renderAllPreviewPages, setRenderAllPreviewPages] = useState(false);
   const [screenPreviewPageLimit, setScreenPreviewPageLimit] = useState(3);
-  const [documentZoom, setDocumentZoom] = useState(72);
-  const [zoomMode, setZoomMode] = useState<'fit-width' | 'manual'>('fit-width');
+  const [documentZoom, setDocumentZoom] = useState(userSettings.documentZoom);
+  const [zoomMode, setZoomMode] = useState<'fit-width' | 'manual'>(userSettings.zoomMode);
   const [canvasWidth, setCanvasWidth] = useState(0);
-  const [showAnswers, setShowAnswers] = useState(false);
-  const [showAnalysis, setShowAnalysis] = useState(false);
-  const [answerExportMode, setAnswerExportMode] = useState<AnswerExportMode>('end_answer_analysis');
-  const [outputProfile, setOutputProfile] = useState<'student' | 'teacher'>('student');
+  const [showAnswers, setShowAnswers] = useState(userSettings.showAnswers);
+  const [showAnalysis, setShowAnalysis] = useState(userSettings.showAnalysis);
+  const [answerExportMode, setAnswerExportMode] = useState<AnswerExportMode>(userSettings.answerExportMode);
+  const [outputProfile, setOutputProfile] = useState<'student' | 'teacher'>(userSettings.outputProfile);
   const [lessonTitle, setLessonTitleRaw] = useState('未命名试卷');
   const [lessonSubtitle, setLessonSubtitleRaw] = useState('');
-  const [headerFooter, setHeaderFooterRaw] = useState<HandoutHeaderFooterConfig>(DEFAULT_HF_CONFIG);
-  const [styleConfig, setStyleConfigRaw] = useState<HandoutStyleConfig>(DEFAULT_STYLE_CONFIG);
-  const [slideTemplate, setSlideTemplateRaw] = useState<SlideDeckTemplate>('teach_practice_teach');
-  const [draftSaveState, setDraftSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [exportState, setExportState] = useState<'idle' | 'word' | 'pptx' | 'done' | 'error'>('idle');
-  const [wordPreviewFile, setWordPreviewFile] = useState<File | null>(null);
-  const [finalProofOpen, setFinalProofOpen] = useState(false);
-  const [inspectorTab, setInspectorTab] = useState<HandoutStyleTab | 'header' | 'preflight' | 'view' | 'object'>('page');
+  const [headerFooter, setHeaderFooterRaw] = useState<HandoutHeaderFooterConfig>(userSettings.headerFooter);
+  const [styleConfig, setStyleConfigRaw] = useState<HandoutStyleConfig>(userSettings.styleConfig);
+  const [slideTemplate, setSlideTemplateRaw] = useState<SlideDeckTemplate>(userSettings.slideTemplate);
+  const [inspectorTab, setInspectorTab] = useState<'preflight' | 'view' | 'object'>('view');
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [outlineOpen, setOutlineOpen] = useState(true);
   const [outlineMode, setOutlineMode] = useState<'content' | 'pages'>('content');
@@ -323,24 +258,50 @@ export default function ComposePage() {
   const setStyleConfig = useCallback((action: SetStateAction<HandoutStyleConfig>) => {
     updateSettings('styleConfig', (current) => ({ ...current, styleConfig: typeof action === 'function' ? action(current.styleConfig) : action }));
   }, [updateSettings]);
-  const setSlideTemplate = useCallback((action: SetStateAction<SlideDeckTemplate>) => {
-    updateSettings('slideTemplate', (current) => ({ ...current, slideTemplate: typeof action === 'function' ? action(current.slideTemplate) : action }));
-  }, [updateSettings]);
+  useEffect(() => {
+    settingsSnapshotRef.current = {
+      ...settingsSnapshotRef.current,
+      headerFooter: userSettings.headerFooter,
+      styleConfig: userSettings.styleConfig,
+      slideTemplate: userSettings.slideTemplate,
+    };
+  }, [userSettings]);
 
-  const hydrateServerDraft = useCallback(async (draft: PaperDraft) => {
-    const questionIds = draft.items
-      .filter((item) => item.type === 'question' && item.question_id)
-      .map((item) => item.question_id as string);
-    const questions = await fetchQuestionsByIds(questionIds);
-    const loaded = buildComposeItemsFromPaperDraft(draft, questions);
-    sessionIdRef.current = draft.id;
-    serverDraftUpdatedAtRef.current = draft.updated_at;
-    setLessonTitle(draft.title);
-    setLessonSubtitle(draft.subtitle || '知识点、文本说明与试题自由拼接');
-    loadComposeItems(loaded);
-    setLoading(false);
-    setDraftSaveState('saved');
-  }, [loadComposeItems, setLessonSubtitle, setLessonTitle]);
+  useEffect(() => {
+    saveComposeUserSettings({
+      ...userSettings,
+      headerFooter,
+      styleConfig,
+      slideTemplate,
+      showAnswers,
+      showAnalysis,
+      outputProfile,
+      answerExportMode,
+      documentZoom,
+      zoomMode,
+    });
+  }, [answerExportMode, documentZoom, headerFooter, outputProfile, showAnalysis, showAnswers, slideTemplate, styleConfig, userSettings, zoomMode]);
+
+  const {
+    draftId,
+    draftSaveState,
+    loading,
+    recordSavedDraft,
+    refreshDraft,
+    serverDraftUpdatedAt,
+    setDraftSaveState,
+  } = useComposeDraftSession({
+    basketItems,
+    composeItems,
+    documentRevision,
+    incomingPackage: incomingPkg,
+    loadComposeItems,
+    savedRevision,
+    setLessonSubtitle,
+    setLessonTitle,
+    startNewDraft,
+    updateComposeItems: updateItems,
+  });
 
   const undoSettings = useCallback(() => {
     const previous = settingsPastRef.current.at(-1);
@@ -385,8 +346,9 @@ export default function ComposePage() {
 
   useEffect(() => {
     if (!incomingTemplateConfig) return;
-    setStyleConfig((current) => applyTemplateToStyleConfig(current, incomingTemplateConfig));
-    setHeaderFooter((current) => applyTemplateToHeaderFooter(current, incomingTemplateConfig));
+    const applyMode = routeState?.templateApplyMode || 'overwrite';
+    setStyleConfig((current) => applyTemplateToStyleConfig(current, incomingTemplateConfig, applyMode));
+    setHeaderFooter((current) => applyTemplateToHeaderFooter(current, incomingTemplateConfig, applyMode));
     const nextShowAnswers = incomingTemplateConfig.show_answer ?? true;
     const nextShowAnalysis = incomingTemplateConfig.show_analysis ?? true;
     setShowAnswers(nextShowAnswers);
@@ -394,119 +356,12 @@ export default function ComposePage() {
     setOutputProfile(nextShowAnswers || nextShowAnalysis ? 'teacher' : 'student');
     setPreviewMode('A4');
     setZoomMode('fit-width');
-  }, [incomingTemplateConfig, setHeaderFooter, setStyleConfig]);
-
-  // ── Load questions from basket / incoming package ──
-  useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      if (incomingPkg && incomingPkg.questions.length > 0) {
-        if (!cancelled) {
-          setLessonTitle(incomingPkg.name || '未命名试卷');
-          const items = buildComposeItemsFromQuestions(incomingPkg.questions);
-          loadComposeItems(items);
-          setLoading(false);
-        }
-        return;
-      }
-
-      if (basketItems.length === 0) {
-        try {
-          const draft = await queryClient.fetchQuery({
-            queryKey: ['paper-draft', 'latest'],
-            queryFn: fetchLatestPaperDraft,
-          });
-          if (draft && draft.items.length > 0) {
-            if (!cancelled) {
-              await hydrateServerDraft(draft);
-            }
-            return;
-          }
-        } catch {
-          // 工作台草稿不可用时，保持空白工作台，仍可从题篮开始组卷。
-        }
-        if (!cancelled) {
-          loadComposeItems([]);
-          setLoading(false);
-        }
-        return;
-      }
-
-      let loaded: ComposeItem[];
-      try {
-        const questionIds = basketItems.map((item) => item.question_id);
-        const questions = await queryClient.fetchQuery({
-          queryKey: ['questions', 'batch', [...questionIds].sort()],
-          queryFn: () => fetchQuestionsByIds(questionIds),
-        });
-        const questionMap = new Map(questions.map((question) => [question.question_id, question]));
-        loaded = basketItems.map((basketItem) => ({
-          type: 'question',
-          id: basketItem.question_id,
-          questionId: basketItem.question_id,
-          question: questionMap.get(basketItem.question_id),
-        }));
-      } catch {
-        loaded = [];
-        for (const basketItem of basketItems) {
-          try {
-            const question = await queryClient.fetchQuery({
-              queryKey: ['question', basketItem.question_id],
-              queryFn: () => fetchQuestion(basketItem.question_id),
-            });
-            loaded.push({
-              type: 'question',
-              id: basketItem.question_id,
-              questionId: basketItem.question_id,
-              question,
-            });
-          } catch {
-            loaded.push({
-              type: 'question',
-              id: basketItem.question_id,
-              questionId: basketItem.question_id,
-            });
-          }
-        }
-      }
-
-      if (!cancelled) {
-        loadComposeItems(loaded);
-        setLoading(false);
-      }
-    }
-
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [basketItems, hydrateServerDraft, incomingPkg, loadComposeItems, queryClient, setLessonTitle]);
-
-  useEffect(() => {
-    if (loading || !serverDraftUpdatedAtRef.current) return;
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'hidden' || documentRevision !== savedRevision) return;
-      void fetchLatestPaperDraft()
-        .then(async (draft) => {
-          if (
-            draft
-            && draft.id === sessionIdRef.current
-            && draft.updated_at !== serverDraftUpdatedAtRef.current
-          ) {
-            await hydrateServerDraft(draft);
-            queryClient.setQueryData(['paper-draft', 'latest'], draft);
-          }
-        })
-        .catch(() => undefined);
-    }, 2500);
-    return () => window.clearInterval(timer);
-  }, [documentRevision, hydrateServerDraft, loading, queryClient, savedRevision]);
+  }, [incomingTemplateConfig, routeState?.templateApplyMode, setHeaderFooter, setStyleConfig]);
 
   const legacyLessonPackage = useMemo(
     () =>
       createLessonPackage({
-        id: sessionIdRef.current,
+        id: draftId,
         title: lessonTitle,
         subtitle: lessonSubtitle,
         source: incomingPkg ? 'template' : 'compose',
@@ -515,7 +370,7 @@ export default function ComposePage() {
         styleConfig,
         slideTemplate,
       }),
-    [composeItems, headerFooter, incomingPkg, lessonSubtitle, lessonTitle, slideTemplate, styleConfig],
+    [composeItems, draftId, headerFooter, incomingPkg, lessonSubtitle, lessonTitle, slideTemplate, styleConfig],
   );
 
   const previewLessonDocument = useMemo(
@@ -596,24 +451,18 @@ export default function ComposePage() {
         previewLessonPackage,
         diagnostics as unknown as Record<string, unknown>,
         revisionToSave,
-        serverDraftUpdatedAtRef.current,
+        serverDraftUpdatedAt,
       )
         .then((draft) => {
-          serverDraftUpdatedAtRef.current = draft.updated_at;
-          queryClient.setQueryData(['paper-draft', 'latest'], draft);
+          recordSavedDraft(draft);
           markSaved(revisionToSave);
           setDraftSaveState('saved');
         })
         .catch((error: unknown) => {
           if (error instanceof ApiError && error.status === 409) {
-            void fetchLatestPaperDraft()
-              .then(async (draft) => {
-                if (draft && draft.id === sessionIdRef.current) {
-                  await hydrateServerDraft(draft);
-                  queryClient.setQueryData(['paper-draft', 'latest'], draft);
-                  return;
-                }
-                setDraftSaveState('error');
+            void refreshDraft()
+              .then((refreshed) => {
+                if (!refreshed) setDraftSaveState('error');
               })
               .catch(() => setDraftSaveState('error'));
             return;
@@ -623,7 +472,7 @@ export default function ComposePage() {
     }, 700);
 
     return () => window.clearTimeout(timer);
-  }, [diagnostics, documentRevision, hydrateServerDraft, markSaved, previewLessonPackage, queryClient]);
+  }, [diagnostics, documentRevision, markSaved, previewLessonPackage, recordSavedDraft, refreshDraft, serverDraftUpdatedAt, setDraftSaveState]);
 
   const selectedItem = selectedIndex >= 0 ? composeItems[selectedIndex] : null;
   const selectCanvasItem = useCallback((itemId: string, additive = false) => {
@@ -1201,7 +1050,8 @@ export default function ComposePage() {
 
   const handleSaveCurrent = useCallback(() => {
     saveLessonPackageToLibrary(previewLessonPackage);
-  }, [previewLessonPackage]);
+    setDraftSaveState('saved');
+  }, [previewLessonPackage, setDraftSaveState]);
 
   const handleClearAll = useCallback(() => {
     if (!window.confirm(`确定清空全部 ${composeItems.length} 个内容对象吗？此操作可通过撤销恢复。`)) return;
@@ -1210,57 +1060,13 @@ export default function ComposePage() {
   }, [clearBasket, commitItems, composeItems.length]);
 
   const openLessonRoute = useCallback((path: '/handout' | '/slides' | '/classroom') => {
-    saveCurrentLessonPackage(previewLessonPackage);
+    if (path === '/handout') {
+      saveLessonPackageToLibrary(previewLessonPackage);
+    } else {
+      saveCurrentLessonPackage(previewLessonPackage);
+    }
     navigate(path);
   }, [navigate, previewLessonPackage]);
-
-  const handleExportWord = useCallback(() => {
-    const exportRiskCount = diagnostics.formulaIssueCount + diagnostics.figureIssueCount + diagnostics.missingAnswerCount;
-    if (exportRiskCount > 0 && !window.confirm(`导出预检发现 ${exportRiskCount} 项公式、图片或答案风险。仍要继续导出 Word 吗？`)) {
-      setInspectorOpen(true);
-      setInspectorTab('preflight');
-      return;
-    }
-    setExportState('word');
-    const options = resolveAnswerExportOptions(answerExportMode);
-    void exportLessonOnServer('word', previewLessonPackage, options)
-      .then(() => null)
-      .catch(() => exportLessonAsWord(previewLessonPackage, { ...options, download: false }))
-      .then((blob) => {
-        if (blob === null) {
-          setWordPreviewFile(null);
-          setExportState('done');
-          return;
-        }
-        const fileName = `${(lessonTitle || '物理学案').replace(/[\\/:*?"<>|]/g, '_')}.docx`;
-        setWordPreviewFile(new File([blob], fileName, { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }));
-        setExportState('done');
-      })
-      .catch(() => setExportState('error'));
-  }, [answerExportMode, diagnostics.figureIssueCount, diagnostics.formulaIssueCount, diagnostics.missingAnswerCount, lessonTitle, previewLessonPackage]);
-
-  const downloadWordPreview = useCallback(() => {
-    if (!wordPreviewFile) return;
-    const url = URL.createObjectURL(wordPreviewFile);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = wordPreviewFile.name;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setWordPreviewFile(null);
-  }, [wordPreviewFile]);
-
-  const handleExportPptx = useCallback(() => {
-    setExportState('pptx');
-    const options = resolveAnswerExportOptions(answerExportMode);
-    void exportLessonOnServer('pptx', previewLessonPackage, options)
-      .then(() => setExportState('done'))
-      .catch(() => exportLessonAsPptx(previewLessonPackage, options))
-      .then(() => setExportState('done'))
-      .catch(() => setExportState('error'));
-  }, [answerExportMode, previewLessonPackage]);
 
   const nudgeZoom = useCallback((delta: number) => {
     setZoomMode('manual');
@@ -1342,14 +1148,11 @@ export default function ComposePage() {
           <Button variant="ghost" size="sm" onClick={handleClearAll}>
             清空
           </Button>
-          <Button variant="outline" size="sm" onClick={handleExportWord} disabled={exportState === 'pptx'}>
-            {exportState === 'word' ? '正在生成…' : '导出 Word'}
-          </Button>
           <Button variant="outline" size="sm" onClick={handleSaveCurrent}>
-            存入作品库
+            保存项目
           </Button>
           <Button size="sm" onClick={() => openLessonRoute('/handout')}>
-            讲义预览
+            进入讲义排版
           </Button>
         </div>
       </header>
@@ -1388,33 +1191,9 @@ export default function ComposePage() {
           自动整理
         </ToolButton>
 
-        <ToolButton onClick={() => navigate('/templates')} title="管理并应用讲义与课件模板">
+        <ToolButton onClick={() => navigate('/templates?scope=compose')} title="管理并应用组卷模板">
           模板
         </ToolButton>
-
-        <ToolDivider />
-
-        <SegmentedControl
-          options={[
-            { value: 'A4', label: '流式编辑' },
-            { value: 'slides', label: '课件预览' },
-          ]}
-          value={previewMode}
-          onChange={(value) => setPreviewMode(value as 'A4' | 'slides')}
-        />
-
-        {previewMode === 'A4' && <SegmentedControl
-          options={[
-            { value: 'portrait', label: '竖排' },
-            { value: 'landscape', label: '横排' },
-          ]}
-          value={styleConfig.pageOrientation}
-          onChange={(value) => setStyleConfig((current) => ({
-            ...current,
-            pageOrientation: value as HandoutStyleConfig['pageOrientation'],
-            layoutMode: 'flow',
-          }))}
-        />}
 
         <ToolDivider />
 
@@ -1465,29 +1244,19 @@ export default function ComposePage() {
           active={inspectorOpen}
           onClick={() => {
             setInspectorOpen((prev) => !prev);
-            setInspectorTab('page');
+            setInspectorTab('view');
           }}
-          title="页面、页眉和预检设置"
+          title="内容显示和组卷预检"
         >
-          页面设置
+          内容检查
         </ToolButton>
-        {previewMode === 'A4' && <ToolButton onClick={() => setFinalProofOpen(true)} title="使用 Paged.js 按最终纸张尺寸分页检查">
-          最终出稿
-        </ToolButton>}
-        {previewMode === 'slides' && <div className="ml-auto flex items-center gap-1 pl-2">
-          <Select
-            options={(Object.entries(SLIDE_DECK_TEMPLATE_LABELS) as [SlideDeckTemplate, string][]).map(([value, label]) => ({ value, label }))}
-            value={slideTemplate}
-            onChange={(event) => setSlideTemplate(event.target.value as SlideDeckTemplate)}
-            size="sm"
-            wrapperClassName="w-[96px]"
-          />
-          <ToolButton onClick={() => openLessonRoute('/slides')}>预览 PPT</ToolButton>
-          <ToolButton onClick={handleExportPptx} title="提交服务端后台导出；失败时回退到浏览器生成" active={exportState === 'pptx'}>
-            {exportState === 'pptx' ? '导出中…' : exportState === 'done' ? '已导出 PPT' : '导出 PPT'}
-          </ToolButton>
-          <ToolButton onClick={() => openLessonRoute('/classroom')}>授课</ToolButton>
-        </div>}
+
+        <div className="ml-auto flex items-center gap-1 pl-2">
+          <span className="px-1 text-[10px] font-semibold text-[#8295aa]">下一步</span>
+          <ToolButton onClick={() => openLessonRoute('/handout')}>讲义排版</ToolButton>
+          <ToolButton onClick={() => openLessonRoute('/slides')}>课件制作</ToolButton>
+          <ToolButton onClick={() => openLessonRoute('/classroom')}>课堂授课</ToolButton>
+        </div>
       </div>
 
       {/* ── Main workspace ── */}
@@ -1509,6 +1278,7 @@ export default function ComposePage() {
               itemContent={(index, item) => {
               const typeLabel = item.type === 'question' ? formatQuestionType(item.question?.question_type || '') : item.type === 'text' ? '文本' : item.type === 'knowledge' ? '知识讲解' : '分页';
               const title = item.type === 'question' ? item.question?.title || item.questionId : item.title;
+              const sourceLabel = item.type === 'question' ? getQuestionSourceLabel(item.question, '未标注来源') : '';
               return <div className="pb-1"><button
                 key={item.id}
                 type="button"
@@ -1517,7 +1287,7 @@ export default function ComposePage() {
                 className={`grid w-full grid-cols-[24px_minmax(0,1fr)_28px] items-center gap-1 rounded-md border px-1.5 py-2 text-left transition-colors ${selectedItemIds.includes(item.id) || (selectedItemIds.length === 0 && selectedIndex === index) ? 'border-[#65a0dc] bg-white shadow-sm' : 'border-transparent bg-transparent hover:border-[#d5e0eb] hover:bg-white'}`}
               >
                 <span className="flex h-5 w-5 items-center justify-center rounded bg-[#e8f1fb] text-[9px] font-bold text-[#2768ad]">{index + 1}</span>
-                <span className="min-w-0"><strong className="block truncate text-[10px] text-[#405873]">{title}</strong><small className="text-[9px] text-[#91a2b5]">{typeLabel}</small></span>
+                <span className="min-w-0"><strong className="block truncate text-[10px] text-[#405873]">{title}</strong><small className="block truncate text-[9px] text-[#91a2b5]" title={sourceLabel || typeLabel}>{typeLabel}{sourceLabel ? ` · ${sourceLabel}` : ''}</small></span>
                 <span className="text-center text-[10px] text-[#7990a8]" title="双击编辑">编辑</span>
               </button></div>;
             }}
@@ -1651,22 +1421,20 @@ export default function ComposePage() {
 
         {/* Inspector */}
         {inspectorOpen && (
-          <aside className="absolute inset-y-0 right-0 z-40 flex w-[320px] flex-col border-l border-[#d4deea] bg-[#f6f8fb] shadow-[-14px_0_30px_rgba(15,23,42,0.16)]">
-            <div className="flex min-h-12 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[#dbe4ef] bg-white/70 px-1.5">
+          <aside className="compose-inspector relative z-10 flex w-[min(440px,42vw)] min-w-[340px] shrink-0 flex-col border-l border-[#d4deea] bg-[#f6f8fb] shadow-[-14px_0_30px_rgba(15,23,42,0.16)]">
+            <div className="compose-inspector__tabs flex min-h-14 shrink-0 items-center gap-1 overflow-x-auto border-b border-[#dbe4ef] bg-white px-3">
               {(
                 [
-                  ...HANDOUT_STYLE_TABS.map((tab) => [tab.value, tab.label] as const),
-                  ['header', '页眉'],
                   ['view', '显示'],
                   ['preflight', '预检'],
-                  ...(selectedItem ? [['object', '对象'] as const] : []),
+                  ...(selectedItem ? [['object', '当前对象'] as const] : []),
                 ] as Array<readonly [typeof inspectorTab, string]>
               ).map(([tab, label]) => (
                 <button
                   key={tab}
                   type="button"
                   onClick={() => setInspectorTab(tab)}
-                    className={`min-w-[46px] shrink-0 whitespace-nowrap rounded px-1.5 py-2 text-[10px] font-semibold transition-colors ${
+                    className={`min-w-[54px] shrink-0 whitespace-nowrap rounded-md px-2 py-2.5 text-[11px] font-semibold transition-colors ${
                     inspectorTab === tab
                       ? 'bg-[#e8f1fb] text-[#1f5fb8] shadow-[inset_0_0_0_1px_rgba(37,103,184,0.10)]'
                       : 'text-[var(--color-text-muted)] hover:bg-white hover:text-[var(--color-text)]'
@@ -1685,16 +1453,31 @@ export default function ComposePage() {
               </button>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto p-3">
-              {HANDOUT_STYLE_TABS.some((tab) => tab.value === inspectorTab) && (
-                <HandoutStylePresetPanel
-                  currentConfig={styleConfig}
-                  onApplyConfig={setStyleConfig}
-                  activeTab={inspectorTab as HandoutStyleTab}
-                />
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              {inspectorTab === 'view' && (
+                <PanelCard title="组卷页只负责内容">
+                  <div className="space-y-3 text-xs leading-5 text-[#60778f]">
+                    <p>题目、知识讲解、文本块和分页顺序在这里编辑。纸张、页边距、页眉页脚与最终分页请到讲义排版页设置。</p>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                      <button type="button" onClick={() => openLessonRoute('/handout')} className="rounded-md border border-[#c9dced] bg-white px-3 py-2 text-left font-semibold text-[#2567b8] hover:bg-[#f2f7fc]">讲义排版</button>
+                      <button type="button" onClick={() => openLessonRoute('/slides')} className="rounded-md border border-[#c9dced] bg-white px-3 py-2 text-left font-semibold text-[#2567b8] hover:bg-[#f2f7fc]">课件制作</button>
+                      <button type="button" onClick={() => openLessonRoute('/classroom')} className="rounded-md border border-[#c9dced] bg-white px-3 py-2 text-left font-semibold text-[#2567b8] hover:bg-[#f2f7fc]">课堂授课</button>
+                    </div>
+                    <ToggleRow label="显示答案" active={showAnswers} onClick={() => setShowAnswers((prev) => !prev)} />
+                    <ToggleRow label="显示解析" active={showAnalysis} onClick={() => setShowAnalysis((prev) => !prev)} />
+                    <div className="rounded-lg bg-[var(--color-bg-hover)] px-3 py-2">
+                      <Select
+                        label="导出答案安排"
+                        size="sm"
+                        value={answerExportMode}
+                        options={ANSWER_EXPORT_OPTIONS}
+                        onChange={(event) => setAnswerExportMode(event.target.value as AnswerExportMode)}
+                      />
+                    </div>
+                    <ToggleRow label="渲染全部页面" active={renderAllPreviewPages} onClick={() => setRenderAllPreviewPages((prev) => !prev)} />
+                  </div>
+                </PanelCard>
               )}
-
-              {inspectorTab === 'header' && <HandoutHeaderFooterConfigPanel config={headerFooter} onChange={setHeaderFooter} />}
 
               {inspectorTab === 'preflight' && (
                 <PreflightSection
@@ -1706,25 +1489,6 @@ export default function ComposePage() {
                   onLocateQuestion={locateQuestion}
                   onFixWarning={fixDiagnosticWarning}
                 />
-              )}
-
-              {inspectorTab === 'view' && (
-                <PanelCard title="内容显示">
-                  <div className="space-y-2">
-                    <ToggleRow label="显示答案" active={showAnswers} onClick={() => setShowAnswers((prev) => !prev)} />
-                    <ToggleRow label="显示解析" active={showAnalysis} onClick={() => setShowAnalysis((prev) => !prev)} />
-                    <div className="rounded-lg bg-[var(--color-bg-hover)] px-3 py-2">
-                      <Select
-                        label="Word 答案安排"
-                        size="sm"
-                        value={answerExportMode}
-                        options={ANSWER_EXPORT_OPTIONS}
-                        onChange={(event) => setAnswerExportMode(event.target.value as AnswerExportMode)}
-                      />
-                    </div>
-                    <ToggleRow label="渲染全部页面" active={renderAllPreviewPages} onClick={() => setRenderAllPreviewPages((prev) => !prev)} />
-                  </div>
-                </PanelCard>
               )}
 
               {inspectorTab === 'object' && selectedItem && (
@@ -1780,18 +1544,6 @@ export default function ComposePage() {
         onClose={() => setSupplementOpen(false)}
         onApply={handleAddSupplementCandidates}
       />}
-      {finalProofOpen && previewModel && <FinalProofDialog
-        items={previewModel.items}
-        config={previewModel.config}
-        report={effectivePaginationReport}
-        onClose={() => setFinalProofOpen(false)}
-      />}
-      {wordPreviewFile && <DocumentPreviewModal
-        file={wordPreviewFile}
-        onClose={() => setWordPreviewFile(null)}
-        onConfirm={downloadWordPreview}
-        confirmLabel="确认并下载"
-      />}
     </div>
   );
 }
@@ -1835,36 +1587,6 @@ function SupplementCandidatesDialog({ candidates, selectedIds, loading, error, o
           <div className="flex gap-2"><button type="button" onClick={onClose} className="rounded-lg border border-[#cfdeeb] px-3 py-2 text-xs font-semibold text-[#57718b]">取消</button><button type="button" disabled={selectedIds.length === 0 || loading} onClick={onApply} className="rounded-lg bg-[#2567b8] px-3 py-2 text-xs font-semibold text-white disabled:opacity-45">加入试卷</button></div>
         </footer>
       </section>
-    </div>
-  );
-}
-
-function FinalProofDialog({
-  items,
-  config,
-  report,
-  onClose,
-}: {
-  items: ReturnType<typeof layoutModelToHandoutItems>;
-  config: HandoutConfig;
-  report: HandoutPaginationReport | null;
-  onClose: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-[80] flex flex-col bg-[#dbe3ec]" role="dialog" aria-modal="true" aria-label="最终出稿检查">
-      <header className="compose-workbench-ui flex h-12 shrink-0 items-center gap-3 border-b border-[#cbd6e2] bg-white px-4 shadow-sm">
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-bold text-[#263b52]">最终出稿检查</div>
-          <div className="text-[10px] text-[#74889d]">Paged.js 按真实纸张、页边距和页眉页脚重新分页</div>
-        </div>
-        <span className="rounded bg-[#edf5fd] px-2 py-1 text-[10px] font-semibold text-[#3976b3]">{report?.estimatedPageCount || 0} 页</span>
-        {Boolean(report?.nearCapacityPageCount) && <span className="rounded bg-[#fff6e5] px-2 py-1 text-[10px] font-semibold text-[#9b6509]">{report?.nearCapacityPageCount} 页接近满页</span>}
-        <button type="button" onClick={() => window.print()} className="rounded-md border border-[#cbd8e5] bg-white px-3 py-1.5 text-xs font-semibold text-[#45627f] hover:bg-[#f4f7fa]">打印 / PDF</button>
-        <button type="button" onClick={onClose} className="rounded-md bg-[#2567b8] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1f5a9f]">返回编辑</button>
-      </header>
-      <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
-        <PagedHandoutDocument items={items} config={config} />
-      </div>
     </div>
   );
 }

@@ -631,7 +631,42 @@ function readReviewPageCache(taskId: string): string[] | null {
       `状态分布：${Object.entries(statusCounts).map(([key, value]) => `${key} ${value}`).join('，') || '无'}`,
       `疑似需补齐基础字段的草稿：${riskCount} 道。`,
     ];
+    const qualityReport = Array.isArray(parsed.qualityReport) ? parsed.qualityReport : [];
+    const diagnostics = qualityReport
+      .filter((item: Record<string, unknown>) => Array.isArray(item.issues) && item.issues.length > 0)
+      .map((item: Record<string, unknown>) => ({
+        question_id: String(item.question_id || ''),
+        issues: (item.issues as Array<Record<string, unknown>>).map((issue) => ({
+          code: String(issue.code || ''),
+          severity: String(issue.severity || ''),
+          field: String(issue.field || ''),
+          message: String(issue.message || ''),
+          suggestion: String(issue.suggestion || ''),
+        })),
+      }));
+    if (diagnostics.length > 0) {
+      details.push('当用户要求消除风险时，必须使用当前 task_id 和 question_id 修改审核草稿，而不是只输出建议；修改后重新校验，逐项确认风险是否消失。');
+      details.push(
+        `当前前端校验诊断（题目编辑后会自动更新）：${JSON.stringify(diagnostics, null, 2)}`,
+        '清洗或复核时必须逐题说明问题所在：题号、字段、规则、严重程度和建议；不要只说“存在风险”。如果修改了题目，先说明修改前后的差异。',
+      );
+    } else {
+      details.push('当前前端校验诊断：最近一次自动保存时未发现风险；仍需结合完整题干、选项、答案、解析和配图复核。');
+    }
     if (current) {
+      details.push(`当前题完整草稿（可直接修改的字段）：${JSON.stringify({
+        question_id: String(current.question_id || current.id || ''),
+        question_type: current.question_type,
+        title: current.title,
+        options: current.options,
+        answer: current.answer,
+        analysis: current.analysis,
+        knowledge_point: current.knowledge_point || current.knowledge_points,
+        tags: current.tags,
+        source: current.source,
+        figures: current.figures,
+        status: current.status,
+      }, null, 2)}`);
       details.push(
         `当前题摘要：${String(current.question_id || current.id || '')} ${String(current.title || '').slice(0, 120)}`,
         `当前题状态：${String(current.status || 'pending')}；知识点：${String(current.knowledge_point || current.knowledge_points || '未标注')}`,

@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 
+import ImageCachePickerDialog from '../editor/ImageCachePickerDialog';
+import type { CachedImageAsset } from '../editor/ImageCachePickerDialog';
 import {
+  addCachedQuestionImage,
   addQuestionImage,
   deleteQuestionImage,
   fetchAvailableImages,
   fetchQuestionImages,
   reorderQuestionImages,
-  replaceQuestionImage,
   updateQuestionImage,
   validateQuestionImages,
 } from '../../services/api';
@@ -36,6 +38,9 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
   const [pickSearch, setPickSearch] = useState('');
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [cachePickerOpen, setCachePickerOpen] = useState(false);
+  const [cacheBusyPath, setCacheBusyPath] = useState<string | null>(null);
+  const [replaceTargetId, setReplaceTargetId] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<QuestionImageDetail[]> => {
     if (!questionId) return [];
@@ -81,17 +86,29 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
     }
   }, [questionId, load, onImagesChanged]);
 
-  const handleReplace = useCallback(async (oldId: string) => {
-    const newId = window.prompt('输入新素材 asset_id:');
-    if (!newId) return;
+  const handleCacheSelect = useCallback(async (asset: CachedImageAsset) => {
+    setCacheBusyPath(asset.relative_path);
+    setError(null);
     try {
-      await replaceQuestionImage(questionId, oldId, { old_asset_id: oldId, new_asset_id: newId });
+      await addCachedQuestionImage(questionId, { relative_path: asset.relative_path, role: 'stem' });
+      if (replaceTargetId) {
+        await deleteQuestionImage(questionId, replaceTargetId);
+      }
       const nextImages = await load();
       onImagesChanged?.(nextImages);
+      setCachePickerOpen(false);
+      setReplaceTargetId(null);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '替换失败');
+      setError(err instanceof Error ? err.message : '图片缓存插入失败');
+    } finally {
+      setCacheBusyPath(null);
     }
-  }, [questionId, load, onImagesChanged]);
+  }, [load, onImagesChanged, questionId, replaceTargetId]);
+
+  const handleReplace = useCallback((oldId: string) => {
+    setReplaceTargetId(oldId);
+    setCachePickerOpen(true);
+  }, []);
 
   const handleReorder = useCallback(async (draggedIdx: number, dropIdx: number) => {
     if (draggedIdx === dropIdx) { setDragIdx(null); return; }
@@ -152,7 +169,14 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
           className="cursor-pointer rounded border-none px-2 py-1 text-xs font-medium text-white"
           style={{ background: 'var(--color-accent)' }}
         >
-          + 添加图片
+          + 添加已入库图片
+        </button>
+        <button
+          onClick={() => { setReplaceTargetId(null); setCachePickerOpen(true); }}
+          className="cursor-pointer rounded border px-2 py-1 text-xs font-medium"
+          style={{ borderColor: 'var(--color-accent)', color: 'var(--color-accent)', background: 'var(--color-bg-card)' }}
+        >
+          + 从缓存添加
         </button>
       </div>
 
@@ -309,6 +333,14 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
           题干占位符：{(stemText.match(/!\[fig:([^\]]+)\]/g) || []).join(', ') || '无'}
         </div>
       )}
+      <ImageCachePickerDialog
+        open={cachePickerOpen}
+        usedPaths={new Set(images.map((image) => image.file_path))}
+        busyPath={cacheBusyPath}
+        error={error}
+        onClose={() => { setCachePickerOpen(false); setReplaceTargetId(null); }}
+        onSelect={handleCacheSelect}
+      />
     </div>
   );
 }

@@ -53,6 +53,7 @@ export default function QuestionContentCard({
 }: Props) {
   const data = editMode && form ? form : question;
   const dirty = (f: string) => dirtyFields?.has(f) ?? false;
+  const isExperiment = data.question_type === 'experiment';
 
   const allImages: QuestionImageDetail[] = images && images.length > 0
     ? images
@@ -176,16 +177,16 @@ export default function QuestionContentCard({
                 className="rounded-full px-2.5 py-1 text-xs font-semibold"
                 style={{ background: '#f8fafc', color: '#475569' }}
               >
-                选项
+                {isExperiment ? '实验步骤' : '选项'}
               </span>
               <span className="text-xs" style={{ color: '#94a3b8' }}>
-                单独包裹，方便阅读
+                {isExperiment ? '按实验流程顺序展示' : '单独包裹，方便阅读'}
               </span>
             </div>
             <div
               className="grid gap-3"
               style={{
-                gridTemplateColumns: data.options.length <= 2 ? 'repeat(2, minmax(0, 1fr))' : '1fr',
+                gridTemplateColumns: !isExperiment && data.options.length <= 2 ? 'repeat(2, minmax(0, 1fr))' : '1fr',
               }}
             >
               {editMode && form
@@ -199,7 +200,7 @@ export default function QuestionContentCard({
                         className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-sm font-bold"
                         style={{ background: '#e8f1ff', color: '#2f76dd' }}
                       >
-                        {opt.opt}
+                        {isExperiment ? `步骤 ${i + 1}` : opt.opt}
                       </span>
                       <input
                         value={opt.content}
@@ -223,7 +224,7 @@ export default function QuestionContentCard({
                         className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-sm font-bold"
                         style={{ background: '#eef4ff', color: '#2f76dd' }}
                       >
-                        {opt.opt}
+                        {isExperiment ? `步骤 ${i + 1}` : opt.opt}
                       </span>
                       <span className="flex-1 text-[15px] leading-7" style={{ color: '#0f172a' }}>
                         <LatexRenderer text={opt.content} />

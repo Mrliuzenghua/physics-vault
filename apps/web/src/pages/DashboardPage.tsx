@@ -12,7 +12,8 @@ import {
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
-import { fetchMcpStatus, fetchMistakeCount, fetchProcessingRuns, fetchReviewTasks, searchQuestions } from '../services/api';
+import { archiveTeachingProject, duplicateTeachingProject, fetchMcpStatus, fetchMistakeCount, fetchProcessingRuns, fetchReviewTasks, listTeachingProjects, searchQuestions } from '../services/api';
+import { buildClassroomFollowUpTasks, hydrateAllClassroomReflections, listClassroomReflections, setClassroomFollowUpTaskCompleted, type ClassroomFollowUpTask } from '../services/classroomReflection';
 import type { TaskLog } from '../types';
 
 interface DashboardStats {
@@ -21,6 +22,16 @@ interface DashboardStats {
   runningTasks: number;
   reviewCount: number;
   aiOnline: boolean;
+}
+
+interface TeachingProjectSummary {
+  id: string;
+  title: string;
+  status?: string;
+  contentRevision?: number;
+  handoutStatus?: string;
+  slidesStatus?: string;
+  updatedAt?: string;
 }
 
 const WORKFLOW: Array<{ label: string; detail: string; path: string; icon: LucideIcon }> = [
@@ -47,18 +58,58 @@ export default function DashboardPage() {
     aiOnline: false,
   });
   const [loading, setLoading] = useState(true);
+  const [followUpTasks, setFollowUpTasks] = useState<ClassroomFollowUpTask[]>([]);
+  const [recentProjects, setRecentProjects] = useState<TeachingProjectSummary[]>([]);
+
+  const refreshFollowUpTasks = () => setFollowUpTasks(buildClassroomFollowUpTasks(listClassroomReflections()));
+
+  const completeFollowUpTask = (taskId: string) => {
+    setClassroomFollowUpTaskCompleted(taskId, true);
+    refreshFollowUpTasks();
+  };
+
+  const refreshProjects = async () => {
+    const projects = await listTeachingProjects(8);
+    setRecentProjects(projects.map((item) => ({
+      id: String(item.id || ''),
+      title: String(item.title || '未命名教学项目'),
+      status: typeof item.status === 'string' ? item.status : undefined,
+      contentRevision: typeof item.contentRevision === 'number' ? item.contentRevision : undefined,
+      handoutStatus: typeof item.handoutStatus === 'string' ? item.handoutStatus : undefined,
+      slidesStatus: typeof item.slidesStatus === 'string' ? item.slidesStatus : undefined,
+      updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : undefined,
+    })).filter((item) => item.id));
+  };
+
+  const duplicateProject = async (project: TeachingProjectSummary) => {
+    const title = window.prompt('请输入副本名称', `${project.title}（副本）`);
+    if (!title?.trim()) return;
+    await duplicateTeachingProject(project.id, title.trim());
+    await refreshProjects();
+  };
+
+  const archiveProject = async (project: TeachingProjectSummary) => {
+    if (!window.confirm(`确定归档“${project.title}”吗？`)) return;
+    await archiveTeachingProject(project.id);
+    await refreshProjects();
+  };
 
   useEffect(() => {
+    refreshFollowUpTasks();
     let cancelled = false;
+    void hydrateAllClassroomReflections().then((reflections) => {
+      if (!cancelled) setFollowUpTasks(buildClassroomFollowUpTasks(reflections));
+    });
     async function loadStats() {
       setLoading(true);
       try {
-        const [questions, mistakes, runs, reviews, mcp] = await Promise.allSettled([
+        const [questions, mistakes, runs, reviews, mcp, projects] = await Promise.allSettled([
           searchQuestions({ limit: 1, offset: 0, search_mode: 'browse' }),
           fetchMistakeCount(),
           fetchProcessingRuns(),
           fetchReviewTasks(80),
           fetchMcpStatus(),
+          listTeachingProjects(8),
         ]);
         if (cancelled) return;
         setStats({
@@ -70,6 +121,17 @@ export default function DashboardPage() {
           reviewCount: reviews.status === 'fulfilled' ? reviews.value.items.length : 0,
           aiOnline: mcp.status === 'fulfilled' ? mcp.value.vl_available || mcp.value.llm_available : false,
         });
+        if (projects.status === 'fulfilled') {
+          setRecentProjects(projects.value.map((item) => ({
+            id: String(item.id || ''),
+            title: String(item.title || '未命名教学项目'),
+            status: typeof item.status === 'string' ? item.status : undefined,
+            contentRevision: typeof item.contentRevision === 'number' ? item.contentRevision : undefined,
+            handoutStatus: typeof item.handoutStatus === 'string' ? item.handoutStatus : undefined,
+            slidesStatus: typeof item.slidesStatus === 'string' ? item.slidesStatus : undefined,
+            updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : undefined,
+          })).filter((item) => item.id));
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -112,6 +174,57 @@ export default function DashboardPage() {
             ))}
           </div>
         </section>
+
+        {followUpTasks.length > 0 && <section className="rounded-lg border border-[#dce3ec] bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-[#263b52]">课后跟进</h2>
+              <p className="mt-1 text-xs text-[#8290a0]">根据最近授课复盘自动整理，完成后可回到课堂继续处理。</p>
+            </div>
+            <Link to="/classroom" className="text-xs font-semibold text-[#1768c5]">进入课堂</Link>
+          </div>
+          <div className="grid gap-2 md:grid-cols-2">
+            {followUpTasks.slice(0, 6).map((task) => (
+              <div key={task.id} className="rounded-md border border-[#e1e7ee] px-3 py-3 hover:border-[#8eb8e5] hover:bg-[#f5f9ff]">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex min-w-0 items-center gap-2 text-sm font-semibold text-[#2b4057]">
+                    <input type="checkbox" aria-label={`完成${task.title}`} onChange={() => completeFollowUpTask(task.id)} className="h-4 w-4 accent-[#1768c5]" />
+                    <span className="truncate">{task.title}</span>
+                  </label>
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] ${task.priority === 'high' ? 'bg-[#fff0f0] text-[#b33a3a]' : task.priority === 'medium' ? 'bg-[#fff7e8] text-[#b45f06]' : 'bg-[#eef9f2] text-[#28764b]'}`}>{task.priority === 'high' ? '优先' : task.priority === 'medium' ? '建议' : '可选'}</span>
+                </div>
+                <Link to="/classroom" className="mt-1 block text-[11px] text-[#8290a0] hover:text-[#1768c5]">{task.projectTitle} · {task.detail}</Link>
+              </div>
+            ))}
+          </div>
+        </section>}
+
+        {recentProjects.length > 0 && <section className="rounded-lg border border-[#dce3ec] bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-[#263b52]">最近教学项目</h2>
+              <p className="mt-1 text-xs text-[#8290a0]">查看内容修订和讲义、课件产物状态，避免拿旧版本继续授课。</p>
+            </div>
+            <Link to="/compose" className="text-xs font-semibold text-[#1768c5]">进入组卷</Link>
+          </div>
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            {recentProjects.map((project) => (
+              <div key={project.id} className="rounded-md border border-[#e1e7ee] px-3 py-3 hover:border-[#8eb8e5] hover:bg-[#f5f9ff]">
+                <div className="truncate text-sm font-semibold text-[#2b4057]">{project.title}</div>
+                <div className="mt-1 text-[11px] text-[#8290a0]">内容修订 {project.contentRevision ?? 0} · {project.status === 'archived' ? '已归档' : '编辑中'}</div>
+                <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">
+                  <Link to="/handout" className="rounded hover:ring-1 hover:ring-[#8eb8e5]"><ArtifactStatus label="讲义" status={project.handoutStatus} /></Link>
+                  <Link to="/slides" className="rounded hover:ring-1 hover:ring-[#8eb8e5]"><ArtifactStatus label="课件" status={project.slidesStatus} /></Link>
+                </div>
+                <div className="mt-2 flex items-center gap-3">
+                  <Link to="/compose" className="text-[11px] font-semibold text-[#1768c5]">打开内容工作台 →</Link>
+                  <button type="button" onClick={() => void duplicateProject(project)} className="text-[11px] text-[#56738f] hover:text-[#1768c5]">复制</button>
+                  {project.status !== 'archived' && <button type="button" onClick={() => void archiveProject(project)} className="text-[11px] text-[#9a6870] hover:text-[#b33a3a]">归档</button>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>}
 
         <section className="rounded-lg border border-[#dce3ec] bg-white p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
@@ -173,4 +286,22 @@ function AttentionRow({ icon: Icon, label, value, path, active }: { icon: Lucide
       <span className="text-xs font-semibold text-[#263b52]">{value}</span>
     </Link>
   );
+}
+
+function ArtifactStatus({ label, status }: { label: string; status?: string }) {
+  const text = status === 'published'
+    ? '已发布'
+    : status === 'changed_after_publish'
+      ? '内容已变更'
+      : status === 'ready'
+        ? '待发布'
+        : status === 'stale'
+          ? '需重新生成'
+          : '草稿';
+  const tone = status === 'published'
+    ? 'bg-[#eef9f2] text-[#28764b]'
+    : status === 'changed_after_publish' || status === 'stale'
+      ? 'bg-[#fff0f0] text-[#b33a3a]'
+      : 'bg-[#fff7e8] text-[#b45f06]';
+  return <span className={`rounded px-1.5 py-0.5 ${tone}`}>{label}：{text}</span>;
 }

@@ -7,8 +7,8 @@ import SideNav from './SideNav';
 import StatusBar from './StatusBar';
 import { useTheme } from '../../hooks/useTheme';
 import { useBasket } from '../../hooks/useBasket';
-import { getSettings, saveSettings, searchQuestions, fetchProcessingRuns, fetchMcpStatus, fetchMcpRuntimeConfig, getMcpConfig, pushMcpConfigToBackend } from '../../services/api';
-import type { McpRuntimeStatus, TaskLog } from '../../types';
+import { getSettings, saveSettings, fetchDatabaseStatus, fetchTasks, fetchMcpStatus, fetchMcpRuntimeConfig, getMcpConfig, pushMcpConfigToBackend } from '../../services/api';
+import type { McpRuntimeStatus } from '../../types';
 
 const PersistentAiChatPage = lazy(() => import('../../pages/AiChatPage'));
 const AI_WINDOW_MARGIN = 12;
@@ -128,22 +128,24 @@ export default function AppShell() {
     let isCancelled = false;
 
     const fetchStats = async () => {
-      // Question total (just need the total, 1 item is enough)
-      searchQuestions({ limit: 1 })
-        .then((searchResult) => {
-          if (!isCancelled) setQuestionCount(searchResult.total);
+      // This status bar only needs a count.  Using the dedicated lightweight
+      // endpoint avoids serialising a complete question card every poll.
+      fetchDatabaseStatus()
+        .then((databaseStatus) => {
+          if (!isCancelled) setQuestionCount(databaseStatus.questions_count);
         })
         .catch(() => {
           // Keep the previous count when the backend is temporarily unavailable.
         });
 
-      // Running task count
-      fetchProcessingRuns()
-        .then((runs: TaskLog[]) => {
-          if (!isCancelled) {
-            const running = runs.filter((r: TaskLog) => r.status === 'running' || r.status === 'pending').length;
-            setRunningTaskCount(running);
-          }
+      // Fetch only the count. The legacy processing-runs endpoint returns up
+      // to 50 complete records, which is unnecessary for a status indicator.
+      fetchTasks({
+        status: 'pending,running,retrying,cancel_requested',
+        page_size: 1,
+      })
+        .then((response) => {
+          if (!isCancelled) setRunningTaskCount(response.total);
         })
         .catch(() => {
           // Task logs are optional for the status bar.
@@ -286,7 +288,7 @@ export default function AppShell() {
         mcpLastCheckedAt={mcpStatus.last_checked_at}
         aiEnabled={settings.ai_enabled}
       />
-      {location.pathname !== '/handout' && <div className="fixed bottom-5 right-5 z-50">
+      {location.pathname !== '/handout' && <div className="fixed bottom-24 right-5 z-50">
         {aiAssistantOpen ? (
           <section
             className={`fixed overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] shadow-[0_18px_54px_rgba(15,23,42,0.24)] ${

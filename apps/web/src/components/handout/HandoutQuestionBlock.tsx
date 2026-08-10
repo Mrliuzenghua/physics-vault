@@ -1,5 +1,6 @@
 import type { HandoutConfig, Question } from '../../types';
 import { imageFileUrl } from '../../utils/imageUrl';
+import { getQuestionSourceLabel } from '../../utils/questionSource';
 import LatexRenderer from '../render/LatexRenderer';
 
 const TYPE_LABELS: Record<string, string> = {
@@ -43,6 +44,7 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
   const sc = config.styleConfig;
   const fs = sc.fontSize;
   const lh = sc.lineHeight;
+  const sourceLabel = getQuestionSourceLabel(question, '未标注来源');
   const cleanStem = stripFigurePlaceholders(question.title || question.stem_text || '');
   const cleanAnalysis = stripFigurePlaceholders(question.analysis);
   const figureMap = new Map((question.figures || []).map((figure) => [figure.fig_uuid, figure]));
@@ -54,13 +56,19 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
     .filter((figure) => Boolean(imageFileUrl(figure!.local_path)))
     .map((figure) => [figure!.local_path || figure!.fig_uuid, figure!])).values());
   const optionsHaveFigures = optionFigureIds.size > 0;
+  const isExperiment = question.question_type === 'experiment';
   const longestOptionLength = Math.max(0, ...(question.options || []).map((option) => stripFigurePlaceholders(option.content).length));
+  // A two-column arrangement is a layout choice, not a question-type signal.
+  // Keep single-choice options vertical in auto mode so they cannot be mistaken
+  // for a multi-choice question; an explicit "双列" setting still wins.
   const useOptionColumns = sc.optionLayout === 'double'
-    || (sc.optionLayout !== 'single' && (optionsHaveFigures || ((question.options || []).length === 4 && longestOptionLength <= 26)));
+    || (sc.optionLayout !== 'single'
+      && question.question_type === 'multi_choice'
+      && (optionsHaveFigures || ((question.options || []).length === 4 && longestOptionLength <= 26)));
 
   return (
     <div
-      className="question-block"
+      className={`question-block pv-handout-question${visibleFigures.length > 0 ? ' pv-handout-question--with-figures' : ''}`}
       style={{
         breakInside: 'avoid',
         pageBreakInside: 'avoid',
@@ -69,15 +77,16 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
         borderBottom: '1px solid #e2e8f0',
       }}
     >
-      {/* Question header: number + type */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'baseline',
-          gap: 8,
-          marginBottom: sc.paragraphSpacing,
-        }}
-      >
+      <div className="pv-question-leading">
+        {/* Question header: number + type */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 8,
+            marginBottom: sc.paragraphSpacing,
+          }}
+        >
         <span
           style={{
             fontWeight: 700,
@@ -95,7 +104,19 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
         >
           {typeLabel}
         </span>
-      </div>
+        <span
+          style={{
+            marginLeft: 'auto',
+            maxWidth: '68%',
+            fontSize: Math.max(10, fs - 2),
+            color: 'var(--color-text-secondary, #4b5563)',
+            textAlign: 'right',
+            overflowWrap: 'anywhere',
+          }}
+        >
+          来源：{sourceLabel}
+        </span>
+        </div>
 
       <div className="pv-question-stem-figure">
         {/* Stem */}
@@ -173,17 +194,19 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
           ))}
         </div>
       )}
+        </div>
       </div>
 
-      {/* Options */}
+      {/* Choice options or experiment procedures */}
       {question.options && question.options.length > 0 && (
         <div style={{
           marginBottom: sc.paragraphSpacing,
-          paddingLeft: 16,
-          display: useOptionColumns ? 'grid' : 'block',
-          gridTemplateColumns: useOptionColumns ? 'repeat(2, minmax(0, 1fr))' : undefined,
-          gap: useOptionColumns ? '8px 12px' : undefined,
+          paddingLeft: isExperiment ? 0 : 16,
+          display: !isExperiment && useOptionColumns ? 'grid' : 'block',
+          gridTemplateColumns: !isExperiment && useOptionColumns ? 'repeat(2, minmax(0, 1fr))' : undefined,
+          gap: !isExperiment && useOptionColumns ? '8px 12px' : undefined,
         }}>
+          {isExperiment && <div style={{ marginBottom: 6, fontSize: fs - 1, fontWeight: 700, color: 'var(--color-text-secondary, #4b5563)' }}>实验步骤</div>}
           {question.options.map((opt, i) => (
             <div
               key={opt.opt ?? i}
@@ -197,7 +220,7 @@ export default function HandoutQuestionBlock({ question, index, config }: Props)
                 marginBottom: 2,
               }}
             >
-              <span style={{ fontWeight: 600, flexShrink: 0 }}>{opt.opt}.</span>
+              <span style={{ fontWeight: 600, flexShrink: 0 }}>{isExperiment ? `（${i + 1}）` : `${opt.opt}.`}</span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 {stripFigurePlaceholders(opt.content) && <LatexRenderer text={stripFigurePlaceholders(opt.content)} inline />}
                 {extractFigureIds(opt.content).map((figureId) => {

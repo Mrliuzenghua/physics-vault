@@ -1,16 +1,15 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { CheckCircle2, ChevronLeft, ChevronRight, Cloud, Eye, ExternalLink, FileSearch, History, ImagePlus, PanelRightClose, PanelRightOpen, PencilLine, RotateCcw, Search, Send, Sparkles, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-react';
+import { CheckCircle2, ChevronLeft, ChevronRight, Cloud, ExternalLink, FileSearch, History, ImagePlus, PanelRightClose, PanelRightOpen, PencilLine, RotateCcw, Send, Sparkles, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-react';
 
 import QuestionLiveEditor from '../components/editor/QuestionLiveEditor';
 import type { FigureInsertRequest } from '../components/editor/StructuredTextEditor';
-import ImportStemRenderer from '../components/import/ImportStemRenderer';
 import LatexRenderer from '../components/render/LatexRenderer';
+import ReviewQueueSidebar from '../components/review/ReviewQueueSidebar';
+import { useReviewQueue } from '../hooks/review/useReviewQueue';
 import {
   analyzeQuestionQuality,
   buildSafeQuestionPatch,
-  collectQuestionFigureReferences,
-  findDuplicateQuestionIds,
   QUESTION_QUALITY_RULE_LABELS,
   scoreQuestionQuality,
   type QuestionQualityCode,
@@ -36,13 +35,23 @@ import {
   saveReviewedQuestions,
   uploadBatchImage,
 } from '../services/api';
+import {
+  clearReviewCache,
+  mediaAssetsFromDrafts,
+  mergeMediaAssets,
+  mergeTaskMeta,
+  readQualityConfig,
+  readReviewCache,
+  writeQualityConfig,
+  writeReviewCache,
+  type ReviewPageResult,
+  type ReviewTaskMeta,
+} from '../services/review/reviewCache';
 import type {
   Figure,
-  FigureReferenceIssue,
   ImportMediaAsset,
   ImportPipelineTaskResponse,
   KnowledgeReviewDraft,
-  Option,
   Question,
   ReviewQuestionDraft,
   ReviewDraftResponse,
@@ -50,56 +59,22 @@ import type {
   ReviewTaskListItem,
   SaveReviewedKnowledgeResponse,
   SaveReviewedQuestionsResponse,
-  SubQuestion,
 } from '../types';
 import { normalizeShortInlineDisplayMath } from '../utils/mathText';
+import { findNextMatchingIndex } from '../utils/reviewQueueNavigation';
+import { findNextRiskIndex, getRiskItems, type QueueKey } from '../utils/review/reviewQueue';
+import {
+  applyAiPatch,
+  cloneDraft,
+  computeFigureIssues,
+  displayReviewValue,
+  getChangedReviewFields,
+  normalizeDraft,
+  normalizeKnowledgeDraft,
+  normalizeOptions,
+} from '../utils/review/reviewDraft';
 
-type QueueKey = 'risk' | 'missing_answer' | 'missing_options' | 'image_issue' | 'ai_failed_page' | 'pending' | 'modified' | 'confirmed' | 'discarded' | 'all';
-type ReviewWorkspaceView = 'edit' | 'preview' | 'source';
-type RiskKind = QuestionQualityCode;
-
-interface RiskItem {
-  kind: RiskKind;
-  severity: 'danger' | 'warning';
-  message: string;
-}
-
-interface PageResult {
-  page_no?: number;
-  status?: string;
-  page_image_path?: string;
-  error?: string;
-  question_count?: number;
-  image_width?: number | null;
-  image_height?: number | null;
-  regions?: Array<{
-    region_id?: string | null;
-    question_id?: string | null;
-    bbox?: [number, number, number, number] | null;
-  }>;
-}
-
-interface ReviewTaskMeta {
-  batchId?: string;
-  warnings: string[];
-  pageResults: PageResult[];
-  mediaAssets: ImportMediaAsset[];
-}
-
-interface CachedReviewState {
-  version: 1;
-  taskId: string;
-  savedAt: string;
-  drafts: ReviewQuestionDraft[];
-  knowledgeDrafts?: KnowledgeReviewDraft[];
-  taskMeta: ReviewTaskMeta;
-  currentIndex: number;
-  queue: QueueKey;
-}
-
-const REVIEW_CACHE_PREFIX = 'physics_vault_review_cache.';
-const REVIEW_CACHE_VERSION = 1;
-const REVIEW_QUALITY_CONFIG_KEY = 'physics_vault_review_quality_config.v1';
+type ReviewWorkspaceView = 'edit' | 'source';
 
 const TYPE_OPTIONS = [
   { value: 'single_choice', label: '单选题' },
@@ -127,97 +102,6 @@ const REVIEW_FIELD_LABELS: Partial<Record<keyof ReviewQuestionDraft, string>> = 
   source: '来源',
   figures: '配图',
 };
-const REVIEW_DIFF_FIELDS = Object.keys(REVIEW_FIELD_LABELS) as (keyof ReviewQuestionDraft)[];
-
-function reviewCacheKey(taskId: string): string {
-  return `${REVIEW_CACHE_PREFIX}${taskId}`;
-}
-
-function readReviewCache(taskId: string): CachedReviewState | null {
-  try {
-    const raw = window.localStorage.getItem(reviewCacheKey(taskId));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as CachedReviewState;
-    if (parsed.version !== REVIEW_CACHE_VERSION || parsed.taskId !== taskId || !Array.isArray(parsed.drafts)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function writeReviewCache(taskId: string, state: Omit<CachedReviewState, 'version' | 'taskId' | 'savedAt'>): void {
-  try {
-    window.localStorage.setItem(reviewCacheKey(taskId), JSON.stringify({
-      version: REVIEW_CACHE_VERSION,
-      taskId,
-      savedAt: new Date().toISOString(),
-      ...state,
-    }));
-  } catch {
-    // Ignore storage quota or privacy-mode failures; the page still works.
-  }
-}
-
-function clearReviewCache(taskId: string): void {
-  try {
-    window.localStorage.removeItem(reviewCacheKey(taskId));
-  } catch {
-    // Ignore localStorage failures.
-  }
-}
-
-function mergeMediaAssets(...groups: ImportMediaAsset[][]): ImportMediaAsset[] {
-  const merged = new Map<string, ImportMediaAsset>();
-  groups.flat().forEach((asset) => {
-    const key = asset.relative_path || asset.image_id || asset.filename;
-    if (key && !merged.has(key)) merged.set(key, asset);
-  });
-  return [...merged.values()];
-}
-
-function mediaAssetsFromDrafts(drafts: ReviewQuestionDraft[]): ImportMediaAsset[] {
-  return mergeMediaAssets(drafts.flatMap((draft) => draft.figures.map((figure) => ({
-    image_id: figure.fig_uuid,
-    filename: figure.local_path.split(/[\\/]/).pop() || figure.fig_uuid,
-    relative_path: figure.local_path,
-    absolute_path: '',
-    size: 0,
-  }))));
-}
-
-function mergeTaskMeta(
-  preferred: ReviewTaskMeta | null | undefined,
-  fallback: ReviewTaskMeta,
-  drafts: ReviewQuestionDraft[],
-): ReviewTaskMeta {
-  return {
-    batchId: preferred?.batchId || fallback.batchId,
-    warnings: Array.isArray(preferred?.warnings) ? preferred.warnings : fallback.warnings,
-    pageResults: Array.isArray(preferred?.pageResults) ? preferred.pageResults : fallback.pageResults,
-    mediaAssets: mergeMediaAssets(
-      preferred?.mediaAssets ?? [],
-      fallback.mediaAssets,
-      mediaAssetsFromDrafts(drafts),
-    ),
-  };
-}
-
-function readQualityConfig(): QuestionQualityRuleConfig {
-  try {
-    const raw = window.localStorage.getItem(REVIEW_QUALITY_CONFIG_KEY);
-    return raw ? JSON.parse(raw) as QuestionQualityRuleConfig : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeQualityConfig(config: QuestionQualityRuleConfig): void {
-  try {
-    window.localStorage.setItem(REVIEW_QUALITY_CONFIG_KEY, JSON.stringify(config));
-  } catch {
-    // Keep the in-memory configuration when browser storage is unavailable.
-  }
-}
 
 function appendTableTemplate(value: string): string {
   return `${value.trimEnd()}${TABLE_TEMPLATE}`.trimStart();
@@ -230,114 +114,6 @@ function fileUrl(path?: string | null): string | null {
   return `/files/${trimmed.replace(/^\.?\//, '')}`;
 }
 
-function computeFigureIssues(question: Pick<ReviewQuestionDraft, 'title' | 'options' | 'answer' | 'analysis' | 'figures'>): FigureReferenceIssue[] {
-  const issues: FigureReferenceIssue[] = [];
-  const referenced = collectQuestionFigureReferences(question);
-  const actual = new Set(question.figures.map((figure) => figure.fig_uuid));
-  for (const figure of question.figures) {
-    if (!referenced.has(figure.fig_uuid)) issues.push({ type: 'unreferenced_figure', message: `图片 ${figure.fig_uuid} 未被题目内容引用`, figUuid: figure.fig_uuid });
-  }
-  for (const uuid of referenced) {
-    if (!actual.has(uuid)) issues.push({ type: 'missing_figure', message: `题干引用了不存在的图片 ${uuid}`, figUuid: uuid });
-  }
-  return issues;
-}
-
-function isClearlyExperimentQuestion(content: string): boolean {
-  const text = content.replace(/!\[fig:[^\]]+\]/g, ' ');
-  const hasStrongPhrase = /(在.{0,24}(?:实验|探究)中|实验(?:步骤|装置|器材|数据|原理)|测绘.{0,20}特性曲线|连接.{0,16}电路|完成.{0,16}实验)/.test(text);
-  const stepCount = (text.match(/[①②③④⑤⑥⑦⑧⑨⑩]|(?:^|\n)\s*[（(]\d+[)）]/g) ?? []).length;
-  return hasStrongPhrase && (stepCount >= 2 || /实验(?:中|步骤|装置|器材|数据|原理)/.test(text));
-}
-
-function normalizeOptions(options: unknown): Option[] {
-  if (!Array.isArray(options)) return [];
-  return options
-    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
-    .map((item) => ({
-      opt: String(item.opt ?? ''),
-      content: normalizeShortInlineDisplayMath(String(item.content ?? '')),
-    }));
-}
-
-function normalizeDraft(raw: Record<string, unknown>, index: number): ReviewQuestionDraft {
-  const title = normalizeShortInlineDisplayMath(String(raw.title ?? raw.stem ?? ''));
-  const figures = Array.isArray(raw.figures) ? (raw.figures as Figure[]) : [];
-  const options = normalizeOptions(raw.options);
-  const answer = normalizeShortInlineDisplayMath(String(raw.answer ?? ''));
-  const analysis = normalizeShortInlineDisplayMath(String(raw.analysis ?? ''));
-  const suppliedQuestionType = String(raw.question_type || 'calculation');
-  const experimentText = [title, ...options.map((option) => option.content)].join('\n');
-  const questionType = ['single_choice', 'multi_choice'].includes(suppliedQuestionType) && isClearlyExperimentQuestion(experimentText)
-    ? 'experiment'
-    : suppliedQuestionType;
-  const rawStatus = String(raw.status ?? raw.review_status ?? 'pending');
-  const status: ReviewQuestionDraft['status'] = ['pending', 'modified', 'confirmed', 'discarded'].includes(rawStatus)
-    ? rawStatus as ReviewQuestionDraft['status']
-    : 'pending';
-  return {
-    question_id: String(raw.question_id ?? `draft-${index + 1}`),
-    question_type: questionType,
-    title,
-    options,
-    answer,
-    analysis,
-    sub_questions: Array.isArray(raw.sub_questions) ? (raw.sub_questions as SubQuestion[]) : [],
-    figures,
-    difficulty: raw.difficulty !== null && raw.difficulty !== undefined ? Number(raw.difficulty) : null,
-    knowledge_point: String(raw.knowledge_point ?? ''),
-    knowledge_points: Array.isArray(raw.knowledge_points) ? raw.knowledge_points as ReviewQuestionDraft['knowledge_points'] : [],
-    topic3_ids: Array.isArray(raw.topic3_ids) ? raw.topic3_ids.map(String) : [],
-    topic1_id: String(raw.topic1_id ?? ''),
-    topic1_name: String(raw.topic1_name ?? ''),
-    topic2_id: String(raw.topic2_id ?? ''),
-    topic2_name: String(raw.topic2_name ?? ''),
-    topic3_id: String(raw.topic3_id ?? ''),
-    topic3_name: String(raw.topic3_name ?? ''),
-    tags: Array.isArray(raw.tags) ? raw.tags.map(String) : [],
-    source: String(raw.source ?? ''),
-    year: raw.year !== null && raw.year !== undefined ? Number(raw.year) : null,
-    import_batch_id: raw.import_batch_id ? String(raw.import_batch_id) : undefined,
-    source_page: raw.source_page !== null && raw.source_page !== undefined ? Number(raw.source_page) : null,
-    source_region_id: raw.source_region_id ? String(raw.source_region_id) : null,
-    source_bbox: normalizeSourceBBox(raw.source_bbox),
-    raw_text: raw.raw_text ? normalizeShortInlineDisplayMath(String(raw.raw_text)) : null,
-    status,
-    figureIssues: computeFigureIssues({ title, options, answer, analysis, figures }),
-  };
-}
-
-function normalizeSourceBBox(value: unknown): [number, number, number, number] | null {
-  if (!Array.isArray(value) || value.length !== 4) return null;
-  const numbers = value.map(Number);
-  if (numbers.some((item) => !Number.isFinite(item))) return null;
-  return numbers as [number, number, number, number];
-}
-
-function normalizeKnowledgeDraft(raw: Record<string, unknown>, index: number): KnowledgeReviewDraft {
-  const draftId = String(raw.draft_id ?? raw.topic3_id ?? `knowledge-draft-${index + 1}`);
-  return {
-    draft_id: draftId,
-    topic3_id: String(raw.topic3_id ?? draftId),
-    topic3_name: String(raw.topic3_name ?? raw.title ?? raw.name ?? ''),
-    topic2_id: String(raw.topic2_id ?? ''),
-    topic2_name: String(raw.topic2_name ?? raw.module ?? ''),
-    topic1_id: String(raw.topic1_id ?? ''),
-    topic1_name: String(raw.topic1_name ?? ''),
-    source_chapter: String(raw.source_chapter ?? ''),
-    definition: normalizeShortInlineDisplayMath(String(raw.definition ?? raw.content ?? '')),
-    formula: normalizeShortInlineDisplayMath(String(raw.formula ?? '')),
-    key_summary: normalizeShortInlineDisplayMath(String(raw.key_summary ?? raw.summary ?? '')),
-    error_prone: normalizeShortInlineDisplayMath(String(raw.error_prone ?? raw.common_mistakes ?? '')),
-    example_analysis: normalizeShortInlineDisplayMath(String(raw.example_analysis ?? raw.example ?? '')),
-    tags: Array.isArray(raw.tags) ? raw.tags.map(String) : [],
-    raw_text: String(raw.raw_text ?? ''),
-    status: ['pending', 'modified', 'confirmed', 'discarded'].includes(String(raw.status))
-      ? (String(raw.status) as KnowledgeReviewDraft['status'])
-      : 'pending',
-  };
-}
-
 function getKnowledgeRisks(draft: KnowledgeReviewDraft): string[] {
   return [
     !draft.topic3_name.trim() ? '缺少知识点名称' : '',
@@ -347,76 +123,6 @@ function getKnowledgeRisks(draft: KnowledgeReviewDraft): string[] {
   ].filter(Boolean);
 }
 
-function cloneDraft(draft: ReviewQuestionDraft): ReviewQuestionDraft {
-  return JSON.parse(JSON.stringify(draft)) as ReviewQuestionDraft;
-}
-
-function getRiskItems(draft: ReviewQuestionDraft, duplicateIds: ReadonlySet<string> = new Set(), config: QuestionQualityRuleConfig = {}): RiskItem[] {
-  return analyzeQuestionQuality(draft, {
-    questionId: draft.question_id,
-    duplicateIds,
-    requireKnowledge: true,
-    requireSource: true,
-    config,
-  }).map((issue) => ({
-    kind: issue.code,
-    severity: issue.severity === 'danger' ? 'danger' : 'warning',
-    message: issue.message,
-  }));
-}
-
-function getChangedReviewFields(original: ReviewQuestionDraft | null, draft: ReviewQuestionDraft | null): (keyof ReviewQuestionDraft)[] {
-  if (!original || !draft) return [];
-  return REVIEW_DIFF_FIELDS.filter((field) => JSON.stringify(original[field] ?? null) !== JSON.stringify(draft[field] ?? null));
-}
-
-function displayReviewValue(value: unknown): string {
-  if (Array.isArray(value)) {
-    if (value.length === 0) return '（空）';
-    if (value.every((item) => typeof item === 'string')) return value.join('、');
-    if (value.every((item) => typeof item === 'object' && item !== null && 'content' in item)) {
-      return value.map((item) => `${String((item as Option).opt || '')}. ${String((item as Option).content || '')}`).join('\n');
-    }
-    return value.map((item) => typeof item === 'object' && item !== null && 'fig_uuid' in item ? String((item as Figure).fig_uuid) : String(item)).join('、');
-  }
-  const text = String(value ?? '').trim();
-  return text || '（空）';
-}
-
-function applyAiPatch(text: string): Partial<ReviewQuestionDraft> {
-  const trimmed = text.trim();
-  try {
-    if (trimmed.startsWith('{')) {
-      const data = JSON.parse(trimmed) as Record<string, unknown>;
-      return {
-        ...(typeof data.question_type === 'string' ? { question_type: data.question_type } : {}),
-        ...(typeof data.difficulty === 'number' ? { difficulty: Math.max(1, Math.min(5, data.difficulty)) } : {}),
-        ...(typeof data.knowledge_point === 'string' ? { knowledge_point: data.knowledge_point } : {}),
-        ...(Array.isArray(data.tags) ? { tags: data.tags.map(String) } : {}),
-        ...(typeof data.source === 'string' ? { source: data.source } : {}),
-        ...(typeof data.answer === 'string' ? { answer: normalizeShortInlineDisplayMath(data.answer) } : {}),
-        ...(Array.isArray(data.options) ? { options: normalizeOptions(data.options) } : {}),
-        ...(typeof data.analysis === 'string' ? { analysis: normalizeShortInlineDisplayMath(data.analysis) } : {}),
-        ...(Array.isArray(data.sub_questions) ? { sub_questions: data.sub_questions as SubQuestion[] } : {}),
-      };
-    }
-  } catch {
-    // Keep the generated text as analysis if it is not valid JSON.
-  }
-  return { analysis: normalizeShortInlineDisplayMath(text) };
-}
-
-function matchesQueue(draft: ReviewQuestionDraft, queue: QueueKey, duplicateIds: ReadonlySet<string> = new Set(), config: QuestionQualityRuleConfig = {}): boolean {
-  if (queue === 'all') return true;
-  if (queue === 'pending' || queue === 'modified' || queue === 'confirmed' || queue === 'discarded') return draft.status === queue;
-  const risks = getRiskItems(draft, duplicateIds, config);
-  if (queue === 'risk') return risks.length > 0;
-  if (queue === 'missing_answer') return risks.some((risk) => risk.kind === 'missing_answer');
-  if (queue === 'missing_options') return risks.some((risk) => risk.kind === 'missing_options');
-  if (queue === 'image_issue') return risks.some((risk) => risk.kind === 'image_issue');
-  return false;
-}
-
 export default function ReviewWorkbenchPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
@@ -424,15 +130,18 @@ export default function ReviewWorkbenchPage() {
   const serverVersionRef = useRef(0);
   const serverSavingRef = useRef(false);
   const pendingServerSaveRef = useRef<ReviewDraftStatePayload | null>(null);
+  const pendingServerSaveSignatureRef = useRef('');
+  const savingServerStateSignatureRef = useRef('');
+  const savedServerStateSignatureRef = useRef('');
   const serverAutosaveReadyRef = useRef(false);
   const serverConflictRef = useRef(false);
+  const remoteSignatureRef = useRef('');
+  const lastLocalChangeAtRef = useRef(0);
+  const currentQuestionIdRef = useRef<string | null>(null);
 
   const [drafts, setDrafts] = useState<ReviewQuestionDraft[]>([]);
   const [knowledgeDrafts, setKnowledgeDrafts] = useState<KnowledgeReviewDraft[]>([]);
   const [taskMeta, setTaskMeta] = useState<ReviewTaskMeta>({ warnings: [], pageResults: [], mediaAssets: [] });
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [queue, setQueue] = useState<QueueKey>('risk');
-  const [questionQuery, setQuestionQuery] = useState('');
   const [workspaceView, setWorkspaceView] = useState<ReviewWorkspaceView>('edit');
   const [toolsOpen, setToolsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -450,7 +159,6 @@ export default function ReviewWorkbenchPage() {
   const [draftVersions, setDraftVersions] = useState<ReviewDraftResponse[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [qualityConfig, setQualityConfig] = useState<QuestionQualityRuleConfig>(() => readQualityConfig());
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveResult, setSaveResult] = useState<SaveReviewedQuestionsResponse | null>(null);
@@ -462,6 +170,24 @@ export default function ReviewWorkbenchPage() {
   const [imageUploading, setImageUploading] = useState(false);
   const [imagePickerOpen, setImagePickerOpen] = useState(false);
   const [figureInsertRequest, setFigureInsertRequest] = useState<FigureInsertRequest | null>(null);
+  const [qualityConfig, setQualityConfig] = useState<QuestionQualityRuleConfig>(() => readQualityConfig());
+  const {
+    counts,
+    currentDraft,
+    currentIndex,
+    currentPage,
+    duplicateQuestionIds,
+    filteredDrafts,
+    goNext,
+    goNextRisk,
+    goPrevious,
+    qualityReport,
+    questionQuery,
+    queue,
+    setCurrentIndex,
+    setQuestionQuery,
+    setQueue,
+  } = useReviewQueue({ drafts, pageResults: taskMeta.pageResults, qualityConfig });
 
   const loadReviewTasks = useCallback(async () => {
     setReviewTasksLoading(true);
@@ -504,6 +230,9 @@ export default function ReviewWorkbenchPage() {
     serverAutosaveReadyRef.current = false;
     serverConflictRef.current = false;
     pendingServerSaveRef.current = null;
+    pendingServerSaveSignatureRef.current = '';
+    savingServerStateSignatureRef.current = '';
+    savedServerStateSignatureRef.current = '';
     Promise.all([
       fetchImportTask(taskId),
       fetchReviewDraft(taskId).catch(() => ({ draft: null, unavailable: true })),
@@ -512,6 +241,7 @@ export default function ReviewWorkbenchPage() {
         const result = task.result ?? {};
         const questions = Array.isArray(result.questions) ? result.questions as Record<string, unknown>[] : [];
         const parsed = questions.map((raw, index) => normalizeDraft(raw, index));
+        remoteSignatureRef.current = JSON.stringify(questions);
         const knowledgeItems = Array.isArray(result.knowledge_drafts) ? result.knowledge_drafts as Record<string, unknown>[] : [];
         const parsedKnowledge = knowledgeItems.map((raw, index) => normalizeKnowledgeDraft(raw, index));
         const batchId = String(result.batch_id || task.input_summary?.batch_id || '');
@@ -520,14 +250,15 @@ export default function ReviewWorkbenchPage() {
         const meta = {
           batchId,
           warnings: Array.isArray(result.warnings) ? result.warnings.map(String) : [],
-          pageResults: Array.isArray(result.page_results) ? result.page_results as PageResult[] : [],
+          pageResults: Array.isArray(result.page_results) ? result.page_results as ReviewPageResult[] : [],
           mediaAssets: mergeMediaAssets(resultMediaAssets, batchMediaAssets, mediaAssetsFromDrafts(parsed)),
         };
-        const cached = readReviewCache(taskId);
+        const cached = readReviewCache<QueueKey>(taskId);
         const serverDraft = draftLookup.draft;
         const cachedIsNewer = Boolean(cached && (!serverDraft || Date.parse(cached.savedAt) > Date.parse(serverDraft.updated_at)));
         originalsRef.current = new Map(parsed.map((draft) => [draft.question_id, cloneDraft(draft)]));
         serverVersionRef.current = serverDraft?.version ?? 0;
+        savedServerStateSignatureRef.current = serverDraft ? JSON.stringify(serverDraft.state) : '';
         setServerDraftVersion(serverDraft?.version ?? 0);
         setServerDraftUpdatedAt(serverDraft ? new Date(serverDraft.updated_at) : null);
         setServerDraftStatus(draftLookup.unavailable ? 'offline' : serverDraft ? 'saved' : 'idle');
@@ -560,72 +291,81 @@ export default function ReviewWorkbenchPage() {
         setLoading(false);
         window.setTimeout(() => { serverAutosaveReadyRef.current = true; }, 0);
       });
-  }, [taskId]);
+  }, [setCurrentIndex, setQueue, taskId]);
 
-  const currentDraft = drafts[currentIndex] ?? null;
+  useEffect(() => {
+    currentQuestionIdRef.current = drafts[currentIndex]?.question_id ?? null;
+  }, [currentIndex, drafts]);
+
+  // MCP/AI may update result_json outside this browser tab. Pull it back into
+  // the editor so the risk queue is recalculated without a manual reload.
+  useEffect(() => {
+    if (!taskId || loading) return;
+    let active = true;
+    const syncRemoteTask = async () => {
+      if (!active || serverSavingRef.current || pendingServerSaveRef.current || serverConflictRef.current) return;
+      if (Date.now() - lastLocalChangeAtRef.current < 5000) return;
+      try {
+        const task = await fetchImportTask(taskId);
+        const result = task.result ?? {};
+        const questions = Array.isArray(result.questions) ? result.questions as Record<string, unknown>[] : [];
+        const signature = JSON.stringify(questions);
+        if (!signature || signature === remoteSignatureRef.current) return;
+        const parsed = questions.map((raw, index) => normalizeDraft(raw, index));
+        remoteSignatureRef.current = signature;
+        originalsRef.current = new Map(parsed.map((draft) => [draft.question_id, cloneDraft(draft)]));
+        setDrafts(parsed);
+        setTaskMeta((previous) => ({
+          ...previous,
+          warnings: Array.isArray(result.warnings) ? result.warnings.map(String) : previous.warnings,
+          pageResults: Array.isArray(result.page_results) ? result.page_results as ReviewPageResult[] : previous.pageResults,
+          mediaAssets: mergeMediaAssets(previous.mediaAssets, mediaAssetsFromDrafts(parsed)),
+        }));
+        const nextIndex = Math.max(0, parsed.findIndex((draft) => draft.question_id === currentQuestionIdRef.current));
+        setCurrentIndex(nextIndex);
+        setCacheMessage('AI 修改已同步，风险已重新校验');
+      } catch {
+        // The normal editor remains usable while the background check retries.
+      }
+    };
+    void syncRemoteTask();
+    const timer = window.setInterval(() => void syncRemoteTask(), 4000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [loading, setCurrentIndex, taskId]);
+
   const currentOriginal = currentDraft ? originalsRef.current.get(currentDraft.question_id) ?? null : null;
-  const currentPage = useMemo(() => {
-    if (!currentDraft?.source_page) return null;
-    return taskMeta.pageResults.find((page) => page.page_no === currentDraft.source_page) ?? null;
-  }, [currentDraft, taskMeta.pageResults]);
-  const failedPages = useMemo(() => taskMeta.pageResults.filter((page) => page.status === 'failed'), [taskMeta.pageResults]);
-  const duplicateQuestionIds = useMemo(() => findDuplicateQuestionIds(drafts, (draft) => draft.question_id), [drafts]);
 
   useEffect(() => writeQualityConfig(qualityConfig), [qualityConfig]);
-
-  const counts = useMemo(() => ({
-    total: drafts.length,
-    risk: drafts.filter((draft) => getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0).length,
-    missingAnswer: drafts.filter((draft) => getRiskItems(draft, duplicateQuestionIds, qualityConfig).some((risk) => risk.kind === 'missing_answer')).length,
-    missingOptions: drafts.filter((draft) => getRiskItems(draft, duplicateQuestionIds, qualityConfig).some((risk) => risk.kind === 'missing_options')).length,
-    imageIssue: drafts.filter((draft) => getRiskItems(draft, duplicateQuestionIds, qualityConfig).some((risk) => risk.kind === 'image_issue')).length,
-    failedPage: failedPages.length,
-    pending: drafts.filter((draft) => draft.status === 'pending').length,
-    modified: drafts.filter((draft) => draft.status === 'modified').length,
-    confirmed: drafts.filter((draft) => draft.status === 'confirmed').length,
-    discarded: drafts.filter((draft) => draft.status === 'discarded').length,
-  }), [drafts, duplicateQuestionIds, failedPages.length, qualityConfig]);
-
-  const filteredDrafts = useMemo(() => {
-    const failedPageNumbers = new Set(failedPages.map((page) => page.page_no).filter((page): page is number => typeof page === 'number'));
-    const keyword = questionQuery.trim().toLowerCase();
-    return drafts
-      .map((draft, index) => ({ draft, index }))
-      .filter(({ draft, index }) => {
-        const matchesSelectedQueue = queue === 'ai_failed_page'
-          ? typeof draft.source_page === 'number' && failedPageNumbers.has(draft.source_page)
-          : matchesQueue(draft, queue, duplicateQuestionIds, qualityConfig);
-        if (!matchesSelectedQueue) return false;
-        if (!keyword) return true;
-        return [String(index + 1), draft.title, draft.answer, draft.knowledge_point, draft.tags.join(' ')]
-          .join(' ')
-          .toLowerCase()
-          .includes(keyword);
-      });
-  }, [drafts, duplicateQuestionIds, failedPages, qualityConfig, questionQuery, queue]);
 
   useEffect(() => {
     if (!taskId || loading || drafts.length === 0) return;
     setCacheMessage('正在保存本地草稿...');
     const timer = window.setTimeout(() => {
-      writeReviewCache(taskId, { drafts, knowledgeDrafts, taskMeta, currentIndex, queue });
+      writeReviewCache(taskId, { drafts, qualityReport, knowledgeDrafts, taskMeta, currentIndex, queue });
       const savedAt = new Date();
       setCacheSavedAt(savedAt);
       setCacheMessage(`已自动保存 ${savedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [currentIndex, drafts, knowledgeDrafts, loading, queue, taskId, taskMeta]);
+  }, [currentIndex, drafts, knowledgeDrafts, loading, qualityReport, queue, taskId, taskMeta]);
 
   const flushServerDraft = useCallback(async () => {
     if (!taskId || serverSavingRef.current || serverConflictRef.current) return;
     const state = pendingServerSaveRef.current;
     if (!state) return;
+    const stateSignature = pendingServerSaveSignatureRef.current || JSON.stringify(state);
     pendingServerSaveRef.current = null;
+    pendingServerSaveSignatureRef.current = '';
     serverSavingRef.current = true;
+    savingServerStateSignatureRef.current = stateSignature;
     setServerDraftStatus('saving');
     try {
       const saved = await saveReviewDraft(taskId, { base_version: serverVersionRef.current, state });
       serverVersionRef.current = saved.version;
+      savedServerStateSignatureRef.current = stateSignature;
       setServerDraftVersion(saved.version);
       setServerDraftUpdatedAt(new Date(saved.updated_at));
       setServerDraftStatus('saved');
@@ -636,10 +376,12 @@ export default function ReviewWorkbenchPage() {
         setServerDraftStatus('conflict');
       } else {
         pendingServerSaveRef.current = state;
+        pendingServerSaveSignatureRef.current = stateSignature;
         setServerDraftStatus('offline');
       }
     } finally {
       serverSavingRef.current = false;
+      savingServerStateSignatureRef.current = '';
       if (pendingServerSaveRef.current && !serverConflictRef.current) {
         window.setTimeout(() => void flushServerDraft(), 0);
       }
@@ -648,14 +390,29 @@ export default function ReviewWorkbenchPage() {
 
   useEffect(() => {
     if (!taskId || loading || drafts.length === 0 || !serverAutosaveReadyRef.current || serverConflictRef.current) return;
-    pendingServerSaveRef.current = {
-      drafts,
-      knowledge_drafts: knowledgeDrafts,
-      task_meta: taskMeta as unknown as Record<string, unknown>,
-      current_index: currentIndex,
-      queue,
-    };
-    const timer = window.setTimeout(() => void flushServerDraft(), 1400);
+    // Serializing an entire review task is expensive for large imports. Keep
+    // it out of the keystroke path and only prepare a save after the user has
+    // paused typing.
+    const timer = window.setTimeout(() => {
+      const state = {
+        drafts,
+        knowledge_drafts: knowledgeDrafts,
+        task_meta: taskMeta as unknown as Record<string, unknown>,
+        current_index: currentIndex,
+        queue,
+      };
+      const stateSignature = JSON.stringify(state);
+      // Several editor callbacks can report the same document. Do not keep
+      // creating new draft versions for an unchanged state.
+      if (
+        stateSignature === savedServerStateSignatureRef.current
+        || stateSignature === pendingServerSaveSignatureRef.current
+        || stateSignature === savingServerStateSignatureRef.current
+      ) return;
+      pendingServerSaveRef.current = state;
+      pendingServerSaveSignatureRef.current = stateSignature;
+      void flushServerDraft();
+    }, 1400);
     return () => window.clearTimeout(timer);
   }, [currentIndex, drafts, flushServerDraft, knowledgeDrafts, loading, queue, taskId, taskMeta]);
 
@@ -664,7 +421,10 @@ export default function ReviewWorkbenchPage() {
     serverAutosaveReadyRef.current = false;
     serverConflictRef.current = false;
     pendingServerSaveRef.current = null;
+    pendingServerSaveSignatureRef.current = '';
+    savingServerStateSignatureRef.current = '';
     serverVersionRef.current = snapshot.version;
+    savedServerStateSignatureRef.current = JSON.stringify(snapshot.state);
     setDrafts(restored);
     setKnowledgeDrafts((snapshot.state.knowledge_drafts ?? []).map((draft, index) => normalizeKnowledgeDraft(draft as unknown as Record<string, unknown>, index)));
     setTaskMeta((current) => mergeTaskMeta(snapshot.state.task_meta as unknown as ReviewTaskMeta, current, restored));
@@ -676,7 +436,7 @@ export default function ReviewWorkbenchPage() {
     setServerConflict(null);
     setCacheMessage(message);
     window.setTimeout(() => { serverAutosaveReadyRef.current = true; }, 0);
-  }, []);
+  }, [setCurrentIndex, setQueue]);
 
   const handleLoadServerConflict = useCallback(() => {
     if (!serverConflict) return;
@@ -717,6 +477,7 @@ export default function ReviewWorkbenchPage() {
   }, [applyServerSnapshot, taskId]);
 
   const updateDraftAt = useCallback((index: number, patch: Partial<ReviewQuestionDraft>) => {
+    lastLocalChangeAtRef.current = Date.now();
     setDrafts((prev) => {
       const next = [...prev];
       const updated = { ...next[index], ...patch };
@@ -741,15 +502,6 @@ export default function ReviewWorkbenchPage() {
     setDrafts((prev) => prev.map((draft, index) => index === currentIndex ? { ...draft, status } : draft));
   }, [currentIndex]);
 
-  const goPrevious = useCallback(() => setCurrentIndex((prev) => Math.max(0, prev - 1)), []);
-  const goNext = useCallback(() => setCurrentIndex((prev) => Math.min(drafts.length - 1, prev + 1)), [drafts.length]);
-  const goNextRisk = useCallback(() => {
-    const next = drafts.findIndex((draft, index) => index > currentIndex && draft.status !== 'discarded' && getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0);
-    if (next >= 0) return setCurrentIndex(next);
-    const first = drafts.findIndex((draft) => draft.status !== 'discarded' && getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0);
-    if (first >= 0) setCurrentIndex(first);
-  }, [currentIndex, drafts, duplicateQuestionIds, qualityConfig]);
-
   const confirmAndNext = useCallback(() => {
     if (!currentDraft) return;
     const blockingRisks = getRiskItems(currentDraft, duplicateQuestionIds, qualityConfig).filter((risk) => risk.severity === 'danger');
@@ -758,10 +510,27 @@ export default function ReviewWorkbenchPage() {
       if (!shouldContinue) return;
     }
     updateStatus('confirmed');
-    const nextRisk = drafts.findIndex((draft, index) => index > currentIndex && draft.status !== 'discarded' && getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0);
-    if (nextRisk >= 0) setCurrentIndex(nextRisk);
+
+    if (queue === 'risk' || queue === 'pending') {
+      const nextInActiveQueue = findNextMatchingIndex(
+        drafts,
+        currentIndex,
+        (draft) => queue === 'pending'
+          ? draft.status === 'pending'
+          : draft.status !== 'discarded' && getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0,
+      );
+      if (nextInActiveQueue !== null) {
+        setCurrentIndex(nextInActiveQueue);
+      } else {
+        setCacheMessage(`当前“${queue === 'risk' ? '风险' : '待确认'}”队列已无其它题目`);
+      }
+      return;
+    }
+
+    const nextRisk = findNextRiskIndex(drafts, currentIndex, duplicateQuestionIds, qualityConfig);
+    if (nextRisk !== null) setCurrentIndex(nextRisk);
     else goNext();
-  }, [currentDraft, currentIndex, drafts, duplicateQuestionIds, goNext, qualityConfig, updateStatus]);
+  }, [currentDraft, currentIndex, drafts, duplicateQuestionIds, goNext, qualityConfig, queue, setCurrentIndex, updateStatus]);
 
   const restoreCurrent = useCallback(() => {
     if (!currentDraft) return;
@@ -1129,42 +898,25 @@ export default function ReviewWorkbenchPage() {
         )}
       </header>
 
-      <section className={`relative grid min-h-0 flex-1 overflow-hidden ${toolsOpen ? 'lg:grid-cols-[220px_minmax(0,1fr)_300px]' : 'lg:grid-cols-[220px_minmax(0,1fr)]'}`}>
-        <aside className="hidden min-h-0 border-r border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 lg:block">
-          <QueueTabs queue={queue} setQueue={setQueue} counts={counts} />
-          <label className="mt-2 flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2">
-            <Search size={14} className="text-[var(--color-text-muted)]" />
-            <input value={questionQuery} onChange={(event) => setQuestionQuery(event.target.value)} placeholder="搜索题干、知识点或答案" className="min-w-0 flex-1 border-none bg-transparent text-xs text-[var(--color-text)] outline-none" />
-          </label>
-          <div className="mt-2 h-[calc(100%-82px)] space-y-1.5 overflow-y-auto pr-1">
-            {filteredDrafts.map(({ draft, index }) => (
-              <button
-                type="button"
-                key={draft.question_id}
-                onClick={() => setCurrentIndex(index)}
-                className={`w-full rounded-md border px-2.5 py-2 text-left ${index === currentIndex ? 'border-[var(--color-accent)] bg-[var(--color-accent-light)]' : 'border-[var(--color-border)] bg-[var(--color-bg)] hover:border-[var(--color-border-strong)]'}`}
-              >
-                <div className="flex items-center justify-between gap-2 text-sm">
-                  <span className="font-bold text-[var(--color-accent)]">{index + 1}</span>
-                  <span className="text-[11px] text-[var(--color-text-muted)]">{TYPE_LABELS[draft.question_type] ?? draft.question_type}</span>
-                  {draft.figures.length > 0 && <span className="text-xs text-[var(--color-text-muted)]">图 {draft.figures.length}</span>}
-                  <span className="ml-auto text-xs text-[var(--color-text-muted)]">{statusLabel(draft.status)}</span>
-                </div>
-                <div className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--color-text-secondary)]">{draft.title || '无题干'}</div>
-                {getRiskItems(draft, duplicateQuestionIds, qualityConfig).length > 0 ? (
-                  <div className="mt-1 truncate text-[10px] font-semibold text-[var(--color-danger)]"><TriangleAlert size={10} className="mr-1 inline" />{getRiskItems(draft, duplicateQuestionIds, qualityConfig)[0]?.message}</div>
-                ) : <div className="mt-1 inline-flex items-center gap-1 text-[10px] font-semibold text-[var(--color-success)]"><CheckCircle2 size={11} />结构完整</div>}
-              </button>
-            ))}
-            {filteredDrafts.length === 0 && <div className="rounded-lg border border-dashed border-[var(--color-border)] p-6 text-center text-xs text-[var(--color-text-muted)]">当前筛选下没有题目</div>}
-          </div>
-        </aside>
+      <section className={`relative grid min-h-0 flex-1 overflow-hidden ${toolsOpen ? 'xl:grid-cols-[220px_minmax(0,1fr)_300px]' : 'lg:grid-cols-[220px_minmax(0,1fr)]'}`}>
+        <ReviewQueueSidebar
+          counts={counts}
+          currentIndex={currentIndex}
+          filteredDrafts={filteredDrafts}
+          getRisks={(draft) => getRiskItems(draft, duplicateQuestionIds, qualityConfig)}
+          onSelect={setCurrentIndex}
+          questionQuery={questionQuery}
+          queue={queue}
+          setQuestionQuery={setQuestionQuery}
+          setQueue={setQueue}
+          statusLabel={statusLabel}
+          typeLabels={TYPE_LABELS}
+        />
 
         <section className="min-w-0 overflow-y-auto bg-[var(--color-bg)] p-3">
           <div className="sticky top-0 z-10 mb-3 flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] p-2 shadow-sm">
             <div className="flex rounded-md bg-[var(--color-bg-hover)] p-0.5">
-              <WorkspaceViewButton active={workspaceView === 'edit'} label="编辑" icon={<PencilLine size={14} />} onClick={() => setWorkspaceView('edit')} />
-              <WorkspaceViewButton active={workspaceView === 'preview'} label="预览" icon={<Eye size={14} />} onClick={() => setWorkspaceView('preview')} />
+              <WorkspaceViewButton active={workspaceView === 'edit'} label="编辑与预览" icon={<PencilLine size={14} />} onClick={() => setWorkspaceView('edit')} />
               <WorkspaceViewButton active={workspaceView === 'source'} label="原文" icon={<FileSearch size={14} />} onClick={() => setWorkspaceView('source')} />
             </div>
             <div className="h-5 w-px bg-[var(--color-border)]" />
@@ -1179,7 +931,7 @@ export default function ReviewWorkbenchPage() {
               {toolsOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}辅助工具
             </button>
           </div>
-          <div className="mx-auto max-w-[980px]">
+          <div className="mx-auto max-w-[1440px]">
             {risks.length > 0 && (
               <div className="mb-3 flex items-center gap-2 rounded-md border border-[var(--color-danger)] bg-[var(--color-danger-soft)] px-3 py-2 text-xs text-[var(--color-danger)]">
                 <TriangleAlert size={14} className="shrink-0" />
@@ -1197,7 +949,6 @@ export default function ReviewWorkbenchPage() {
                 openImagePicker={() => setImagePickerOpen(true)}
               />
             )}
-            {workspaceView === 'preview' && currentDraft && <LivePreviewPanel draft={currentDraft} />}
             {workspaceView === 'source' && <OriginalPreviewPanel draft={currentDraft} page={currentPage} pages={taskMeta.pageResults} warnings={taskMeta.warnings} />}
             {aiMessage && <div className="mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 text-xs text-[var(--color-text-secondary)]">{aiMessage}</div>}
             {aiSuggestion && <div className="mt-3"><SuggestionPanel suggestion={aiSuggestion} accept={acceptSuggestion} dismiss={() => setAiSuggestion(null)} /></div>}
@@ -1205,7 +956,7 @@ export default function ReviewWorkbenchPage() {
         </section>
 
         {toolsOpen && (
-          <aside className="absolute inset-y-0 right-0 z-30 w-[min(320px,92vw)] space-y-3 overflow-y-auto border-l border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 shadow-xl lg:static lg:w-auto lg:shadow-none">
+          <aside className="absolute inset-y-0 right-0 z-30 w-[min(320px,92vw)] space-y-3 overflow-y-auto border-l border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 shadow-xl xl:static xl:w-auto xl:shadow-none">
             <div className="flex items-center justify-between border-b border-[var(--color-border)] pb-2">
               <h2 className="text-sm font-bold">辅助工具</h2>
               <button type="button" className={SOFT_BUTTON_CLASS} aria-label="关闭辅助工具" title="关闭辅助工具" onClick={() => setToolsOpen(false)}><PanelRightClose size={15} /></button>
@@ -1256,29 +1007,6 @@ export default function ReviewWorkbenchPage() {
         </div>
       )}
     </main>
-  );
-}
-
-function QueueTabs({ queue, setQueue, counts }: { queue: QueueKey; setQueue: (queue: QueueKey) => void; counts: Record<string, number> }) {
-  const tabs: [QueueKey, string][] = [
-    ['risk', `全部风险 ${counts.risk}`],
-    ['missing_answer', `缺答案 ${counts.missingAnswer}`],
-    ['missing_options', `缺选项 ${counts.missingOptions}`],
-    ['image_issue', `图片异常 ${counts.imageIssue}`],
-    ['ai_failed_page', `AI失败页 ${counts.failedPage}`],
-    ['pending', `待确认 ${counts.pending}`],
-    ['modified', `已修改 ${counts.modified}`],
-    ['confirmed', `已确认 ${counts.confirmed}`],
-    ['discarded', `已丢弃 ${counts.discarded}`],
-    ['all', `全部 ${counts.total}`],
-  ];
-  return (
-    <label className="block text-[11px] font-semibold text-[var(--color-text-muted)]">
-      审核队列
-      <select className={`${INPUT_CLASS} mt-1`} value={queue} onChange={(event) => setQueue(event.target.value as QueueKey)}>
-        {tabs.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-      </select>
-    </label>
   );
 }
 
@@ -1579,6 +1307,68 @@ function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsert
   onFigureInsertHandled: (requestId: number) => void;
   openImagePicker: () => void;
 }) {
+  const [localDraft, setLocalDraft] = useState(draft);
+  const localDraftRef = useRef(draft);
+  const dirtyRef = useRef(false);
+
+  useEffect(() => {
+    localDraftRef.current = localDraft;
+  }, [localDraft]);
+
+  useEffect(() => {
+    // Parent updates are the persisted source of truth. While the user is
+    // typing, keep their local document intact; once it has been published,
+    // accept external changes such as AI suggestions and format actions.
+    if (draft.question_id !== localDraftRef.current.question_id || !dirtyRef.current) {
+      localDraftRef.current = draft;
+      setLocalDraft(draft);
+    }
+  }, [draft]);
+
+  const publishLocalDraft = useCallback(() => {
+    if (!dirtyRef.current) return;
+    dirtyRef.current = false;
+    updateDraftAt(localDraftRef.current);
+  }, [updateDraftAt]);
+
+  useEffect(() => {
+    if (!dirtyRef.current) return;
+    const timer = window.setTimeout(publishLocalDraft, 350);
+    return () => window.clearTimeout(timer);
+  }, [localDraft, publishLocalDraft]);
+
+  useEffect(() => () => publishLocalDraft(), [draft.question_id, publishLocalDraft]);
+
+  useEffect(() => {
+    if (!insertFigureRequest) return;
+    const { figure } = insertFigureRequest;
+    const reviewFigure: Figure = {
+      fig_uuid: figure.fig_uuid,
+      local_path: figure.local_path,
+      ...(figure.display_scale === null || figure.display_scale === undefined ? {} : { display_scale: figure.display_scale }),
+      ...(figure.display_align ? { display_align: figure.display_align } : {}),
+    };
+    setLocalDraft((current) => {
+      if (current.figures.some((item) => item.fig_uuid === reviewFigure.fig_uuid)) return current;
+      dirtyRef.current = true;
+      return { ...current, figures: [...current.figures, reviewFigure] };
+    });
+  }, [insertFigureRequest]);
+
+  const updateLocalDraft = useCallback((patch: Partial<ReviewQuestionDraft>) => {
+    dirtyRef.current = true;
+    setLocalDraft((current) => {
+      const updated = { ...current, ...patch };
+      updated.title = normalizeShortInlineDisplayMath(updated.title);
+      updated.answer = normalizeShortInlineDisplayMath(updated.answer);
+      updated.analysis = normalizeShortInlineDisplayMath(updated.analysis);
+      updated.options = normalizeOptions(updated.options);
+      updated.figureIssues = computeFigureIssues(updated);
+      if (updated.status === 'pending') updated.status = 'modified';
+      return updated;
+    });
+  }, []);
+
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
       <div className="mb-3 flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] pb-3">
@@ -1587,18 +1377,19 @@ function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsert
           <p className="mt-0.5 text-[11px] text-[var(--color-text-muted)]">题干、选项、图片、答案和解析连续编辑；选中图片可移动、对齐、缩放或删除。</p>
         </div>
         <button type="button" className={`${SOFT_BUTTON_CLASS} inline-flex items-center gap-1.5`} onClick={openImagePicker}><ImagePlus size={14} />新增图片</button>
-        <button type="button" className={SOFT_BUTTON_CLASS} onClick={() => updateDraftAt(buildSafeQuestionPatch(draft))} title="整理换行、行尾空格、选项编号和首尾空白，不改写题意">规范格式</button>
+        <button type="button" className={SOFT_BUTTON_CLASS} onClick={() => updateLocalDraft(buildSafeQuestionPatch(localDraft))} title="整理换行、行尾空格、选项编号和首尾空白，不改写题意">规范格式</button>
       </div>
       <QuestionLiveEditor
-        question={draft as unknown as Question}
+        question={localDraft as unknown as Question}
         onChange={(patch) => {
           const { editor_document: _editorDocument, ...reviewPatch } = patch;
-          updateDraftAt(reviewPatch as Partial<ReviewQuestionDraft>);
+          if (Object.keys(reviewPatch).length > 0) updateLocalDraft(reviewPatch as Partial<ReviewQuestionDraft>);
         }}
         compact={false}
-        showPreview={false}
+        showPreview
         showHeader={false}
         showImageManager={false}
+        syncDocument={false}
         insertFigureRequest={insertFigureRequest}
         onFigureInsertHandled={onFigureInsertHandled}
         onRequestImage={openImagePicker}
@@ -1606,29 +1397,13 @@ function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsert
       <details className="mt-3 border-t border-[var(--color-border)] pt-3">
         <summary className="cursor-pointer text-xs font-semibold text-[var(--color-text-secondary)]">题型、知识点与来源</summary>
         <div className="mt-2 grid gap-2 sm:grid-cols-2">
-          <Field label="题型"><select className={INPUT_CLASS} value={draft.question_type} onChange={(event) => updateDraftAt({ question_type: event.target.value })}>{TYPE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
-          <Field label="难度"><input className={INPUT_CLASS} value={draft.difficulty ?? ''} onChange={(event) => updateDraftAt({ difficulty: event.target.value ? Number(event.target.value) : null })} /></Field>
-          <Field label="知识点"><input className={INPUT_CLASS} value={draft.knowledge_point} onChange={(event) => updateDraftAt({ knowledge_point: event.target.value })} /></Field>
-          <Field label="来源"><input className={INPUT_CLASS} value={draft.source} onChange={(event) => updateDraftAt({ source: event.target.value })} /></Field>
-          <div className="sm:col-span-2"><Field label="标签"><input className={INPUT_CLASS} value={draft.tags.join('、')} onChange={(event) => updateDraftAt({ tags: event.target.value.split(/[、,，]/).map((item) => item.trim()).filter(Boolean) })} /></Field></div>
+          <Field label="题型"><select className={INPUT_CLASS} value={localDraft.question_type} onChange={(event) => updateLocalDraft({ question_type: event.target.value })}>{TYPE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
+          <Field label="难度"><input className={INPUT_CLASS} value={localDraft.difficulty ?? ''} onChange={(event) => updateLocalDraft({ difficulty: event.target.value ? Number(event.target.value) : null })} /></Field>
+          <Field label="知识点"><input className={INPUT_CLASS} value={localDraft.knowledge_point} onChange={(event) => updateLocalDraft({ knowledge_point: event.target.value })} /></Field>
+          <Field label="来源"><input className={INPUT_CLASS} value={localDraft.source} onChange={(event) => updateLocalDraft({ source: event.target.value })} /></Field>
+          <div className="sm:col-span-2"><Field label="标签"><input className={INPUT_CLASS} value={localDraft.tags.join('、')} onChange={(event) => updateLocalDraft({ tags: event.target.value.split(/[、,，]/).map((item) => item.trim()).filter(Boolean) })} /></Field></div>
         </div>
       </details>
-    </div>
-  );
-}
-
-function LivePreviewPanel({ draft }: { draft: ReviewQuestionDraft }) {
-  return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
-      <h2 className="mb-3 text-sm font-bold">实时预览区</h2>
-      <PreviewSection title="题干"><ImportStemRenderer title={draft.title || '（无题干）'} figures={draft.figures} /></PreviewSection>
-      {draft.options.length > 0 && (
-        <PreviewSection title="选项">
-          <div className="space-y-2">{draft.options.map((option) => <div key={option.opt} className="flex gap-2"><b className="text-[var(--color-accent)]">{option.opt}.</b><ImportStemRenderer title={option.content} figures={draft.figures} maxImageHeight={80} /></div>)}</div>
-        </PreviewSection>
-      )}
-      <PreviewSection title="答案"><ImportStemRenderer title={draft.answer || '（暂无）'} figures={draft.figures} maxImageHeight={80} /></PreviewSection>
-      <PreviewSection title="解析"><ImportStemRenderer title={draft.analysis || '（暂无）'} figures={draft.figures} maxImageHeight={80} /></PreviewSection>
     </div>
   );
 }
@@ -1724,7 +1499,7 @@ function QualityRuleSettingsPanel({ config, setConfig }: { config: QuestionQuali
   );
 }
 
-function OriginalPreviewPanel({ draft, page, pages, warnings }: { draft: ReviewQuestionDraft | null; page: PageResult | null; pages: PageResult[]; warnings: string[] }) {
+function OriginalPreviewPanel({ draft, page, pages, warnings }: { draft: ReviewQuestionDraft | null; page: ReviewPageResult | null; pages: ReviewPageResult[]; warnings: string[] }) {
   const orderedPages = useMemo(
     () => [...pages].filter((item) => item.page_no).sort((a, b) => Number(a.page_no) - Number(b.page_no)),
     [pages],
@@ -1972,10 +1747,6 @@ function SuggestionPanel({ suggestion, accept, dismiss }: { suggestion: Partial<
       </div>
     </div>
   );
-}
-
-function PreviewSection({ title, children }: { title: string; children: ReactNode }) {
-  return <section className="mb-4"><div className="mb-1 text-xs font-bold text-[var(--color-text-muted)]">{title}</div><div className="rounded-md bg-[var(--color-bg)] p-3 text-sm leading-7">{children}</div></section>;
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {

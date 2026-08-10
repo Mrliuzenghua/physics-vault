@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Template, TemplateConfig, TemplateType } from '../../types';
+import type { Template, TemplateConfig, TemplateScope, TemplateType } from '../../types';
 import { deleteTemplate, saveTemplate } from '../../services/api';
 
 const TYPE_LABELS: Record<TemplateType, string> = {
@@ -9,6 +9,14 @@ const TYPE_LABELS: Record<TemplateType, string> = {
   style: '样式',
 };
 
+const SCOPE_LABELS: Record<TemplateScope, string> = {
+  all: '通用',
+  compose: '组卷',
+  handout: '讲义',
+  slides: '课件',
+  classroom: '课堂',
+};
+
 function makeTemplateId(): string {
   return `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -16,11 +24,13 @@ function makeTemplateId(): string {
 interface TemplateSaveFormProps {
   currentConfig: TemplateConfig;
   onSaved: (templates: Template[]) => void;
+  defaultScope?: TemplateScope;
 }
 
-export function TemplateSaveForm({ currentConfig, onSaved }: TemplateSaveFormProps) {
+export function TemplateSaveForm({ currentConfig, onSaved, defaultScope = 'handout' }: TemplateSaveFormProps) {
   const [name, setName] = useState('');
   const [type, setType] = useState<TemplateType>('handout');
+  const [scope, setScope] = useState<TemplateScope>(defaultScope);
   const [showForm, setShowForm] = useState(false);
 
   if (!showForm) {
@@ -46,6 +56,7 @@ export function TemplateSaveForm({ currentConfig, onSaved }: TemplateSaveFormPro
       id: makeTemplateId(),
       name: trimmed,
       type,
+      scope,
       config: { ...currentConfig },
     };
     const updated = saveTemplate(template);
@@ -86,6 +97,21 @@ export function TemplateSaveForm({ currentConfig, onSaved }: TemplateSaveFormPro
             }}
           >
             {TYPE_LABELS[t]}
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {(Object.keys(SCOPE_LABELS) as TemplateScope[]).map((value) => (
+          <button
+            key={value}
+            onClick={() => setScope(value)}
+            className="cursor-pointer rounded border-none px-2 py-1 text-xs font-medium transition-colors"
+            style={{
+              background: scope === value ? 'var(--color-accent)' : 'var(--color-bg-hover)',
+              color: scope === value ? '#fff' : 'var(--color-text-muted)',
+            }}
+          >
+            {SCOPE_LABELS[value]}
           </button>
         ))}
       </div>
@@ -154,6 +180,12 @@ export function TemplateList({ templates, onLoad, onDeleted }: TemplateListProps
                 style={{ background: 'var(--color-bg-hover)' }}
               >
                 {TYPE_LABELS[tpl.type] || tpl.type}
+              </span>
+              <span
+                className="rounded px-1 py-0.5"
+                style={{ background: 'var(--color-accent-light)', color: 'var(--color-accent)' }}
+              >
+                {SCOPE_LABELS[tpl.scope || 'all'] || '通用'}
               </span>
               {tpl.config.show_answer !== undefined && (
                 <span>{tpl.config.show_answer ? '含答案' : '无答案'}</span>

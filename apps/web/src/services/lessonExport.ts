@@ -2,6 +2,7 @@ import type PptxGenJS from 'pptxgenjs';
 import type { LessonKnowledgeCard, LessonPackage, Question } from '../types';
 import { imageFileUrl } from '../utils/imageUrl';
 import { extractLatexFragments, latexToSvgDataUri } from '../utils/mathSvg';
+import { getQuestionSourceLabel } from '../utils/questionSource';
 import { normalizeLessonPackageForOutput } from './lessonLayoutModel';
 
 export interface LessonExportOptions {
@@ -9,6 +10,37 @@ export interface LessonExportOptions {
   includeAnalysis: boolean;
   answerPosition?: 'after_question' | 'end';
   download?: boolean;
+}
+
+/** Keep browser previews and server Word exports on the same format contract. */
+export function buildWordFormatSpec(pkg: LessonPackage, options: LessonExportOptions): Record<string, unknown> {
+  const style = (pkg.styleConfig || {}) as Record<string, unknown>;
+  const existing = pkg.formatSpec && typeof pkg.formatSpec === 'object' ? pkg.formatSpec : {};
+  const existingStyle = existing.styleConfig && typeof existing.styleConfig === 'object' ? existing.styleConfig as Record<string, unknown> : {};
+  const existingHeaderFooter = existing.headerFooter && typeof existing.headerFooter === 'object' ? existing.headerFooter as Record<string, unknown> : {};
+  const existingOutput = existing.output && typeof existing.output === 'object' ? existing.output as Record<string, unknown> : {};
+  const rawFigureScale = Number(style.figureScale ?? 1);
+  const figureScale = rawFigureScale <= 2 ? rawFigureScale * 60 : rawFigureScale;
+
+  return {
+    ...existing,
+    schema: 'physics-vault/word-export-format/v1',
+    styleConfig: {
+      ...existingStyle,
+      ...style,
+      figureScale: Math.min(100, Math.max(25, figureScale || 60)),
+    },
+    headerFooter: {
+      ...existingHeaderFooter,
+      ...(pkg.headerFooter || {}),
+    },
+    output: {
+      ...existingOutput,
+      includeAnswers: options.includeAnswers,
+      includeAnalysis: options.includeAnalysis,
+      answerPosition: options.answerPosition || 'after_question',
+    },
+  };
 }
 
 export interface LessonExportIssue {
@@ -101,7 +133,9 @@ function toDocxAlignment(value: 'left' | 'center' | 'right', alignmentType: Reco
 function stripFigurePlaceholders(value?: string | null): string {
   return String(value || '')
     .replace(/!\[fig:[^\]]+\]/g, '')
-    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]*\n+/g, '\n')
     .trim();
 }
 
@@ -142,6 +176,9 @@ function docxFormattedTextRuns(
 ) {
   const runs: unknown[] = [];
   const cleaned = value
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]*\n+/g, '\n')
     .replace(/^#{1,3}\s+/gm, '')
     .replace(/^>\s?/gm, '')
     .replace(/^\s*[-•]\s+/gm, '• ');
@@ -322,7 +359,8 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
   const titleSize = 32;
   const smallTitleSize = 28;
   const wordColor = '000000';
-  const lineSpacing = Math.round((style?.lineHeight || 1.55) * 240);
+  const lineSpacingRatio = Math.min(1.55, Math.max(1.35, Number(style?.lineHeight || 1.45)));
+  const lineSpacing = Math.round(lineSpacingRatio * 240);
   const questionMap = new Map(pkg.questions.map((question) => [question.question_id, question]));
   const knowledgeMap = new Map(pkg.knowledgeCards.map((card) => [card.id, card]));
   const textMap = new Map(pkg.textBlocks.map((block) => [block.id, block]));
@@ -340,15 +378,16 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
       if (!card) continue;
       children.push(new docx.Paragraph({
         heading: docx.HeadingLevel.HEADING_2,
-        spacing: { before: 220, after: 90 },
+        spacing: { before: 160, after: 60 },
         keepNext: true,
         children: docxMathChildren(docx, card.title, { color: wordColor, bold: true, font: bodyFont, size: smallTitleSize }) as never,
       }));
-      children.push(new docx.Paragraph({ children: docxMathChildren(docx, card.summary, { color: wordColor, font: bodyFont, size: bodySize }) as never, spacing: { line: lineSpacing, after: 100 }, keepNext: true, keepLines: true }));
+      children.push(new docx.Paragraph({ children: docxMathChildren(docx, card.summary, { color: wordColor, font: bodyFont, size: bodySize }) as never, spacing: { line: lineSpacing, after: 60 }, keepNext: true, keepLines: true }));
       card.points.forEach((point, pointIndex) => children.push(new docx.Paragraph({
         children: docxMathChildren(docx, point, { color: wordColor, font: bodyFont, size: bodySize }) as never,
         bullet: { level: 0 },
-        spacing: { line: lineSpacing, after: 60 },
+        indent: { left: 360, hanging: 160 },
+        spacing: { line: lineSpacing, after: 40 },
         keepLines: true,
         keepNext: pointIndex < card.points.length - 1,
       })));
@@ -366,7 +405,7 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
       children.push(new docx.Paragraph({
         alignment: block.style?.textAlign ? toDocxAlignment(block.style.textAlign, docx.AlignmentType) as never : undefined,
         heading: isHeading ? (block.blockKind === 'exam_title' ? docx.HeadingLevel.TITLE : docx.HeadingLevel.HEADING_2) : undefined,
-        spacing: { before: isHeading ? 200 : 100, after: 100 },
+        spacing: { before: block.blockKind === 'exam_title' ? 0 : isHeading ? 220 : 100, after: block.blockKind === 'exam_title' ? 120 : 100 },
         keepNext: isHeading,
         keepLines: true,
         children: docxMathChildren(docx, block.content || block.title, { color: wordColor, bold: block.style?.fontWeight === 'bold' || isHeading, size: blockSize, font: bodyFont }) as never,
@@ -376,11 +415,19 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
     const question = questionMap.get(node.questionId);
     if (!question) continue;
     questionIndex += 1;
+    const questionSource = getQuestionSourceLabel(question, '未标注来源');
     children.push(new docx.Paragraph({
+      indent: { left: 360, hanging: 360 },
       spacing: { before: 160, after: 70, line: lineSpacing },
       keepNext: Boolean((question.figures || []).length || (question.options || []).length),
       keepLines: true,
       children: [new docx.TextRun({ text: `${questionIndex}. `, font: bodyFont, size: bodySize }), ...docxMathChildren(docx, question.title || question.stem_text || '', { font: bodyFont, size: bodySize })] as never,
+    }));
+    children.push(new docx.Paragraph({
+      spacing: { after: 70 },
+      keepNext: Boolean((question.figures || []).length || (question.options || []).length),
+      keepLines: true,
+      children: [new docx.TextRun({ text: `来源：${questionSource}`, color: wordColor, font: bodyFont, size: 18 })],
     }));
     const figureById = new Map((question.figures || []).map((figure) => [figure.fig_uuid, figure]));
     const optionFigureIds = new Set((question.options || []).flatMap((option) => extractFigureIds(option.content)));
@@ -432,8 +479,8 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
         .filter(Boolean);
       children.push(new docx.Paragraph({
         children: [new docx.TextRun({ text: `${option.opt}. `, font: bodyFont, size: bodySize }), ...docxMathChildren(docx, option.content, { font: bodyFont, size: bodySize })] as never,
-        indent: { left: 360, hanging: 0 },
-        spacing: { line: lineSpacing, after: optionImages.length > 0 ? 30 : 45 },
+        indent: { left: 560, hanging: 200 },
+        spacing: { line: lineSpacing, after: optionImages.length > 0 ? 35 : 55 },
         keepLines: true,
         keepNext: optionImages.length > 0 || optionIndex < question.options.length - 1,
       }));
@@ -453,8 +500,8 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
     if (options.answerPosition === 'end') {
       trailingAnswerBlocks.push({ questionIndex, question });
     } else {
-      if (options.includeAnswers && question.answer) children.push(new docx.Paragraph({ spacing: { before: 70, after: 45, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: '答案：', color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, question.answer, { color: wordColor, font: answerFont, size: bodySize })] as never }));
-      if (options.includeAnalysis && question.analysis) children.push(new docx.Paragraph({ spacing: { before: 35, after: 100, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: '解析：', color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, question.analysis, { color: wordColor, font: answerFont, size: bodySize })] as never }));
+      if (options.includeAnswers && question.answer) children.push(new docx.Paragraph({ shading: { fill: 'F2F2F2', type: docx.ShadingType.CLEAR }, spacing: { before: 90, after: 35, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: '【答案】 ', bold: true, color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, question.answer, { color: wordColor, font: answerFont, size: bodySize })] as never }));
+      if (options.includeAnalysis && question.analysis) children.push(new docx.Paragraph({ shading: { fill: 'F2F2F2', type: docx.ShadingType.CLEAR }, spacing: { before: 0, after: 120, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: '【详解】 ', bold: true, color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, question.analysis, { color: wordColor, font: answerFont, size: bodySize })] as never }));
     }
   }
 
@@ -465,8 +512,8 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
       children: [new docx.TextRun({ text: options.includeAnalysis ? '参考答案与解析' : '参考答案', bold: true, color: wordColor, font: bodyFont, size: smallTitleSize })],
     }));
     for (const item of trailingAnswerBlocks) {
-      if (options.includeAnswers && item.question.answer) children.push(new docx.Paragraph({ spacing: { before: 70, after: 45, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: `${item.questionIndex}. 答案：`, color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, item.question.answer, { color: wordColor, font: answerFont, size: bodySize })] as never }));
-      if (options.includeAnalysis && item.question.analysis) children.push(new docx.Paragraph({ spacing: { before: 35, after: 100, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: item.question.answer ? '解析：' : `${item.questionIndex}. 解析：`, color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, item.question.analysis, { color: wordColor, font: answerFont, size: bodySize })] as never }));
+      if (options.includeAnswers && item.question.answer) children.push(new docx.Paragraph({ shading: { fill: 'F2F2F2', type: docx.ShadingType.CLEAR }, spacing: { before: 90, after: 35, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: `${item.questionIndex}. 【答案】 `, bold: true, color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, item.question.answer, { color: wordColor, font: answerFont, size: bodySize })] as never }));
+      if (options.includeAnalysis && item.question.analysis) children.push(new docx.Paragraph({ shading: { fill: 'F2F2F2', type: docx.ShadingType.CLEAR }, spacing: { before: 0, after: 120, line: lineSpacing }, keepLines: true, children: [new docx.TextRun({ text: item.question.answer ? '【详解】 ' : `${item.questionIndex}. 【详解】 `, bold: true, color: wordColor, font: answerFont, size: bodySize }), ...docxMathChildren(docx, item.question.analysis, { color: wordColor, font: answerFont, size: bodySize })] as never }));
     }
   }
 
@@ -492,7 +539,7 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
       default: {
         document: {
           run: { font: bodyFont, size: bodySize, color: wordColor },
-          paragraph: { spacing: { line: lineSpacing, after: 60 } },
+          paragraph: { spacing: { line: lineSpacing, after: 0 } },
         },
       },
       paragraphStyles: [
@@ -526,8 +573,8 @@ export async function exportLessonAsWord(pkg: LessonPackage, options: LessonExpo
           margin: {
             top: millimetersToTwips(style?.pageMarginTop, 18),
             bottom: millimetersToTwips(style?.pageMarginBottom, 18),
-            left: millimetersToTwips(style?.pageMarginLeft, 20),
-            right: millimetersToTwips(style?.pageMarginRight, 20),
+            left: millimetersToTwips(Math.max(24, style?.pageMarginLeft || 24), 24),
+            right: millimetersToTwips(Math.max(24, style?.pageMarginRight || 24), 24),
             header: 520,
             footer: 520,
           },
@@ -605,6 +652,7 @@ async function addQuestionSlide(slide: PptxGenJS.Slide, question: Question, inde
   const optionText = question.options?.map((option) => `${option.opt}. ${latexToDisplayText(option.content)}`) || [];
   if (figureData) slide.addImage({ data: figureData, x: 8.75, y: 1.86, w: 3.2, h: 2.45, sizing: { type: 'contain', x: 8.75, y: 1.86, w: 3.2, h: 2.45 } });
   if (optionText.length > 0) slide.addText(optionText.join('\n'), { x: 1.02, y: 3.45, w: 11.2, h: 1.2, fontFace: 'Microsoft YaHei', fontSize: 14, color: COLORS.ink, margin: 0.02 });
+  slide.addText(`来源：${getQuestionSourceLabel(question, '未标注来源')}`, { x: 0.98, y: 4.7, w: 11.2, h: 0.2, fontFace: 'SimSun', fontSize: 9, color: COLORS.muted, margin: 0.02, breakLine: false });
   await addFormulaStrip(slide, [question.title, ...(question.options || []).map((option) => option.content)].join('\n'), 3.05);
   addFooter(slide, pkg, page);
 }

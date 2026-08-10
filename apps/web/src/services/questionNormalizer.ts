@@ -1,5 +1,5 @@
 import type { Question } from '../types';
-import { normalizeProjectImagePath } from '../utils/imageUrl';
+import { normalizeProjectImagePath } from '../utils/imageUrl.ts';
 
 function safeJsonParse<T>(value: unknown, fallback: T): T {
   if (value == null || value === '') {
@@ -22,6 +22,7 @@ export function normalizeQuestion(raw: Question | Record<string, unknown>): Ques
   const answerText = String(source.answer ?? source.answer_text ?? '').trim();
   const analysisText = String(source.analysis ?? source.analysis_text ?? '').trim();
   const sourceText = String(source.source ?? source.source_text ?? '').trim()
+    || String(source.origin_file ?? '').trim()
     || String(source.primary_paper_id ?? source.source_id ?? '').trim();
   const questionType = String(source.question_type ?? source.type ?? '').trim() as Question['question_type'];
   const difficultyValue = source.difficulty;

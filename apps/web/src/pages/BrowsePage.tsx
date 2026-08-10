@@ -1276,7 +1276,7 @@ export default function BrowsePage() {
         onClose={() => setBasketDrawerOpen(false)}
         onRemove={removeFromBasket}
         onMove={moveBasketItem}
-        onCompose={() => navigate('/compose')}
+        onCompose={() => navigate('/compose', { state: { newDraft: true } })}
       />
 
       {editingDraft && (

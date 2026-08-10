@@ -37,6 +37,7 @@ const savedPackageSummarySchema = z.object({
   questionCount: z.number(),
   knowledgeCount: z.number(),
   nodeCount: z.number(),
+  folderId: z.string().nullable().optional(),
 });
 
 export function parseLessonPackage(value: unknown): LessonPackage | null {

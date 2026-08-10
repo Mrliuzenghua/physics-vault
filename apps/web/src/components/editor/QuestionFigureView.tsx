@@ -1,6 +1,7 @@
 import { NodeViewWrapper, type NodeViewProps } from '@tiptap/react';
 import { AlignCenter, AlignLeft, AlignRight, GripVertical, Minus, Plus, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { moveNodeToPointer } from './nodeViewDrag';
 
 const MIN_SCALE = 25;
 const MAX_SCALE = 100;
@@ -14,9 +15,10 @@ function clampScale(value: number): number {
  * the persisted displayScale attribute, rather than applying a temporary CSS
  * transform, so the live preview and exports receive the same size.
  */
-export default function QuestionFigureView({ node, selected, updateAttributes, deleteNode }: NodeViewProps) {
+export default function QuestionFigureView({ node, selected, updateAttributes, deleteNode, editor, getPos }: NodeViewProps) {
   const wrapperRef = useRef<HTMLSpanElement | null>(null);
   const cleanupDragRef = useRef<(() => void) | null>(null);
+  const cleanupMoveRef = useRef<((event?: PointerEvent) => void) | null>(null);
   const [hovered, setHovered] = useState(false);
   const [dragging, setDragging] = useState(false);
   const scale = clampScale(Number(node.attrs.displayScale ?? 60));
@@ -24,7 +26,38 @@ export default function QuestionFigureView({ node, selected, updateAttributes, d
   const src = String(node.attrs.src || '');
   const figureId = String(node.attrs.figureId || '');
 
-  useEffect(() => () => cleanupDragRef.current?.(), []);
+  useEffect(() => () => {
+    cleanupDragRef.current?.();
+    cleanupMoveRef.current?.();
+  }, []);
+
+  const beginMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    cleanupDragRef.current?.();
+    cleanupMoveRef.current?.();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let moved = false;
+
+    const onMove = (moveEvent: PointerEvent) => {
+      if (!moved && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 4) return;
+      moved = true;
+      setDragging(true);
+    };
+    const onUp = (upEvent?: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      cleanupMoveRef.current = null;
+      setDragging(false);
+      if (moved && upEvent) moveNodeToPointer(editor, getPos, node, upEvent.clientX, upEvent.clientY);
+    };
+
+    cleanupMoveRef.current = onUp;
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
+    setDragging(false);
+  };
 
   const beginResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -57,7 +90,7 @@ export default function QuestionFigureView({ node, selected, updateAttributes, d
     <NodeViewWrapper
       as="span"
       ref={wrapperRef}
-      className={`pv-tiptap-image-node ${selected ? 'is-selected' : ''} ${dragging ? 'is-resizing' : ''}`}
+      className={`pv-tiptap-image-node ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''}`}
       style={{
         width: `${scale}%`,
         marginLeft: align === 'left' ? 0 : 'auto',
@@ -71,7 +104,7 @@ export default function QuestionFigureView({ node, selected, updateAttributes, d
       {(selected || hovered || dragging) && (
         <>
           <span className="pv-tiptap-image-actions" contentEditable={false}>
-            <button type="button" aria-label="拖动图片位置" title="按住拖动图片位置" data-drag-handle><GripVertical size={13} /></button>
+            <button type="button" aria-label="拖动图片位置" title="按住拖动图片位置" data-drag-handle onPointerDown={beginMove}><GripVertical size={13} /></button>
             <span className="pv-tiptap-image-actions__divider" />
             <button type="button" className={align === 'left' ? 'is-active' : ''} aria-label="图片左对齐" title="左对齐" onClick={() => updateAttributes({ displayAlign: 'left' })}><AlignLeft size={13} /></button>
             <button type="button" className={align === 'center' ? 'is-active' : ''} aria-label="图片居中" title="居中" onClick={() => updateAttributes({ displayAlign: 'center' })}><AlignCenter size={13} /></button>

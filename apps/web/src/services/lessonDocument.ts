@@ -58,6 +58,7 @@ export function lessonPackageToDocumentV2(pkg: LessonPackage, revision = 0): Les
         type: 'knowledgeCard',
         knowledgeId: card.id,
         title: card.title,
+        content: card.content,
         summary: card.summary,
         points: card.points,
         relatedQuestionIds: card.relatedQuestionIds,
@@ -113,6 +114,7 @@ export function lessonDocumentToLessonPackage(document: LessonDocumentV2): Lesso
       knowledgeCards.push({
         id: node.knowledgeId,
         title: node.title,
+        content: node.content,
         summary: node.summary,
         points: node.points,
         relatedQuestionIds: node.relatedQuestionIds,

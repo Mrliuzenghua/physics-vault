@@ -5,6 +5,8 @@ interface Props {
   pageCount: number;
   questionCount: number;
   risks: PreflightRiskItem[];
+  sparsePageCount: number;
+  oversizedItemCount: number;
   onPrint: () => void;
   onBack: () => void;
 }
@@ -29,6 +31,8 @@ export default function PrintPreflightPanel({
   pageCount,
   questionCount,
   risks,
+  sparsePageCount,
+  oversizedItemCount,
   onPrint,
   onBack,
 }: Props) {
@@ -68,6 +72,12 @@ export default function PrintPreflightPanel({
           <ConfigRow label="字号" value={`${config.styleConfig.fontSize}px`} />
           <ConfigRow label="行距" value={String(config.styleConfig.lineHeight)} />
         </div>
+        {(sparsePageCount > 0 || oversizedItemCount > 0) && (
+          <div className="mt-3 space-y-1 rounded border px-3 py-2 text-xs" style={{ borderColor: 'var(--color-accent)', background: 'var(--color-accent-light)', color: 'var(--color-text)' }}>
+            {sparsePageCount > 0 && <div>有 {sparsePageCount} 页内容偏少，可能出现较大空白。</div>}
+            {oversizedItemCount > 0 && <div>有 {oversizedItemCount} 个内容块偏长，可能跨页。</div>}
+          </div>
+        )}
       </div>
 
       <div className="flex-shrink-0 border-b px-4 py-3" style={{ borderColor: 'var(--color-border)' }}>

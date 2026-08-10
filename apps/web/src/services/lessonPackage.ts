@@ -6,6 +6,7 @@ import type {
   LessonKnowledgeCard,
   LessonPackage,
   SavedLessonPackageSummary,
+  LessonFolder,
   Question,
 } from '../types';
 import type { SlideDeck, SlideDeckTemplate, SlidePage } from '../types/slides';
@@ -13,6 +14,7 @@ import { parseLessonPackage, parseLessonPackageList } from './lessonPackageSchem
 
 const LESSON_PACKAGE_KEY = 'physics-vault.current-lesson-package';
 const LESSON_PACKAGE_LIBRARY_KEY = 'physics-vault.lesson-package-library';
+const LESSON_FOLDER_LIBRARY_KEY = 'physics-vault.lesson-folder-library';
 
 function makeId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -263,6 +265,7 @@ export function listSavedLessonPackages(): SavedLessonPackageSummary[] {
       questionCount: pkg.questions.length,
       knowledgeCount: pkg.knowledgeCards.length,
       nodeCount: pkg.nodes.length,
+      folderId: pkg.folderId || null,
     }));
 }
 
@@ -282,6 +285,53 @@ export function saveLessonPackageToLibrary(pkg: LessonPackage): void {
   }
   saveLessonPackageLibrary(packages);
   saveCurrentLessonPackage(nextPkg);
+}
+
+export function listLessonFolders(): LessonFolder[] {
+  const raw = localStorage.getItem(LESSON_FOLDER_LIBRARY_KEY);
+  if (!raw) return [];
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is LessonFolder => Boolean(
+      item && typeof item === 'object'
+      && typeof (item as LessonFolder).id === 'string'
+      && typeof (item as LessonFolder).name === 'string',
+    ));
+  } catch {
+    return [];
+  }
+}
+
+function saveLessonFolders(folders: LessonFolder[]): void {
+  localStorage.setItem(LESSON_FOLDER_LIBRARY_KEY, JSON.stringify(folders));
+}
+
+export function createLessonFolder(name: string): LessonFolder | null {
+  const cleanName = name.trim();
+  if (!cleanName) return null;
+  const now = new Date().toISOString();
+  const folder: LessonFolder = { id: makeId('folder'), name: cleanName, createdAt: now, updatedAt: now };
+  saveLessonFolders([...listLessonFolders(), folder]);
+  return folder;
+}
+
+export function renameLessonFolder(id: string, name: string): void {
+  const cleanName = name.trim();
+  if (!cleanName) return;
+  const now = new Date().toISOString();
+  saveLessonFolders(listLessonFolders().map((folder) => folder.id === id ? { ...folder, name: cleanName, updatedAt: now } : folder));
+}
+
+export function deleteLessonFolder(id: string): void {
+  saveLessonFolders(listLessonFolders().filter((folder) => folder.id !== id));
+  const packages = parseLessonPackageLibrary().map((pkg) => pkg.folderId === id ? { ...pkg, folderId: null } : pkg);
+  saveLessonPackageLibrary(packages);
+}
+
+export function moveSavedLessonPackage(id: string, folderId: string | null): void {
+  const packages = parseLessonPackageLibrary().map((pkg) => pkg.id === id ? { ...pkg, folderId, updatedAt: new Date().toISOString() } : pkg);
+  saveLessonPackageLibrary(packages);
 }
 
 export function deleteSavedLessonPackage(id: string): void {

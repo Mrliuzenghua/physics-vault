@@ -18,22 +18,19 @@ import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { Select } from '../components/ui/Select';
 import {
-  cleanupImportCache,
-  cleanupUnreferencedAssets,
+  cleanupUnusedCache,
   deleteSingleAsset,
-  fetchAssetCleanupPreview,
   fetchAssetList,
   fetchAssetStorageAnalysis,
-  fetchImportCacheCleanupPreview,
+  fetchUnusedCacheCleanupPreview,
 } from '../services/api';
 import type {
   AssetItem,
   AssetListResponse,
   CacheCleanupPreviewResponse,
-  CleanupPreviewResponse,
   StorageAnalysisResponse,
 } from '../types';
-import { imageFileUrl } from '../utils/imageUrl';
+import { imageThumbnailUrl } from '../utils/imageUrl';
 
 const PAGE_SIZE = 48;
 
@@ -64,9 +61,9 @@ function statusDisplay(asset: AssetItem): { label: string; className: string } {
     case 'imported':
       return { label: `已入库引用 ${asset.reference_count}`, className: 'bg-[var(--color-green-light)] text-[var(--color-green)]' };
     case 'staged':
-      return { label: '待入库', className: 'bg-[var(--color-orange-light)] text-[var(--color-orange)]' };
+      return { label: '未使用', className: 'bg-[var(--color-orange-light)] text-[var(--color-orange)]' };
     case 'unreferenced':
-      return { label: '孤立素材', className: 'bg-[var(--color-red-light)] text-[var(--color-red)]' };
+      return { label: '未使用', className: 'bg-[var(--color-orange-light)] text-[var(--color-orange)]' };
     default:
       return { label: '引用状态未知', className: 'bg-[var(--color-bg-hover)] text-[var(--color-text-muted)]' };
   }
@@ -78,7 +75,7 @@ function AssetThumbnail({ asset, className = '' }: { asset: AssetItem; className
     <div className={`flex items-center justify-center bg-[var(--color-bg-code)] ${className}`}>
       {!failed ? (
         <img
-          src={imageFileUrl(asset.relative_path, 'data/assets/questions') || ''}
+          src={imageThumbnailUrl(asset.relative_path, 360, 'data/assets/questions') || ''}
           alt={asset.filename}
           loading="lazy"
           decoding="async"
@@ -100,7 +97,6 @@ export default function AssetsManagerPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState<'question_bank' | 'import_batch'>('import_batch');
-  const [filterMode, setFilterMode] = useState('all');
   const [searchInput, setSearchInput] = useState('');
   const [keyword, setKeyword] = useState('');
   const [batchId, setBatchId] = useState('');
@@ -110,10 +106,8 @@ export default function AssetsManagerPage() {
   const [previewAsset, setPreviewAsset] = useState<AssetItem | null>(null);
   const [deleteAsset, setDeleteAsset] = useState<AssetItem | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [cleanupPreview, setCleanupPreview] = useState<CleanupPreviewResponse | null>(null);
   const [cacheCleanupPreview, setCacheCleanupPreview] = useState<CacheCleanupPreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [cleaning, setCleaning] = useState(false);
   const [clearingCache, setClearingCache] = useState(false);
   const [storageAnalysis, setStorageAnalysis] = useState<StorageAnalysisResponse | null>(null);
   const [analyzingStorage, setAnalyzingStorage] = useState(false);
@@ -124,9 +118,9 @@ export default function AssetsManagerPage() {
     setError(null);
     try {
       const result = await fetchAssetList({
-        filterMode,
+        filterMode: source === 'question_bank' ? 'referenced' : 'unreferenced',
         keyword,
-        source,
+        source: 'all',
         batchId,
         sortBy,
         sortOrder,
@@ -155,7 +149,7 @@ export default function AssetsManagerPage() {
     } finally {
       setLoading(false);
     }
-  }, [batchId, filterMode, keyword, page, sortBy, sortOrder, source]);
+  }, [batchId, keyword, page, sortBy, sortOrder, source]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -172,7 +166,6 @@ export default function AssetsManagerPage() {
       if (event.key === 'Escape') {
         setPreviewAsset(null);
         setDeleteAsset(null);
-        setCleanupPreview(null);
         setCacheCleanupPreview(null);
         setStorageAnalysis(null);
       }
@@ -181,16 +174,13 @@ export default function AssetsManagerPage() {
     return () => window.removeEventListener('keydown', handleKey);
   }, []);
 
-  const importCount = useMemo(
-    () => (data?.batches ?? []).reduce((sum, batch) => sum + batch.asset_count, 0),
-    [data?.batches],
-  );
-  const questionCount = Math.max(0, (data?.library_stats.total ?? 0) - importCount);
+  const questionCount = data?.library_stats.referenced ?? 0;
+  const importCount = data?.library_stats.unreferenced ?? 0;
   const groupedAssets = useMemo(() => {
     if (source === 'question_bank') return [{ id: 'question_bank', assets: data?.assets ?? [] }];
     const groups = new Map<string, AssetItem[]>();
     for (const asset of data?.assets ?? []) {
-      const key = asset.batch_id || 'unknown';
+      const key = asset.batch_id || 'local-cache';
       groups.set(key, [...(groups.get(key) ?? []), asset]);
     }
     return Array.from(groups, ([id, assets]) => ({ id, assets }));
@@ -198,29 +188,16 @@ export default function AssetsManagerPage() {
 
   const switchSource = (next: 'question_bank' | 'import_batch') => {
     setSource(next);
-    setFilterMode('all');
     setBatchId('');
     setPage(1);
     setPreviewAsset(null);
-  };
-
-  const openCleanupPreview = async () => {
-    setPreviewLoading(true);
-    setMessage(null);
-    try {
-      setCleanupPreview(await fetchAssetCleanupPreview());
-    } catch (err: unknown) {
-      setMessage(err instanceof Error ? err.message : '清理预览失败');
-    } finally {
-      setPreviewLoading(false);
-    }
   };
 
   const analyzeStorage = async () => {
     setAnalyzingStorage(true);
     setMessage(null);
     try {
-      setStorageAnalysis(await fetchAssetStorageAnalysis(source, false));
+      setStorageAnalysis(await fetchAssetStorageAnalysis('all', false));
     } catch (err: unknown) {
       setMessage(err instanceof Error ? err.message : '存储分析失败');
     } finally {
@@ -228,27 +205,11 @@ export default function AssetsManagerPage() {
     }
   };
 
-  const confirmCleanup = async () => {
-    setCleaning(true);
-    try {
-      const result = await cleanupUnreferencedAssets();
-      setCleanupPreview(null);
-      setMessage(result.errors.length
-        ? `已清理 ${result.deleted_count} 个文件；另有 ${result.errors.length} 个文件未处理`
-        : `已清理 ${result.deleted_count} 个文件，释放 ${formatSize(result.freed_bytes)}`);
-      await load(true);
-    } catch (err: unknown) {
-      setMessage(err instanceof Error ? err.message : '清理失败');
-    } finally {
-      setCleaning(false);
-    }
-  };
-
   const openCacheCleanupPreview = async () => {
     setPreviewLoading(true);
     setMessage(null);
     try {
-      setCacheCleanupPreview(await fetchImportCacheCleanupPreview(batchId));
+      setCacheCleanupPreview(await fetchUnusedCacheCleanupPreview(batchId));
     } catch (err: unknown) {
       setMessage(err instanceof Error ? err.message : '缓存清理预览失败');
     } finally {
@@ -259,7 +220,7 @@ export default function AssetsManagerPage() {
   const confirmCacheCleanup = async () => {
     setClearingCache(true);
     try {
-      const result = await cleanupImportCache(cacheCleanupPreview?.batch_id || '');
+      const result = await cleanupUnusedCache(cacheCleanupPreview?.batch_id || '');
       setCacheCleanupPreview(null);
       setMessage(result.errors.length
         ? `已清除 ${result.deleted_count} 个缓存文件；另有 ${result.errors.length} 个文件未处理`
@@ -295,11 +256,12 @@ export default function AssetsManagerPage() {
 
   const stats = data?.stats;
   const pagination = data?.pagination;
+  const cacheBatches = (data?.batches ?? []).filter((batch) => batch.unreferenced > 0);
   const batchOptions = [
-    { value: '', label: `全部批次（${data?.batches.length ?? 0}）` },
-    ...(data?.batches ?? []).map((batch) => ({
+    { value: '', label: `全部批次（${cacheBatches.length}）` },
+    ...cacheBatches.map((batch) => ({
       value: batch.batch_id,
-      label: `${shortBatchId(batch.batch_id)} · ${batch.asset_count} 张`,
+      label: `${shortBatchId(batch.batch_id)} · ${batch.unreferenced} 张未使用`,
     })),
   ];
 
@@ -309,7 +271,7 @@ export default function AssetsManagerPage() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="text-xl font-bold text-[var(--color-text)]">素材管理</h1>
-            <p className="mt-1 text-xs text-[var(--color-text-muted)]">管理题库正式素材与导入过程缓存，查看引用并安全释放空间</p>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">已被题目采用的图片归入题库素材，未使用图片留在缓存中</p>
           </div>
           <Button variant="outline" size="sm" icon={<RefreshCw size={14} />} loading={loading} onClick={() => void load(true)}>
             重新扫描
@@ -318,7 +280,7 @@ export default function AssetsManagerPage() {
 
         <div className="mt-4 flex gap-1 border-b border-[var(--color-border)]">
           <SourceTab active={source === 'question_bank'} icon={<Database size={15} />} label="题库素材" count={questionCount} onClick={() => switchSource('question_bank')} />
-          <SourceTab active={source === 'import_batch'} icon={<FolderArchive size={15} />} label="导入缓存" count={importCount} onClick={() => switchSource('import_batch')} />
+          <SourceTab active={source === 'import_batch'} icon={<FolderArchive size={15} />} label="缓存" count={importCount} onClick={() => switchSource('import_batch')} />
         </div>
       </header>
 
@@ -326,8 +288,8 @@ export default function AssetsManagerPage() {
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
           <StatCard icon={<ImageIcon size={16} />} label="当前结果" value={`${stats?.total ?? 0} 项`} />
           <StatCard icon={<HardDrive size={16} />} label="当前占用" value={formatSize(stats?.total_size_bytes ?? 0)} />
-          <StatCard label={source === 'import_batch' ? '已入库引用' : '引用中'} value={`${stats?.referenced ?? 0} 项`} tone="success" />
-          <StatCard label={source === 'import_batch' ? '待入库' : '孤立素材'} value={`${stats?.unreferenced ?? 0} 项`} tone={stats?.unreferenced ? 'warning' : 'neutral'} />
+          <StatCard label={source === 'question_bank' ? '引用中' : '可删除'} value={`${stats?.total ?? 0} 项`} tone={source === 'question_bank' ? 'success' : 'warning'} />
+          <StatCard label="分类规则" value={source === 'question_bank' ? '已被题目使用' : '尚未被使用'} />
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -338,20 +300,6 @@ export default function AssetsManagerPage() {
             placeholder="搜索文件名或路径"
             leftIcon={<Search size={14} />}
             wrapperClassName="min-w-[220px] flex-1 md:max-w-sm"
-          />
-          <Select
-            size="sm"
-            value={filterMode}
-            onChange={(event) => { setFilterMode(event.target.value); setPage(1); }}
-            options={source === 'import_batch' ? [
-              { value: 'all', label: '全部状态' },
-              { value: 'referenced', label: '已入库引用' },
-              { value: 'unreferenced', label: '待入库' },
-            ] : [
-              { value: 'all', label: '全部状态' },
-              { value: 'referenced', label: '引用中' },
-              { value: 'unreferenced', label: '孤立素材' },
-            ]}
           />
           {source === 'import_batch' && (
             <Select size="sm" value={batchId} onChange={(event) => { setBatchId(event.target.value); setPage(1); }} options={batchOptions} className="max-w-[250px]" />
@@ -385,19 +333,7 @@ export default function AssetsManagerPage() {
               disabled={!data?.reference_scan_available || (stats?.total ?? 0) === 0}
               onClick={() => void openCacheCleanupPreview()}
             >
-              {batchId ? '清除此批次' : '清除缓存'}
-            </Button>
-          )}
-          {source === 'question_bank' && (
-            <Button
-              variant="danger"
-              size="sm"
-              icon={<Trash2 size={14} />}
-              loading={previewLoading}
-              disabled={!data?.reference_scan_available}
-              onClick={() => void openCleanupPreview()}
-            >
-              清理孤立素材
+              {batchId ? '删除此批次缓存' : '清空未使用缓存'}
             </Button>
           )}
         </div>
@@ -420,7 +356,7 @@ export default function AssetsManagerPage() {
         {loading && !data ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--color-text-muted)]">正在扫描素材…</div>
         ) : !error && (data?.assets.length ?? 0) === 0 ? (
-          <EmptyState source={source} filtered={Boolean(keyword || batchId || filterMode !== 'all')} />
+          <EmptyState source={source} filtered={Boolean(keyword || batchId)} />
         ) : (
           <div className={`space-y-6 transition-opacity ${loading ? 'opacity-60' : 'opacity-100'}`}>
             {groupedAssets.map((group) => (
@@ -428,12 +364,14 @@ export default function AssetsManagerPage() {
                 {source === 'import_batch' && (
                   <div className="mb-2 flex items-center justify-between">
                     <div>
-                      <h2 className="text-sm font-semibold text-[var(--color-text)]">批次 {shortBatchId(group.id)}</h2>
+                      <h2 className="text-sm font-semibold text-[var(--color-text)]">{group.id === 'local-cache' ? '本地未使用素材' : `批次 ${shortBatchId(group.id)}`}</h2>
                       <p className="text-[11px] text-[var(--color-text-muted)]">本页显示 {group.assets.length} 张</p>
                     </div>
-                    <button type="button" className="text-xs text-[var(--color-accent)] hover:underline" onClick={() => { setBatchId(group.id); setPage(1); }}>
-                      仅看此批次
-                    </button>
+                    {group.id !== 'local-cache' && (
+                      <button type="button" className="text-xs text-[var(--color-accent)] hover:underline" onClick={() => { setBatchId(group.id); setPage(1); }}>
+                        仅看此批次
+                      </button>
+                    )}
                   </div>
                 )}
                 <div className="grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3">
@@ -453,7 +391,7 @@ export default function AssetsManagerPage() {
                           <div className="flex items-center gap-1 border-t border-[var(--color-border)] pt-2">
                             <Button variant="ghost" size="sm" className="flex-1" onClick={() => setPreviewAsset(asset)}>详情</Button>
                             <Button variant="ghost" size="sm" icon={<Clipboard size={13} />} onClick={() => void copyPath(asset.relative_path)}>复制</Button>
-                            {asset.source !== 'import_batch' && (
+                            {source === 'import_batch' && !asset.is_referenced && asset.lifecycle_status !== 'unknown' && (
                               <Button
                                 variant="ghost"
                                 size="sm"
@@ -499,7 +437,8 @@ export default function AssetsManagerPage() {
             <AssetThumbnail asset={previewAsset} className="min-h-0 flex-1" />
             <div className="space-y-3 border-t border-[var(--color-border)] p-4 text-xs">
               <DetailRow label="状态" value={statusDisplay(previewAsset).label} />
-              <DetailRow label="来源" value={previewAsset.source === 'import_batch' ? '导入缓存' : '题库素材'} />
+              <DetailRow label="分类" value={previewAsset.is_referenced ? '题库素材' : '缓存'} />
+              <DetailRow label="存储位置" value={previewAsset.source === 'import_batch' ? '导入批次' : '题库目录'} />
               {previewAsset.batch_id && <DetailRow label="导入批次" value={shortBatchId(previewAsset.batch_id)} />}
               <DetailRow label="更新时间" value={formatDate(previewAsset.modified_at)} />
               <div>
@@ -522,27 +461,12 @@ export default function AssetsManagerPage() {
         </div>
       )}
 
-      {cleanupPreview && (
-        <ConfirmDialog title="清理题库孤立素材" icon={<Trash2 size={20} />} onClose={() => setCleanupPreview(null)}>
-          <p>本次只处理题库正式素材，不会删除导入批次缓存。</p>
-          <div className="my-4 grid grid-cols-2 gap-2">
-            <StatCard label="可清理文件" value={`${cleanupPreview.candidate_count} 个`} tone="warning" />
-            <StatCard label="预计释放" value={formatSize(cleanupPreview.reclaimable_bytes)} />
-          </div>
-          <p className="text-xs text-[var(--color-text-muted)]">仍被题目引用的 {cleanupPreview.protected_count} 个文件将受到保护。删除操作当前不可撤销。</p>
-          <div className="mt-5 flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setCleanupPreview(null)}>取消</Button>
-            <Button variant="danger" loading={cleaning} disabled={cleanupPreview.candidate_count === 0} onClick={() => void confirmCleanup()}>确认清理</Button>
-          </div>
-        </ConfirmDialog>
-      )}
-
       {cacheCleanupPreview && (
-        <ConfirmDialog title={cacheCleanupPreview.batch_id ? '清除当前批次缓存' : '清除导入缓存'} icon={<Trash2 size={20} />} onClose={() => setCacheCleanupPreview(null)}>
+        <ConfirmDialog title={cacheCleanupPreview.batch_id ? '删除当前批次缓存' : '清空未使用缓存'} icon={<Trash2 size={20} />} onClose={() => setCacheCleanupPreview(null)}>
           <p>
             {cacheCleanupPreview.batch_id
-              ? `将清除批次 ${shortBatchId(cacheCleanupPreview.batch_id)} 中可安全删除的图片缓存。`
-              : '将清除所有非活动批次中未被题目引用的图片缓存。'}
+              ? `将删除批次 ${shortBatchId(cacheCleanupPreview.batch_id)} 中尚未被题目使用的图片。`
+              : '将删除所有尚未被题目使用的图片缓存。题库素材不会受到影响。'}
           </p>
           <div className="my-4 grid grid-cols-2 gap-2">
             <StatCard label="涉及批次" value={`${cacheCleanupPreview.batch_count} 个`} />
@@ -555,7 +479,7 @@ export default function AssetsManagerPage() {
               {cacheCleanupPreview.active_batches.length} 个正在处理或校对的批次已自动跳过。
             </p>
           )}
-          <p className="mt-3 text-xs text-[var(--color-text-muted)]">仅删除批次内的图片缓存，批次状态、识别文本和原始文档会保留。此操作不可撤销。</p>
+          <p className="mt-3 text-xs text-[var(--color-text-muted)]">正在导入或校对的批次会自动跳过。删除操作不可撤销。</p>
           <div className="mt-5 flex justify-end gap-2">
             <Button variant="outline" onClick={() => setCacheCleanupPreview(null)}>取消</Button>
             <Button variant="danger" loading={clearingCache} disabled={cacheCleanupPreview.candidate_count === 0} onClick={() => void confirmCacheCleanup()}>确认清除</Button>
@@ -634,7 +558,7 @@ function EmptyState({ source, filtered }: { source: 'question_bank' | 'import_ba
         <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-bg-hover)] text-[var(--color-text-muted)]">
           {source === 'import_batch' ? <FolderArchive size={24} /> : <Database size={24} />}
         </div>
-        <p className="mt-3 text-sm font-semibold text-[var(--color-text)]">{filtered ? '没有符合条件的素材' : source === 'import_batch' ? '暂无导入缓存' : '暂无题库素材'}</p>
+        <p className="mt-3 text-sm font-semibold text-[var(--color-text)]">{filtered ? '没有符合条件的素材' : source === 'import_batch' ? '缓存为空' : '暂无题库素材'}</p>
         <p className="mt-1 text-xs text-[var(--color-text-muted)]">{filtered ? '尝试清除筛选条件或更换关键词' : '导入文档或为题目添加图片后，素材会显示在这里'}</p>
       </div>
     </div>

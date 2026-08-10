@@ -35,10 +35,12 @@ interface Props {
   activeTab?: HandoutStyleTab;
 }
 
-export default function HandoutStylePresetPanel({ currentConfig, onApplyConfig, activeTab = 'page' }: Props) {
+export default function HandoutStylePresetPanel({ currentConfig, onApplyConfig, activeTab }: Props) {
   const [presets, setPresets] = useState<HandoutStylePreset[]>(() => loadPresets());
   const [newName, setNewName] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
+  const [selectedTab, setSelectedTab] = useState<HandoutStyleTab>(activeTab || 'page');
+  const visibleTab = activeTab || selectedTab;
 
   const flash = (text: string) => {
     setMsg(text);
@@ -94,7 +96,22 @@ export default function HandoutStylePresetPanel({ currentConfig, onApplyConfig, 
 
       {msg && <div className="pv-style-inspector__notice">{msg}</div>}
 
-      {activeTab === 'page' && <section className="pv-style-card">
+      {!activeTab && (
+        <div className="flex flex-wrap gap-1 rounded-lg bg-[var(--color-bg-hover)] p-1">
+          {HANDOUT_STYLE_TABS.map((tab) => (
+            <button
+              type="button"
+              key={tab.value}
+              className={`flex-1 rounded-md px-2 py-1.5 text-[10px] font-semibold ${visibleTab === tab.value ? 'bg-[var(--color-bg-card)] text-[var(--color-accent)] shadow-sm' : 'text-[var(--color-text-muted)]'}`}
+              onClick={() => setSelectedTab(tab.value)}
+            >
+              {tab.icon} {tab.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {visibleTab === 'page' && <section className="pv-style-card">
         <SectionHeading icon="▣" title="页面设置" description="纸张方向与页面留白" />
         <div className="pv-word-option-grid">
           <OptionButton active={currentConfig.pageSize === 'A4'} onClick={() => updateField('pageSize', 'A4')}>
@@ -135,7 +152,7 @@ export default function HandoutStylePresetPanel({ currentConfig, onApplyConfig, 
         </div>
       </section>}
 
-      {activeTab === 'text' && <section className="pv-style-card">
+      {visibleTab === 'text' && <section className="pv-style-card">
         <SectionHeading icon="Aa" title="文字排版" description="正文的阅读节奏" />
         <div className="pv-style-card__rows">
           <ControlRow label="字号" value={`${currentConfig.fontSize} px`}>
@@ -153,7 +170,7 @@ export default function HandoutStylePresetPanel({ currentConfig, onApplyConfig, 
         </label>
       </section>}
 
-      {activeTab === 'question' && <section className="pv-style-card">
+      {visibleTab === 'question' && <section className="pv-style-card">
         <SectionHeading icon="#" title="题目样式" description="题号、选项与分页规则" />
         <label className="pv-style-select">
           <span>题号样式</span>
@@ -184,14 +201,14 @@ export default function HandoutStylePresetPanel({ currentConfig, onApplyConfig, 
         </div>
       </section>}
 
-      {activeTab === 'image' && <section className="pv-style-card">
+      {visibleTab === 'image' && <section className="pv-style-card">
         <SectionHeading icon="▧" title="图片" description="统一图片在页面中的显示比例" />
         <ControlRow label="图片比例" value={`${Math.round(currentConfig.figureScale * 100)}%`}>
           <RangeInput min={0.3} max={1.5} step={0.1} value={currentConfig.figureScale} onChange={(value) => updateField('figureScale', value)} />
         </ControlRow>
       </section>}
 
-      {activeTab === 'template' && <section className="pv-style-presets">
+      {visibleTab === 'template' && <section className="pv-style-presets">
         <div className="pv-style-presets__heading">
           <div>
             <span>样式预设</span>

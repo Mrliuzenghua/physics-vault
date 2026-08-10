@@ -13,12 +13,9 @@
   Collection,
   ConvertDocumentRequest,
   ConvertDocumentResponse,
-  FilterFacets,
   ImportBatch,
   ImportBatchResponse,
   ImportPipelineTaskResponse,
-  KnowledgePoint,
-  KnowledgePointFlatItem,
   Layout,
   LessonPackage,
   McpConfig,
@@ -36,15 +33,12 @@
   QuestionPickerAgentResponse,
   RecognizeBatchResponse,
   ReviewLatexCleanupResponse,
-  SearchFilters,
-  SearchResponse,
   SystemSettings,
   Template,
   UploadImportFileResponse,
 } from '../types';
 import { extractErrorMessage } from '../utils/error';
-import { API_BASE as BASE, request, requestForm } from './apiClient';
-import { normalizeQuestion } from './questionNormalizer';
+import { ApiError, API_BASE as BASE, request, requestForm } from './apiClient';
 
 export {
   DEFAULT_AI_CONFIG,
@@ -87,78 +81,46 @@ export {
   rollbackChangeBatch,
 } from './auditApi';
 export { downloadExportPackage, restorePackage } from './systemPackageApi';
+export {
+  archiveTeachingProject,
+  duplicateTeachingProject,
+  fetchTeachingProject,
+  listTeachingProjects,
+  saveTeachingProjectSnapshot,
+} from './teachingProjectApi';
+export { listLessonReflections, saveLessonReflection } from './lessonReflectionApi';
+export {
+  fetchSavedHandout,
+  listSavedHandoutVersions,
+  listSavedHandoutsFromServer,
+  renameSavedHandout,
+  restoreSavedHandoutVersion,
+  saveSavedLessonPackage,
+} from './lessonDocumentApi';
+export {
+  deleteQuestions,
+  fetchFacets,
+  fetchKnowledgePointCounts,
+  fetchKnowledgePoints,
+  fetchQuestion,
+  fetchQuestionAssets,
+  fetchQuestionKnowledgePoints,
+  fetchQuestionVersionDetail,
+  fetchQuestionVersions,
+  fetchQuestionsByIds,
+  returnQuestionToReview,
+  rollbackQuestionVersion,
+  searchQuestions,
+  updateQuestion,
+  updateQuestionKnowledgePoints,
+} from './questionApi';
 
-function buildSearchParams(filters: SearchFilters): URLSearchParams {
-  const params = new URLSearchParams();
-  Object.entries(filters).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== '') {
-      params.set(key, String(value));
-    }
-  });
-  return params;
+export interface DatabaseStatus {
+  questions_count: number;
 }
 
-export async function searchQuestions(filters: SearchFilters): Promise<SearchResponse> {
-  const result = await request<SearchResponse | Question[]>(`/search/questions?${buildSearchParams(filters)}`);
-  if (Array.isArray(result)) {
-    return {
-      items: result.map(normalizeQuestion),
-      total: result.length,
-      limit: filters.limit ?? result.length,
-      offset: filters.offset ?? 0,
-      search_mode: filters.search_mode ?? 'browse',
-      facets: undefined,
-    } as SearchResponse;
-  }
-  if (Array.isArray(result.items)) {
-    return {
-      ...result,
-      items: result.items.map(normalizeQuestion),
-    };
-  }
-  return result;
-}
-
-export async function fetchFacets(): Promise<FilterFacets> {
-  return request('/filters/facets');
-}
-
-export async function fetchQuestion(id: string): Promise<Question> {
-  const result = await request<Question | Record<string, unknown>>(`/questions/${id}`);
-  return normalizeQuestion(result);
-}
-
-export async function fetchQuestionsByIds(questionIds: string[]): Promise<Question[]> {
-  if (questionIds.length === 0) return [];
-  const result = await request<{ items: Array<Question | Record<string, unknown>>; missing_ids: string[] }>(
-    '/api/questions/batch-get',
-    {
-      method: 'POST',
-      body: JSON.stringify({ question_ids: questionIds }),
-    },
-  );
-  return result.items.map(normalizeQuestion);
-}
-
-export async function deleteQuestions(questionIds: string[]): Promise<{
-  requested_count: number;
-  deleted_count: number;
-  missing_ids: string[];
-}> {
-  return request('/api/questions/batch-delete', {
-    method: 'POST',
-    body: JSON.stringify({ question_ids: questionIds }),
-  });
-}
-
-export async function returnQuestionToReview(
-  questionId: string,
-  reason = '题目需要回炉重造',
-): Promise<{ question_id: string; review_id?: string | null; status: 'queued'; message: string }> {
-  return request(`/api/questions/${encodeURIComponent(questionId)}/return-to-review`, {
-    method: 'POST',
-    body: JSON.stringify({ reason, reviewer: 'teacher' }),
-  });
+export async function fetchDatabaseStatus(): Promise<DatabaseStatus> {
+  return request('/api/system/db-status');
 }
 
 export async function listPaperDrafts(limit = 30): Promise<PaperDraftListResponse> {
@@ -167,6 +129,15 @@ export async function listPaperDrafts(limit = 30): Promise<PaperDraftListRespons
 
 export async function fetchLatestPaperDraft(): Promise<PaperDraft | null> {
   return request('/api/paper-drafts/latest');
+}
+
+export async function fetchPaperDraft(draftId: string): Promise<PaperDraft | null> {
+  try {
+    return await request(`/api/paper-drafts/${encodeURIComponent(draftId)}`);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
 }
 
 export async function savePaperDraft(
@@ -191,7 +162,11 @@ export async function savePaperDraft(
         payload: {
           question_type: question?.question_type,
           difficulty: question?.difficulty,
-          source: question?.primary_paper_id || question?.source,
+          source: question?.source || question?.origin_file || question?.primary_paper_id,
+          // A composition item is an editable project-level question instance.
+          // Keep the complete snapshot so reopening a draft never replaces
+          // teacher edits with the current question-bank record.
+          question_snapshot: question ? { ...question } : undefined,
         },
       };
     }
@@ -238,6 +213,7 @@ export async function savePaperDraft(
         documentRevision,
         headerFooter: pkg.headerFooter,
         styleConfig: pkg.styleConfig,
+        formatSpec: pkg.formatSpec,
         slideTemplate: pkg.slideTemplate,
       },
       quality_report: qualityReport,
@@ -250,87 +226,6 @@ function estimateQuestionScore(questionType?: string): number {
   if (questionType === 'experiment') return 10;
   if (questionType === 'multi_choice') return 6;
   return 5;
-}
-
-export async function updateQuestion(id: string, data: Partial<Question>): Promise<Question> {
-  // Strip image-related fields from the PUT payload. Images are managed
-  // by the separate /api/questions/{id}/images API. Sending them back via
-  // the question PUT would corrupt the filenames (local_path includes a
-  // path prefix that gets stored as the filename).
-  const contentData = { ...data };
-  delete contentData.figures;
-  delete contentData.image_filenames;
-  delete contentData.image_asset_ids;
-  delete contentData.image_count;
-  delete contentData.has_media;
-  delete contentData.stem_text;
-  delete contentData.canonical_title;
-    const result = await request<Question | Record<string, unknown>>(`/questions/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(contentData),
-    });
-    const normalized = normalizeQuestion(result);
-    // The question PUT intentionally omits media fields because image assets
-    // are managed by dedicated endpoints. Keep the current media metadata in
-    // the client response so saving text cannot make referenced figures vanish.
-    return {
-      ...normalized,
-      figures: normalized.figures?.length ? normalized.figures : data.figures || [],
-      image_filenames: normalized.image_filenames?.length ? normalized.image_filenames : data.image_filenames,
-      image_asset_ids: normalized.image_asset_ids?.length ? normalized.image_asset_ids : data.image_asset_ids,
-      image_count: normalized.image_count || data.image_count || 0,
-      has_media: normalized.has_media ?? data.has_media,
-    };
-  }
-
-// Question version history
-
-export async function fetchQuestionVersions(
-  questionId: string,
-): Promise<import('../types').QuestionVersionSummary[]> {
-  return request(`/questions/${encodeURIComponent(questionId)}/versions`);
-}
-
-export async function fetchQuestionVersionDetail(
-  questionId: string,
-  versionId: string,
-): Promise<import('../types').QuestionVersionDetail> {
-  return request(
-    `/questions/${encodeURIComponent(questionId)}/versions/${encodeURIComponent(versionId)}`,
-  );
-}
-
-export async function rollbackQuestionVersion(
-  questionId: string,
-  versionId: string,
-): Promise<{ ok: boolean; message: string }> {
-  return request(
-    `/questions/${encodeURIComponent(questionId)}/versions/${encodeURIComponent(versionId)}/rollback`,
-    { method: 'POST', body: JSON.stringify({ modified_by: 'teacher' }) },
-  );
-}
-
-export async function fetchQuestionKnowledgePoints(id: string): Promise<KnowledgePoint[]> {
-  return request(`/questions/${id}/knowledge-points`);
-}
-
-export async function updateQuestionKnowledgePoints(id: string, points: KnowledgePoint[]): Promise<void> {
-  await request(`/questions/${id}/knowledge-points`, {
-    method: 'PUT',
-    body: JSON.stringify(points),
-  });
-}
-
-export async function fetchKnowledgePoints(): Promise<KnowledgePointFlatItem[]> {
-  return request('/knowledge-points');
-}
-
-export async function fetchKnowledgePointCounts(): Promise<Record<string, number>> {
-  return request('/knowledge-points/counts');
-}
-
-export async function fetchQuestionAssets(id: string): Promise<{ path: string; type: string }[]> {
-  return request(`/questions/${id}/assets`);
 }
 
 export async function fetchImages(params: Record<string, string>): Promise<unknown[]> {
@@ -390,6 +285,44 @@ export async function sendAiChatTest(
       temperature,
     }),
   });
+}
+
+export async function refineQuestionFormat(question: Question): Promise<Partial<Question>> {
+  const result = await request<{ ok: boolean; data: Partial<Question> }>('/api/mcp/refine-question-format', {
+    method: 'POST',
+    body: JSON.stringify({ question }),
+  });
+  return result.data;
+}
+
+export async function completeQuestionAnalysis(question: Question): Promise<string> {
+  const difficulty = Number(question.difficulty);
+  const result = await request<{ ok: boolean; data: { analysis_text?: string; analysis?: string } }>('/api/mcp/generate-analysis', {
+    method: 'POST',
+    body: JSON.stringify({
+      question: {
+        question_id: question.question_id,
+        question_type: question.question_type || 'calculation',
+        title: question.title || '',
+        options: question.options || [],
+        answer: question.answer || '',
+        analysis: question.analysis || '',
+        figures: (question.figures || []).map((figure) => ({
+          fig_uuid: figure.fig_uuid,
+          local_path: figure.local_path,
+        })),
+        difficulty: Number.isInteger(difficulty) && difficulty >= 1 && difficulty <= 5 ? difficulty : null,
+        knowledge_point: question.knowledge_point || null,
+        tags: question.tags || [],
+        source: question.source || null,
+      },
+      style: 'exam_standard',
+      include_extension: false,
+    }),
+  });
+  const analysis = String(result.data.analysis_text || result.data.analysis || '').trim();
+  if (!analysis) throw new Error('DeepSeek 没有返回可用解析，请检查题干、答案和模型配置。');
+  return analysis;
 }
 
 // Import pipeline
@@ -700,6 +633,29 @@ export async function uploadBatchImage(
   return requestForm(`/api/import/batches/${encodeURIComponent(batchId)}/images`, formData);
 }
 
+export interface ImageCacheAsset {
+  relative_path: string;
+  filename: string;
+  file_path: string;
+  mime_type: string;
+  size: number;
+}
+
+export async function fetchQuestionImageCache(keyword = '', limit = 200): Promise<ImageCacheAsset[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (keyword.trim()) params.set('keyword', keyword.trim());
+  return request(`/api/questions/images/cache?${params.toString()}`);
+}
+
+export async function uploadQuestionImageCache(files: File[]): Promise<{
+  images: ImageCacheAsset[];
+  skipped: string[];
+}> {
+  const formData = new FormData();
+  files.forEach((file) => formData.append('files', file));
+  return requestForm('/api/questions/images/cache-upload', formData);
+}
+
 export async function convertDocument(body: ConvertDocumentRequest): Promise<ConvertDocumentResponse> {
   return request('/api/import/convert', {
     method: 'POST',
@@ -900,6 +856,20 @@ export async function cleanupImportCache(batchId: string = ''): Promise<import('
   });
 }
 
+export async function fetchUnusedCacheCleanupPreview(
+  batchId: string = '',
+): Promise<import('../types').CacheCleanupPreviewResponse> {
+  const params = new URLSearchParams({ batch_id: batchId });
+  return request(`/api/assets/unused-cache-preview?${params}`);
+}
+
+export async function cleanupUnusedCache(batchId: string = ''): Promise<import('../types').CleanupResponse> {
+  return request('/api/assets/cleanup-unused-cache', {
+    method: 'POST',
+    body: JSON.stringify({ batch_id: batchId || null }),
+  });
+}
+
 export async function fetchAssetStorageAnalysis(
   source: string = 'all',
   refresh: boolean = false,
@@ -926,6 +896,14 @@ export async function addQuestionImage(id: string, body: {
   asset_id: string; role?: string; sort_order?: number; placeholder_key?: string; is_primary?: boolean;
 }): Promise<import('../types').QuestionImageDetail> {
   return request(`/api/questions/${encodeURIComponent(id)}/images`, {
+    method: 'POST', body: JSON.stringify(body),
+  });
+}
+
+export async function addCachedQuestionImage(id: string, body: {
+  relative_path: string; role?: string; sort_order?: number; is_primary?: boolean;
+}): Promise<import('../types').QuestionImageDetail> {
+  return request(`/api/questions/${encodeURIComponent(id)}/images/from-cache`, {
     method: 'POST', body: JSON.stringify(body),
   });
 }

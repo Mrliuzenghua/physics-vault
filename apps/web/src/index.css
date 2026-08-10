@@ -272,6 +272,12 @@ button {
   overflow-y: visible;
 }
 
+.handout-markdown-rule {
+  border: 0;
+  border-top: 1px solid var(--color-border, #d8dee8);
+  margin: 12px 0;
+}
+
 .ai-chat-rich-text {
   overflow-wrap: anywhere;
 }
@@ -498,7 +504,9 @@ button {
 
 .pv-tiptap-image-node:hover img,
 .pv-tiptap-image-node.is-selected img,
-.pv-tiptap-image-node.is-resizing img {
+.pv-tiptap-image-node.is-resizing img,
+.pv-tiptap-image-node.is-dragging img,
+.pv-rich-image-node.is-dragging img {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 16%, transparent);
 }
@@ -591,27 +599,30 @@ button {
 .rich-inline-image { display: block; max-width: 100%; margin: 0.55rem 0; border-radius: 8px; }
 
 .pv-tiptap-formula-node {
-  border-color: var(--color-purple);
-  background: var(--color-purple-light);
-  color: var(--color-purple);
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
   cursor: text;
+  padding: 0;
 }
 
 .pv-tiptap-formula-node.is-selected {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-purple) 24%, transparent);
+  box-shadow: none;
+  outline: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+  outline-offset: 2px;
 }
 
 .pv-tiptap-formula-editor {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  border: 1px solid var(--color-purple);
+  border: 1px solid var(--color-border-strong);
   border-radius: 5px;
-  background: #fff;
+  background: var(--color-bg-hover);
   padding: 1px 5px;
-  color: var(--color-purple);
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  color: var(--color-text-main);
+  font-family: inherit;
 }
 
 .pv-tiptap-formula-editor input {
@@ -623,10 +634,10 @@ button {
   color: var(--color-text-main);
   font: inherit;
 }
-.pv-tiptap-formula-live { display: inline-flex; min-width: 52px; align-items: center; border-left: 1px solid #ddd6fe; padding-left: 7px; color: #111827; font-family: inherit; }
+.pv-tiptap-formula-live { display: inline-flex; min-width: 52px; align-items: center; border-left: 1px solid var(--color-border); padding-left: 7px; color: var(--color-text-main); font-family: inherit; }
 
 .pv-tiptap-formula-prefix {
-  color: var(--color-purple);
+  color: var(--color-text-muted);
 }
 
 .pv-tiptap-divider {
@@ -717,11 +728,20 @@ button {
 }
 
 /* Compose style inspector ------------------------------------------------ */
+.compose-inspector__tabs {
+  scrollbar-width: thin;
+  scrollbar-color: #c8d7e8 transparent;
+}
+
+.compose-inspector__tabs::-webkit-scrollbar { height: 5px; }
+.compose-inspector__tabs::-webkit-scrollbar-track { background: transparent; }
+.compose-inspector__tabs::-webkit-scrollbar-thumb { border-radius: 999px; background: #c8d7e8; }
+
 .pv-style-inspector {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 12px;
+  padding: 2px;
   color: #1e3a5f;
 }
 
@@ -792,14 +812,14 @@ button {
   border-radius: 10px;
   background: #fff;
   box-shadow: 0 2px 7px rgba(32, 92, 153, .045);
-  padding: 11px;
+  padding: 16px;
 }
 
 .pv-style-card__heading {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 
 .pv-style-card__heading > span {
@@ -857,6 +877,20 @@ button {
 .pv-page-icon--a3 { width: 34px; height: 25px; }
 .pv-word-layout-row { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; border-top: 1px dashed #d9e3ee; padding-top: 11px; color: #526b87; font-size: 11px; font-weight: 700; }
 .pv-style-card__rows { display: grid; gap: 9px; }
+
+@media (max-width: 900px) {
+  .compose-inspector {
+    width: min(400px, 42vw) !important;
+    min-width: 300px !important;
+  }
+}
+
+@media (max-width: 560px) {
+  .compose-inspector {
+    width: min(360px, 82vw) !important;
+    min-width: 280px !important;
+  }
+}
 
 .pv-style-control-row > div:first-child {
   display: flex;
@@ -950,6 +984,51 @@ button {
     display: none !important;
   }
 
+  .handout-screen-only,
+  .handout-editor-toolbar,
+  .handout-sidebar {
+    display: none !important;
+  }
+
+  .handout-print-shell {
+    display: block !important;
+    width: 100% !important;
+    height: auto !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+  }
+
+  .handout-print-surface {
+    display: block !important;
+    width: 100% !important;
+    height: auto !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    background: #fff !important;
+  }
+
+  .handout-print-surface > div {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .handout-print-surface [style*="zoom"] {
+    zoom: 1 !important;
+  }
+
+  .handout-print-surface,
+  .handout-print-surface * {
+    scrollbar-width: none !important;
+  }
+
+  .handout-print-surface::-webkit-scrollbar,
+  .handout-print-surface *::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+  }
+
   .compose-print-document {
     display: block !important;
     position: static !important;
@@ -963,6 +1042,17 @@ button {
   main {
     display: block !important;
     height: auto !important;
+    overflow: visible !important;
+  }
+
+  /* AppShell normally scrolls route content in this wrapper.  If it keeps its
+     screen-only height while printing, Chromium repeats that scrollbar on
+     every printed page. */
+  #main-content > div,
+  .handout-print-page {
+    display: block !important;
+    height: auto !important;
+    min-height: 0 !important;
     overflow: visible !important;
   }
 

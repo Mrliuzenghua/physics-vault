@@ -135,7 +135,18 @@ function hasOcrArtifact(value: string): boolean {
 }
 
 function normalizedOptionContent(value: string): string {
-  return value.replace(/[\s\p{P}\p{S}]+/gu, '').toLowerCase();
+  // Keep the sign in mathematical options.  Otherwise “F/3 + μmg” and
+  // “F/3 − μmg” collapse to the same value and produce a false duplicate.
+  return value
+    .replace(/[\s\p{P}\p{S}]+/gu, (symbols) => [...symbols]
+      .filter((symbol) => symbol === '+' || symbol === '-' || symbol === '−')
+      .join(''))
+    .toLowerCase();
+}
+
+function normalizedOptionLabel(value: string): string {
+  const match = value.trim().toUpperCase().match(/[A-H]/);
+  return match?.[0] || '';
 }
 
 export function analyzeQuestionQuality(question: QualityQuestion, context: QuestionQualityContext = {}): QuestionQualityIssue[] {
@@ -163,7 +174,7 @@ export function analyzeQuestionQuality(question: QualityQuestion, context: Quest
   }
 
   if (isChoice && answer) {
-    const available = new Set(question.options.map((option) => option.opt.trim().toUpperCase()).filter(Boolean));
+    const available = new Set(question.options.map((option) => normalizedOptionLabel(option.opt)).filter(Boolean));
     const selected = [...new Set(answer.toUpperCase().match(/[A-H]/g) ?? [])];
     if (selected.length > 0 && selected.some((label) => !available.has(label))) {
       addIssue({ code: 'answer_option_mismatch', severity: 'danger', field: 'answer', message: '答案引用了不存在的选项' });

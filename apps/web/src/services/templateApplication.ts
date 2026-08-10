@@ -3,6 +3,31 @@ import type {
   HandoutStyleConfig,
   TemplateConfig,
 } from '../types';
+import { DEFAULT_STYLE_CONFIG } from '../components/handout/handoutStylePresets';
+
+export type TemplateApplyMode = 'fill' | 'overwrite';
+
+export interface TemplateConfigChange {
+  key: keyof TemplateConfig;
+  before: string;
+  after: string;
+}
+
+const TEMPLATE_KEYS: Array<keyof TemplateConfig> = [
+  'knowledge_mode', 'knowledge_style', 'knowledge_length', 'show_answer', 'show_analysis',
+  'question_number_style', 'figure_scale', 'font_family', 'font_size', 'line_height',
+  'page_size', 'orientation', 'header', 'footer', 'option_layout', 'keep_question_together',
+  'keep_figure_with_stem', 'start_long_question_on_new_page', 'page_fill_percent',
+];
+
+export function describeTemplateChanges(current: TemplateConfig, template: TemplateConfig): TemplateConfigChange[] {
+  return TEMPLATE_KEYS.flatMap((key) => {
+    const before = current[key];
+    const after = template[key];
+    if (after === undefined || String(before ?? '') === String(after ?? '')) return [];
+    return [{ key, before: String(before ?? '未设置'), after: String(after) }];
+  });
+}
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
@@ -20,6 +45,7 @@ function resolveFontFamily(value?: string): HandoutStyleConfig['fontFamily'] {
 export function applyTemplateToStyleConfig(
   current: HandoutStyleConfig,
   template: TemplateConfig,
+  mode: TemplateApplyMode = 'overwrite',
 ): HandoutStyleConfig {
   const parsedFontSize = Number.parseFloat(template.font_size || '');
   const parsedLineHeight = Number.parseFloat(template.line_height || '');
@@ -32,7 +58,7 @@ export function applyTemplateToStyleConfig(
       ? 'bracket'
       : 'decimal';
 
-  return {
+  const next: HandoutStyleConfig = {
     ...current,
     fontFamily: resolveFontFamily(template.font_family),
     fontSize: Number.isFinite(parsedFontSize) ? clamp(parsedFontSize, 10, 20) : current.fontSize,
@@ -50,19 +76,47 @@ export function applyTemplateToStyleConfig(
       ? clamp(Number(template.page_fill_percent), 78, 98)
       : current.pageFillPercent,
   };
+  if (mode === 'overwrite') return next;
+  const defaultConfig = DEFAULT_STYLE_CONFIG;
+  const result = { ...next };
+  (Object.keys(defaultConfig) as Array<keyof HandoutStyleConfig>).forEach((key) => {
+    if (current[key] !== undefined && current[key] !== defaultConfig[key]) result[key] = current[key] as never;
+  });
+  return result;
 }
 
 export function applyTemplateToHeaderFooter(
   current: HandoutHeaderFooterConfig,
   template: TemplateConfig,
+  mode: TemplateApplyMode = 'overwrite',
 ): HandoutHeaderFooterConfig {
   const headerText = template.header?.trim() || '';
   const footerText = template.footer?.trim() || '';
-  return {
+  const next = {
     ...current,
     headerEnabled: Boolean(headerText),
     headerText,
     footerEnabled: Boolean(footerText),
     footerText,
+  };
+  if (mode === 'overwrite') return next;
+  const defaults: HandoutHeaderFooterConfig = {
+    headerEnabled: false,
+    headerText: '',
+    headerAlign: 'left',
+    footerEnabled: false,
+    footerText: '',
+    footerAlign: 'left',
+    showPageNumber: false,
+  };
+  return {
+    ...next,
+    headerEnabled: current.headerEnabled !== defaults.headerEnabled ? current.headerEnabled : next.headerEnabled,
+    headerText: current.headerText || next.headerText,
+    headerAlign: current.headerText ? current.headerAlign : next.headerAlign,
+    footerEnabled: current.footerEnabled !== defaults.footerEnabled ? current.footerEnabled : next.footerEnabled,
+    footerText: current.footerText || next.footerText,
+    footerAlign: current.footerText ? current.footerAlign : next.footerAlign,
+    showPageNumber: current.showPageNumber !== defaults.showPageNumber ? current.showPageNumber : next.showPageNumber,
   };
 }

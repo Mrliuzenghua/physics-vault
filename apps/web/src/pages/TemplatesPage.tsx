@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 
 import { TemplateList, TemplateSaveForm } from '../components/template/TemplateComponents';
 import { deleteMaterialPackage, loadMaterialPackages, loadTemplates, saveTemplate } from '../services/api';
-import type { Template, TemplateConfig, TemplateMaterialPackage, TemplateType } from '../types';
+import { describeTemplateChanges, type TemplateApplyMode } from '../services/templateApplication';
+import type { Template, TemplateConfig, TemplateMaterialPackage, TemplateScope, TemplateType } from '../types';
 import { MATERIAL_PACKAGE_TYPE_LABELS } from '../types';
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -76,11 +77,18 @@ const DEFAULT_CONFIG: TemplateConfig = {
 
 export default function TemplatesPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedScope = searchParams.get('scope');
+  const activeScope: TemplateScope = requestedScope === 'compose' || requestedScope === 'handout' || requestedScope === 'slides' || requestedScope === 'classroom'
+    ? requestedScope
+    : 'all';
   const [templates, setTemplates] = useState<Template[]>([]);
   const [materialPackages, setMaterialPackages] = useState<TemplateMaterialPackage[]>([]);
   const [config, setConfig] = useState<TemplateConfig>({ ...DEFAULT_CONFIG });
   const [loadedName, setLoadedName] = useState<string | null>(null);
   const [loadedId, setLoadedId] = useState<string | null>(null);
+  const [compareBase, setCompareBase] = useState<TemplateConfig | null>(null);
+  const [applyMode, setApplyMode] = useState<TemplateApplyMode>('overwrite');
   const [saveName, setSaveName] = useState('');
   const [saveType, _setSaveType] = useState<TemplateType>('handout');
   const [saved, setSaved] = useState(false);
@@ -107,18 +115,25 @@ export default function TemplatesPage() {
   }, []);
 
   const handleLoad = useCallback((tpl: Template) => {
+    setCompareBase({ ...config });
     setConfig({ ...tpl.config });
     setLoadedName(tpl.name);
     setLoadedId(tpl.id);
     setSaveName(tpl.name);
-  }, []);
+  }, [config]);
 
   const handleReset = useCallback(() => {
     setConfig({ ...DEFAULT_CONFIG });
     setLoadedName(null);
     setLoadedId(null);
     setSaveName('');
+    setCompareBase(null);
   }, []);
+
+  const templateChanges = useMemo(
+    () => (compareBase ? describeTemplateChanges(compareBase, config) : []),
+    [compareBase, config],
+  );
 
   const toggleBool = useCallback((field: keyof TemplateConfig) => {
     setConfig((prev) => {
@@ -142,6 +157,11 @@ export default function TemplatesPage() {
     return parts.join(' · ');
   }, [config]);
 
+  const visibleTemplates = useMemo(() => {
+    if (activeScope === 'all') return templates;
+    return templates.filter((template) => !template.scope || template.scope === 'all' || template.scope === activeScope);
+  }, [activeScope, templates]);
+
   return (
     <div className="flex h-full">
       {/* ── Left: saved templates ── */}
@@ -158,13 +178,32 @@ export default function TemplatesPage() {
           </p>
         </div>
 
-        <TemplateSaveForm currentConfig={config} onSaved={handleSaved} />
+        <TemplateSaveForm currentConfig={config} onSaved={handleSaved} defaultScope={activeScope === 'all' ? 'handout' : activeScope} />
 
         <div className="border-t pt-3" style={{ borderColor: 'var(--color-border)' }}>
           <div className="mb-2 text-xs font-semibold" style={{ color: 'var(--color-text)' }}>
-            已保存模板 ({templates.length})
+            已保存模板 ({visibleTemplates.length})
           </div>
-          <TemplateList templates={templates} onLoad={handleLoad} onDeleted={handleDeleted} />
+          <div className="mb-2 flex flex-wrap gap-1">
+            {(['all', 'compose', 'handout', 'slides', 'classroom'] as TemplateScope[]).map((scope) => (
+              <button
+                key={scope}
+                type="button"
+                onClick={() => {
+                  if (scope === 'all') setSearchParams({});
+                  else setSearchParams({ scope });
+                }}
+                className="rounded px-2 py-1 text-[10px] font-semibold"
+                style={{
+                  background: activeScope === scope ? 'var(--color-accent)' : 'var(--color-bg-hover)',
+                  color: activeScope === scope ? '#fff' : 'var(--color-text-muted)',
+                }}
+              >
+                {scope === 'all' ? '全部' : scope === 'compose' ? '组卷' : scope === 'handout' ? '讲义' : scope === 'slides' ? '课件' : '课堂'}
+              </button>
+            ))}
+          </div>
+          <TemplateList templates={visibleTemplates} onLoad={handleLoad} onDeleted={handleDeleted} />
         </div>
 
         {/* ── Material packages ── */}
@@ -202,7 +241,7 @@ export default function TemplatesPage() {
                       onClick={() => {
                         // Load material package into compose page via route state
                         navigate('/compose', {
-                          state: { materialPackage: pkg },
+                          state: { materialPackage: pkg, newDraft: true },
                         });
                       }}
                       className="cursor-pointer rounded border-none px-2 py-0.5 text-xs font-medium text-white transition-colors"
@@ -250,6 +289,8 @@ export default function TemplatesPage() {
                 onClick={() => navigate('/compose', {
                   state: {
                     templateConfig: { ...config },
+                    newDraft: true,
+                    templateApplyMode: applyMode,
                     templateName: loadedName || nameHint || '排版模板',
                   },
                 })}
@@ -258,6 +299,10 @@ export default function TemplatesPage() {
               >
                 应用到组卷工作台
               </button>
+              <div className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-hover)] p-1">
+                <button type="button" onClick={() => setApplyMode('fill')} className={`rounded px-2 py-1 text-[11px] ${applyMode === 'fill' ? 'bg-white font-semibold text-[var(--color-accent)] shadow-sm' : 'text-[var(--color-text-muted)]'}`}>填充空白</button>
+                <button type="button" onClick={() => setApplyMode('overwrite')} className={`rounded px-2 py-1 text-[11px] ${applyMode === 'overwrite' ? 'bg-white font-semibold text-[var(--color-accent)] shadow-sm' : 'text-[var(--color-text-muted)]'}`}>覆盖已有</button>
+              </div>
               {loadedName && (
                 <button
                   onClick={handleReset}
@@ -280,6 +325,7 @@ export default function TemplatesPage() {
                     id: loadedId || `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                     name,
                     type: saveType,
+                    scope: activeScope,
                     config: { ...config },
                     created_at: loadedId ? templates.find((item) => item.id === loadedId)?.created_at : now,
                     updated_at: now,
@@ -315,6 +361,29 @@ export default function TemplatesPage() {
 
           {/* ── Section: 排版设置 ── */}
           <Section title="排版设置">
+            {compareBase && (
+              <section className="rounded border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-xs font-semibold text-[var(--color-text)]">应用前差异预览</h3>
+                    <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">当前配置与模板配置的变化项，共 {templateChanges.length} 项。</p>
+                  </div>
+                  <span className="rounded bg-[var(--color-accent-light)] px-2 py-1 text-[10px] font-semibold text-[var(--color-accent)]">{applyMode === 'fill' ? '仅填充空白' : '覆盖已有设置'}</span>
+                </div>
+                {templateChanges.length === 0 ? (
+                  <div className="mt-3 text-xs text-[var(--color-text-muted)]">没有检测到配置差异。</div>
+                ) : (
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    {templateChanges.map((change) => (
+                      <div key={String(change.key)} className="rounded border border-[var(--color-border)] px-3 py-2 text-[11px]">
+                        <div className="font-semibold text-[var(--color-text)]">{String(change.key)}</div>
+                        <div className="mt-1 text-[var(--color-text-muted)]"><span>{change.before}</span><span className="px-1 text-[var(--color-accent)]">→</span><span className="font-semibold text-[var(--color-text)]">{change.after}</span></div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
             {/* Font family */}
             <Field label="字体">
               <select

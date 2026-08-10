@@ -45,6 +45,11 @@ export function normalizeShortInlineDisplayMath(text: string): string {
     .join('\n');
 }
 
+/**
+ * Some imported documents lose the surrounding $ delimiters while keeping
+ * an unmistakable LaTeX fragment such as P_{电} or 10\text{m/s}^2.
+ * Recover only these narrow patterns for preview; the stored source remains unchanged.
+ */
 function normalizeMathLine(line: string): string {
   return line
     .replace(DISPLAY_MATH_RE, (full, formula: string) => {
