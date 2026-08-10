@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import type { BasketItem, Question } from '../../types';
-import { fetchQuestionsByIds } from '../../services/api';
+import { fetchQuestionsByIds } from '../../services/questionApi';
 
 interface Props {
   open: boolean;

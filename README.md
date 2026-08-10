@@ -43,6 +43,19 @@ npm.cmd run build
 The backend test suite includes the API-303 contract gate for route contracts,
 frontend API transport, and MCP tool names.
 
+### API-303 contract gate
+
+Run the same blocking check locally and in CI:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\check_contracts.py
+```
+
+The command exits with code 1 when a contract violation is found. Its output is
+sorted by violation code and location, and each item includes a repair
+suggestion. Use `--root <path>` only when checking an isolated fixture or
+another checkout.
+
 ## 元数据目录
 
 MCP 允许智能体直接维护标签、知识点、难度、题型和规范化来源，但不能修改正式题目的题干、答案、解析、图片或发布状态。

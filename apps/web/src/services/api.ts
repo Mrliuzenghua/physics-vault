@@ -106,6 +106,7 @@ export {
   fetchQuestionVersionDetail,
   fetchQuestionVersions,
   fetchQuestionsByIds,
+  fetchSimilarQuestions,
   returnQuestionToReview,
   rollbackQuestionVersion,
   searchQuestions,
@@ -875,51 +876,6 @@ export async function generateSingleAnalysis(
   body: { question: Record<string, unknown>; style?: string; include_extension?: boolean; force_regenerate?: boolean },
 ): Promise<{ question_id: string; analysis_text: string; generated: boolean; warnings: string[] }> {
   return request('/api/ai/analysis/generate', { method: 'POST', body: JSON.stringify(body) });
-}
-
-// Similar questions
-
-export async function fetchSimilarQuestions(
-  questionId: string,
-  limit: number = 10,
-): Promise<import('../types').SimilarQuestionsResponse> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  try {
-    const raw = await request<Record<string, unknown>>(
-      `/api/questions/${encodeURIComponent(questionId)}/similar?${params}`,
-    );
-    // Normalise field names: the backend sends similarity_score but some
-    // deployments may still use similarity or similarityScore as aliases.
-    const items = (Array.isArray(raw.items) ? raw.items : []).map(
-      (item: Record<string, unknown>) => ({
-        ...item,
-        similarity_score:
-          (item.similarity_score as number) ??
-          (item.similarity as number) ??
-          (item.similarityScore as number) ??
-          0,
-        title: (item.title as string) || (item.question_id as string) || '',
-        question_type: item.question_type || null,
-        difficulty: item.difficulty || null,
-      }),
-    );
-    return {
-      question_id: (raw.question_id as string) || questionId,
-      items: items as import('../types').SimilarQuestionItem[],
-      total_candidates: (raw.total_candidates as number) || 0,
-      limit: (raw.limit as number) || limit,
-    };
-  } catch (error) {
-    if (error instanceof Error && /Not Found|HTTP 404/i.test(error.message)) {
-      return {
-        question_id: questionId,
-        items: [],
-        total_candidates: 0,
-        limit,
-      };
-    }
-    throw error;
-  }
 }
 
 export type {

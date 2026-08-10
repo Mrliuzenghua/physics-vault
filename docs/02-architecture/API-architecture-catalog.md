@@ -67,6 +67,12 @@ frontend `fetch` calls outside `apiClient.ts`, and duplicate MCP tool names.
 Downloads, HTML pages, and NDJSON streams must declare their response class
 explicitly and are checked as non-JSON contracts.
 
+The reusable local/CI command is
+`\.venv\Scripts\python.exe scripts\check_contracts.py`. It exits nonzero on
+any violation and prints a deterministic list sorted by violation code and
+location, with each item’s location, problem statement, and repair suggestion.
+The command accepts `--root <path>` for isolated gate fixtures.
+
 API-301 completed the bare-map migration. `BARE_DICT_RESPONSE_ALLOWLIST` is
 intentionally empty, so every new bare `dict` response fails the contract gate.
 

@@ -20,6 +20,13 @@ from mcp_contracts.src.models import (  # type: ignore[import-not-found]
     MetadataConstraints,
     MetadataTaskItem,
 )
+from mcp_contracts.src.operation_plan import (
+    BatchMetadataExecutionPayload,
+    BatchMetadataSkip,
+    BatchMetadataUpdate,
+    OperationPlan,
+    snapshot_version,
+)
 
 from ..repositories.question_write import QuestionWriteRepository
 from ..schemas.metadata_batch import (
@@ -30,6 +37,14 @@ from ..schemas.metadata_batch import (
 from .mcp_gateway import AppError, McpGatewayService
 
 logger = logging.getLogger(__name__)
+
+
+class MetadataBatchOperationError(RuntimeError):
+    """A persisted metadata plan is malformed or cannot be safely executed."""
+
+
+class MetadataBatchOperationExecutionError(MetadataBatchOperationError):
+    """At least one planned write failed; the operation must not be completed."""
 
 
 class MetadataBatchService:
@@ -135,6 +150,191 @@ class MetadataBatchService:
             failed=failed,
             results=results,
         )
+
+    async def build_operation_payload(
+        self,
+        request: BatchMetadataRequest,
+    ) -> tuple[BatchMetadataExecutionPayload, dict[str, str], BatchMetadataResponse]:
+        """Resolve a metadata request once, without writing, for durable confirmation.
+
+        AI output is resolved here rather than at confirmation time so the
+        persisted payload is complete, reviewable, and deterministic.
+        """
+        question_ids = list(dict.fromkeys(request.question_ids))
+        current = self._repo.get_question_metadata(question_ids)
+        question_versions = self._metadata_versions(question_ids, current)
+        ai_fields = self._ai_fields(request)
+        manual_values = request.manual_values or None
+        ai_results: dict[str, dict[str, Any]] = {}
+        skipped_messages: dict[str, str] = {}
+
+        if ai_fields and self._gateway is not None:
+            try:
+                ai_results = await self._run_ai(question_ids, current, ai_fields, request)
+            except AppError as exc:
+                logger.warning("AI metadata generation failed during preview: %s", exc.message)
+                for question_id in question_ids:
+                    if any(self._field_is_empty(current.get(question_id, {}), field) for field in ai_fields):
+                        skipped_messages[question_id] = f"AI 不可用: {exc.message}"
+
+        updates: list[BatchMetadataUpdate] = []
+        for question_id in question_ids:
+            if question_id in skipped_messages:
+                continue
+            metadata = current.get(question_id, {})
+            is_empty = {field: self._field_is_empty(metadata, field) for field in request.fields}
+            resolved: dict[str, str | None] = {}
+            updated_fields: list[str] = []
+            for field in request.fields:
+                if field == "knowledge_points":
+                    updated_fields = self._resolve_kp(
+                        question_id, metadata, is_empty, field, request, manual_values,
+                        ai_results, resolved, updated_fields,
+                    )
+                elif field == "tags":
+                    updated_fields = self._resolve_tags(
+                        question_id, metadata, is_empty, field, request, manual_values,
+                        ai_results, resolved, updated_fields,
+                    )
+                elif field == "source":
+                    updated_fields = self._resolve_source(
+                        question_id, metadata, is_empty, field, request, manual_values,
+                        ai_results, resolved, updated_fields,
+                    )
+            if resolved:
+                updates.append(
+                    BatchMetadataUpdate(
+                        question_id=question_id,
+                        knowledge_point=resolved.get("knowledge_point"),
+                        tags=self._parse_tags(resolved["tags_json"]) if "tags_json" in resolved else None,
+                        source=resolved.get("source_text"),
+                    )
+                )
+            else:
+                skipped_messages[question_id] = (
+                    "已有内容，已跳过" if not request.force_overwrite else "无需更新"
+                )
+
+        payload = BatchMetadataExecutionPayload(
+            question_ids=question_ids,
+            updates=updates,
+            skips=[
+                BatchMetadataSkip(question_id=question_id, message=skipped_messages[question_id])
+                for question_id in question_ids
+                if question_id in skipped_messages
+            ],
+        )
+        return payload, question_versions, self.preview_response(payload)
+
+    def current_operation_version(self, plan: OperationPlan) -> str:
+        """Return the current aggregate token for every persisted target."""
+        if plan.action != "questions.batch_metadata" or plan.execution_payload is None:
+            raise MetadataBatchOperationError("unsupported metadata operation plan")
+        payload = plan.execution_payload
+        current = self._repo.get_question_metadata(payload.question_ids)
+        return snapshot_version(
+            {
+                "question_versions": self._metadata_versions(payload.question_ids, current),
+                "execution_payload": payload.model_dump(mode="json"),
+            }
+        )
+
+    def execute_operation_payload(
+        self,
+        payload: BatchMetadataExecutionPayload,
+    ) -> BatchMetadataResponse:
+        """Execute only the pre-resolved payload; no client request is consulted."""
+        updates = {item.question_id: item for item in payload.updates}
+        skips = {item.question_id: item.message for item in payload.skips}
+        results: list[BatchMetadataItemResult] = []
+        updated = skipped = failed = 0
+
+        for question_id in payload.question_ids:
+            update = updates.get(question_id)
+            if update is None:
+                results.append(
+                    BatchMetadataItemResult(
+                        question_id=question_id,
+                        status="skipped",
+                        message=skips[question_id],
+                    )
+                )
+                skipped += 1
+                continue
+            repo_updates: dict[str, str | None] = {}
+            updated_fields: list[str] = []
+            if update.knowledge_point is not None:
+                repo_updates["knowledge_point"] = update.knowledge_point
+                updated_fields.append("knowledge_points")
+            if update.tags is not None:
+                repo_updates["tags_json"] = json.dumps(update.tags, ensure_ascii=False)
+                updated_fields.append("tags")
+            if update.source is not None:
+                repo_updates["source_text"] = update.source
+                updated_fields.append("source")
+            try:
+                self._repo.update_question_metadata(question_id, repo_updates)
+                results.append(BatchMetadataItemResult(
+                    question_id=question_id,
+                    status="updated",
+                    updated_fields=updated_fields,
+                ))
+                updated += 1
+            except Exception as exc:
+                logger.exception("Failed to apply planned metadata for %s", question_id)
+                results.append(BatchMetadataItemResult(question_id=question_id, status="failed", message=str(exc)))
+                failed += 1
+
+        response = BatchMetadataResponse(
+            total=len(payload.question_ids),
+            updated=updated,
+            skipped=skipped,
+            failed=failed,
+            results=results,
+        )
+        if failed:
+            raise MetadataBatchOperationExecutionError(
+                f"{failed} planned metadata updates failed; operation requires investigation"
+            )
+        return response
+
+    @staticmethod
+    def preview_response(payload: BatchMetadataExecutionPayload) -> BatchMetadataResponse:
+        updates = {item.question_id: item for item in payload.updates}
+        skips = {item.question_id: item.message for item in payload.skips}
+        results: list[BatchMetadataItemResult] = []
+        for question_id in payload.question_ids:
+            update = updates.get(question_id)
+            if update is None:
+                results.append(BatchMetadataItemResult(question_id=question_id, status="skipped", message=skips[question_id]))
+                continue
+            fields = []
+            if update.knowledge_point is not None:
+                fields.append("knowledge_points")
+            if update.tags is not None:
+                fields.append("tags")
+            if update.source is not None:
+                fields.append("source")
+            results.append(BatchMetadataItemResult(question_id=question_id, status="updated", updated_fields=fields))
+        return BatchMetadataResponse(
+            total=len(payload.question_ids),
+            updated=len(payload.updates),
+            skipped=len(payload.skips),
+            failed=0,
+            results=results,
+        )
+
+    @staticmethod
+    def _metadata_versions(
+        question_ids: list[str],
+        current: dict[str, dict[str, str | None]],
+    ) -> dict[str, str]:
+        return {
+            question_id: snapshot_version(
+                {"question_id": question_id, "metadata": current.get(question_id)}
+            )
+            for question_id in question_ids
+        }
 
     # ------------------------------------------------------------------
     # Field resolution helpers

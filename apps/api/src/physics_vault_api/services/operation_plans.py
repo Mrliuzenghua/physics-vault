@@ -11,7 +11,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from mcp_contracts.src.operation_plan import OperationPlan, build_operation_plan
+from mcp_contracts.src.operation_plan import (
+    BatchMetadataExecutionPayload,
+    OperationPlan,
+    build_operation_plan,
+    snapshot_version,
+)
 
 from ..repositories.operation_plans import OperationPlanRepository, StoredOperationPlan
 
@@ -181,4 +186,27 @@ def build_review_draft_plan(
             "action": action,
         },
         reversible=reversible,
+    )
+
+
+def build_batch_metadata_plan(
+    payload: BatchMetadataExecutionPayload,
+    question_versions: dict[str, str],
+) -> OperationPlan:
+    """Persist the resolved metadata writes and every target's version token."""
+    if set(question_versions) != set(payload.question_ids):
+        raise ValueError("question version snapshot must cover every metadata target")
+    version_snapshot = {
+        "question_versions": question_versions,
+        "execution_payload": payload.model_dump(mode="json"),
+    }
+    return build_operation_plan(
+        action="questions.batch_metadata",
+        targets=[{"type": "question", "id": question_id, "label": question_id} for question_id in payload.question_ids],
+        summary=f"Apply resolved metadata updates to {len(payload.question_ids)} questions.",
+        warnings=["The operation will be rejected if any target question metadata changes before confirmation."],
+        expected_version=snapshot_version(version_snapshot),
+        version_snapshot=version_snapshot,
+        execution_payload=payload,
+        reversible=True,
     )

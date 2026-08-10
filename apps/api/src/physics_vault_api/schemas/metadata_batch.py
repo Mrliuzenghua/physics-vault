@@ -6,6 +6,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ..bootstrap import configure_workspace_imports
+
+configure_workspace_imports()
+
+from mcp_contracts.src.operation_plan import OperationPlan
+
 MetadataField = Literal["knowledge_points", "tags", "source"]
 MetadataMode = Literal["ai", "manual", "mixed"]
 
@@ -41,3 +47,24 @@ class BatchMetadataResponse(BaseModel):
     skipped: int = 0
     failed: int = 0
     results: list[BatchMetadataItemResult] = Field(default_factory=list)
+
+
+class ConfirmBatchMetadataOperationRequest(BaseModel):
+    """Confirmation deliberately carries no question IDs or update values."""
+
+    model_config = {"extra": "forbid"}
+
+    operation_id: str = Field(..., min_length=1)
+
+
+class BatchMetadataPreviewResponse(BaseModel):
+    preview: BatchMetadataResponse
+    operation_plan: OperationPlan
+
+
+class BatchMetadataOperationExecutionResponse(BaseModel):
+    operation_id: str
+    status: str
+    result: BatchMetadataResponse | None = None
+    error: str | None = None
+    idempotent: bool = False

@@ -16,7 +16,7 @@ import QuestionLiveEditor from '../components/editor/QuestionLiveEditor';
 import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { useBasket } from '../hooks/useBasket';
-import { deleteQuestions, returnQuestionToReview, searchQuestions, updateQuestion } from '../services/api';
+import { deleteQuestions, returnQuestionToReview, searchQuestions, updateQuestion } from '../services/questionApi';
 import { batchMarkMistake, batchStarFavorites, batchUnmarkMistake } from '../services/favoritesApi';
 import { batchUpdateMetadata, fetchKnowledgePoints } from '../services/metadataApi';
 import type { KnowledgePointFlatItem, MetadataField, Question, SearchFilters } from '../types';

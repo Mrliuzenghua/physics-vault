@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import ast
+import argparse
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import get_args, get_origin
+from typing import Sequence, get_args, get_origin
 
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.responses import JSONResponse
@@ -22,9 +23,14 @@ class ContractViolation:
     code: str
     location: str
     message: str
+    suggestion: str
 
     def __str__(self) -> str:
-        return f"[{self.code}] {self.location}: {self.message}"
+        return (
+            f"[{self.code}] {self.location}\n"
+            f"  problem: {self.message}\n"
+            f"  fix: {self.suggestion}"
+        )
 
 
 # API-301 migrated every public map response to a named RootModel. Keep this
@@ -71,6 +77,7 @@ def check_router_contracts(
                     "duplicate-route",
                     location,
                     f"duplicates {previous}",
+                    "use a unique HTTP method and path, or remove the compatibility duplicate",
                 ))
             else:
                 seen_paths[key] = location
@@ -83,6 +90,7 @@ def check_router_contracts(
                     "duplicate-operation-id",
                     operation_location,
                     f"operation ID {operation_id!r} duplicates {previous}",
+                    "set a unique operation_id for this public endpoint",
                 ))
             else:
                 seen_operation_ids[operation_id] = operation_location
@@ -94,6 +102,7 @@ def check_router_contracts(
                 "missing-response-model",
                 location,
                 "JSON endpoint must declare a response_model",
+                "declare a named response schema in the router decorator",
             ))
             continue
         if _is_bare_dictionary_response(route.response_model):
@@ -103,6 +112,7 @@ def check_router_contracts(
                         "bare-dict-response",
                         location,
                         "public JSON responses must use a named schema instead of dict",
+                        "replace dict or list[dict] with a named response schema",
                     ))
     return violations
 
@@ -118,8 +128,9 @@ def _check_direct_fetches(root: Path) -> list[ContractViolation]:
             if _FETCH_CALL.search(line):
                 violations.append(ContractViolation(
                     "direct-fetch",
-                    f"{path.relative_to(root)}:{line_number}",
+                    f"{path.relative_to(root).as_posix()}:{line_number}",
                     "use services/apiClient.ts transport instead of fetch directly",
+                    "move the request behind services/apiClient.ts and a typed domain client",
                 ))
     return violations
 
@@ -154,8 +165,9 @@ def _check_mcp_tool_names(root: Path) -> list[ContractViolation]:
             if previous_line := names.get(name):
                 violations.append(ContractViolation(
                     "duplicate-mcp-tool",
-                    f"{source_path.relative_to(root)}:{node.lineno}",
+                    f"{source_path.relative_to(root).as_posix()}:{node.lineno}",
                     f"tool {name!r} already declared at line {previous_line}",
+                    "rename the tool or remove the duplicate MCP registration",
                 ))
             else:
                 names[name] = node.lineno
@@ -173,15 +185,34 @@ def check_project_contracts(root: Path | None = None) -> list[ContractViolation]
         for route in router.routes
         if isinstance(route, APIRoute)
     )
-    return [
+    violations = [
         *check_router_contracts(router_routes),
         *_check_direct_fetches(root),
         *_check_mcp_tool_names(root),
     ]
+    return sorted(
+        violations,
+        key=lambda violation: (
+            violation.code,
+            violation.location,
+            violation.message,
+            violation.suggestion,
+        ),
+    )
 
 
-def main() -> int:
-    violations = check_project_contracts()
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the reusable API-303 gate and return a CI-friendly process status."""
+
+    parser = argparse.ArgumentParser(description="Check Physics Vault public API contracts.")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="repository root to inspect (defaults to the current Physics Vault project)",
+    )
+    args = parser.parse_args(argv)
+    violations = check_project_contracts(args.root.resolve() if args.root else None)
     if not violations:
         print("API contract gate passed.")
         return 0
