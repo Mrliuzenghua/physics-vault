@@ -40,6 +40,9 @@ npm.cmd run lint
 npm.cmd run build
 ```
 
+The backend test suite includes the API-303 contract gate for route contracts,
+frontend API transport, and MCP tool names.
+
 ## 元数据目录
 
 MCP 允许智能体直接维护标签、知识点、难度、题型和规范化来源，但不能修改正式题目的题干、答案、解析、图片或发布状态。

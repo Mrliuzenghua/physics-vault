@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ..schemas.contracts import ObjectListResponse, ObjectMapResponse, StringMapResponse
 from ..services.annotation_service import AnnotationService
 
 
@@ -41,17 +42,17 @@ def build_annotation_router(service: AnnotationService | None = None) -> APIRout
 
     router = APIRouter(prefix="/api/questions", tags=["annotations"])
 
-    @router.get("/{question_id}/annotations")
+    @router.get("/{question_id}/annotations", response_model=ObjectListResponse)
     async def list_annotations(question_id: str) -> list[dict[str, Any]]:
         return service.list(question_id)
 
-    @router.post("/{question_id}/annotations")
+    @router.post("/{question_id}/annotations", response_model=ObjectMapResponse)
     async def create_annotation(question_id: str, body: AnnotationCreate) -> dict[str, Any]:
         entry = body.model_dump()
         entry["question_id"] = question_id
         return service.create(entry)
 
-    @router.put("/annotations/{annotation_id}")
+    @router.put("/annotations/{annotation_id}", response_model=ObjectMapResponse)
     async def update_annotation(annotation_id: str, body: AnnotationUpdate) -> dict[str, Any]:
         patch = {k: v for k, v in body.model_dump().items() if v is not None}
         try:
@@ -59,7 +60,7 @@ def build_annotation_router(service: AnnotationService | None = None) -> APIRout
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @router.delete("/annotations/{annotation_id}")
+    @router.delete("/annotations/{annotation_id}", response_model=StringMapResponse)
     async def delete_annotation(annotation_id: str) -> dict[str, str]:
         try:
             return service.delete(annotation_id)

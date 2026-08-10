@@ -2,6 +2,19 @@ import { extractErrorMessage } from '../utils/error.ts';
 
 export const API_BASE = '';
 
+const browserTraceId = (() => {
+  const generated = globalThis.crypto?.randomUUID?.();
+  return generated || `web-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+})();
+
+export function correlationHeaders(headers?: HeadersInit): Headers {
+  const resolved = new Headers(headers);
+  if (!resolved.has('X-Trace-ID')) {
+    resolved.set('X-Trace-ID', browserTraceId);
+  }
+  return resolved;
+}
+
 export class ApiError extends Error {
   readonly status: number;
 
@@ -12,8 +25,12 @@ export class ApiError extends Error {
   }
 }
 
-export async function requestResponse(url: string, options?: RequestInit): Promise<Response> {
-  const headers = new Headers(options?.headers);
+export async function requestResponse(
+  url: string,
+  options?: RequestInit,
+  acceptedErrorStatuses: readonly number[] = [],
+): Promise<Response> {
+  const headers = correlationHeaders(options?.headers);
   if (typeof options?.body === 'string' && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
@@ -23,7 +40,7 @@ export async function requestResponse(url: string, options?: RequestInit): Promi
     headers,
   });
 
-  if (!res.ok) {
+  if (!res.ok && !acceptedErrorStatuses.includes(res.status)) {
     const payload = await res
       .json()
       .catch(() => ({ detail: res.statusText || `HTTP ${res.status}` }));

@@ -56,6 +56,23 @@ EXPECTED_APPLICATION_ROUTER_MANIFEST = (
     "change_audit",
 )
 
+EXPECTED_API_COMPATIBILITY_ROUTERS = (
+    "image_catalog_api_compat",
+    "embedding_status_api_compat",
+    "embedding_builds_api_compat",
+    "papers_api_compat",
+    "question_search_api_compat",
+    "question_reviews_api_compat",
+    "question_imports_api_compat",
+    "question_details_api_compat",
+    "question_stats_api_compat",
+    "question_versions_api_compat",
+    "question_updates_api_compat",
+    "processing_runs_api_compat",
+    "knowledge_points_api_compat",
+    "review_queue_api_compat",
+)
+
 
 def _route_method_keys(route: object) -> set[tuple[str, str]]:
     nested_router = getattr(route, "original_router", None)
@@ -104,11 +121,35 @@ def test_application_router_manifest_is_ordered_and_named() -> None:
     manifest = list(container.router_manifest())
     names = tuple(name for name, _router in manifest)
 
-    assert names == EXPECTED_APPLICATION_ROUTER_MANIFEST
+    base_names = tuple(name for name in names if not name.endswith("_api_compat"))
+    compatibility_names = tuple(name for name in names if name.endswith("_api_compat"))
+
+    assert base_names == EXPECTED_APPLICATION_ROUTER_MANIFEST
+    assert compatibility_names == EXPECTED_API_COMPATIBILITY_ROUTERS
     assert len(names) == len(set(names))
     assert all(router.routes for _name, router in manifest)
     assert container.task_center_service._import_service is container.import_pipeline_service
     assert container.task_center_service._lesson_export_service is container.lesson_export_service
+
+
+def test_api_compatibility_routes_reuse_each_root_route_handler() -> None:
+    container = ApplicationContainer.build(mcp_settings=McpSettings(enabled=False))
+    manifest = dict(container.router_manifest())
+
+    for compatibility_name in EXPECTED_API_COMPATIBILITY_ROUTERS:
+        legacy_name = compatibility_name.removesuffix("_api_compat")
+        legacy_routes = {
+            (route.path, tuple(sorted(route.methods or ()))): route.endpoint
+            for route in manifest[legacy_name].routes
+            if hasattr(route, "endpoint") and getattr(route, "path", "") != "/" and not route.path.startswith("/api/")
+        }
+        compatibility_routes = {
+            (route.path.removeprefix("/api"), tuple(sorted(route.methods or ()))): route.endpoint
+            for route in manifest[compatibility_name].routes
+            if hasattr(route, "endpoint")
+        }
+
+        assert compatibility_routes == legacy_routes
 
 
 def test_worker_containers_do_not_expose_web_router_assembly() -> None:

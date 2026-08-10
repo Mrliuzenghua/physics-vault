@@ -16,6 +16,8 @@ from typing import Any, Literal
 
 ROOT = Path(__file__).resolve().parents[1]
 API_SRC = ROOT / "apps" / "api" / "src"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 if str(API_SRC) not in sys.path:
     sys.path.insert(0, str(API_SRC))
 PYDEPS = ROOT / ".codex-run" / "pydeps"
@@ -31,17 +33,26 @@ if PYWIN32_SYSTEM32.exists() and hasattr(os, "add_dll_directory"):
 
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 
+from packages.mcp_contracts.src.runtime import (  # noqa: E402
+    DatabaseRuntime,
+    MCPServiceFactory,
+    build_task_action_context,
+    clean_args,
+    tool_error,
+)
+from packages.mcp_contracts.src.operation_plan import build_operation_plan  # noqa: E402
+from packages.mcp_contracts.src.domains import (  # noqa: E402
+    AuthoringDomain,
+    ImportReviewDomain,
+    SearchKnowledgeDomain,
+    register_authoring_tools,
+    register_import_review_tools,
+    register_search_knowledge_tools,
+)
+from packages.mcp_contracts.src.tool_registry import default_tool_registry, profile_tool_names  # noqa: E402
 from physics_vault_api.paths import default_db_path, default_review_db_path, project_root  # noqa: E402
-from physics_vault_api.repositories.import_tasks import SQLiteImportTaskRepository  # noqa: E402
 from physics_vault_api.schemas.paper_drafts import PaperDraftItem, PaperDraftUpsertRequest  # noqa: E402
 from physics_vault_api.schemas.question_search import BatchQuestionFetchRequest, QuestionSearchParams  # noqa: E402
-from physics_vault_api.services.document_pipeline import (  # noqa: E402
-    DocumentCleaningService,
-    ImportPipelineService,
-    PandocAdapter,
-    StructuredQuestionParsingService,
-)
-from physics_vault_api.services.lesson_exports import LessonExportService  # noqa: E402
 from physics_vault_api.services.lesson_documents import (  # noqa: E402
     get_saved_handout as _get_saved_handout_store,
     list_saved_handout_versions as _list_saved_handout_versions_store,
@@ -59,8 +70,6 @@ from physics_vault_api.services.word_export_formats import (  # noqa: E402
     validate_format_spec,
 )
 from physics_vault_api.services.ai_assistant import _candidate_query_tokens  # noqa: E402
-from physics_vault_api.services.change_audit import ChangeAuditService  # noqa: E402
-from physics_vault_api.services.metadata_management import MetadataManagementService  # noqa: E402
 from physics_vault_api.services.method_feature_index import (  # noqa: E402
     METHOD_INDEX_VERSION,
     ensure_method_feature_index_current,
@@ -82,17 +91,15 @@ from physics_vault_api.services.math_text import (  # noqa: E402
     normalize_standard_latex,
     repair_unbalanced_inline_math,
 )
-from physics_vault_api.services.question_search import QuestionSearchService  # noqa: E402
 from physics_vault_api.services.retrieval_method_intent import (  # noqa: E402
     detect_method_intent,
     method_query_terms,
     score_method_candidate,
 )
 from physics_vault_api.services.question_fingerprint import canonical_question_fingerprint  # noqa: E402
-from physics_vault_api.services.paper_drafts import PaperDraftConflictError, PaperDraftService  # noqa: E402
+from physics_vault_api.services.paper_drafts import PaperDraftConflictError  # noqa: E402
 from physics_vault_api.services.similar_questions import SimilarQuestionsService  # noqa: E402
-from physics_vault_api.services.task_center import TaskActionContext, TaskCenterService  # noqa: E402
-from physics_vault_api.services.typst_exports import TypstExportError, TypstQuestionExportService  # noqa: E402
+from physics_vault_api.services.typst_exports import TypstExportError  # noqa: E402
 from physics_vault_api.services.teaching_projects import (  # noqa: E402
     TeachingProjectConflictError,
     duplicate_teaching_project as _duplicate_teaching_project,
@@ -188,60 +195,17 @@ server = MCPServer(
 # that support separate MCP entries can expose a narrower tool profile by
 # setting PHYSICS_MCP_PROFILE.  "all" preserves today's complete surface.
 _MCP_PROFILE = os.getenv("PHYSICS_MCP_PROFILE", "all").strip().lower() or "all"
-_MCP_PROFILE_TOOLS: dict[str, set[str]] = {
-    "catalog": {
-        "list_filter_facets", "search_questions", "search_method_questions", "download_question_images", "search_topic_questions",
-        "get_questions_by_ids", "list_knowledge_tree", "search_knowledge_points",
-        "get_question_knowledge_points", "list_question_tags", "list_method_retrieval_feedback", "method_retrieval_learning_report", "database_boundary_report",
-        "database_health_report", "find_similar_questions", "scan_canonical_duplicate_questions",
-        "list_canonical_duplicate_merges",
-    },
-    "catalog_maintenance": {
-        "create_knowledge_points", "organize_knowledge_tree", "batch_update_question_metadata",
-        "diagnose_tag_maintenance", "suggest_question_tags", "maintain_question_tags",
-        "record_method_retrieval_feedback",
-        "maintain_question_knowledge_points",
-        "backfill_canonical_question_hashes", "merge_canonical_duplicate_questions",
-        "restore_canonical_duplicate_merge", "batch_replace_question_tags",
-        "batch_replace_question_knowledge_points", "return_question_to_review",
-        "reconcile_review_queue_outbox", "list_change_batches", "get_change_batch", "rollback_change_batch",
-    },
-    "review": {
-        "list_review_queue", "import_word_folder_to_review", "list_review_tasks", "get_review_task",
-        "get_review_task_full", "validate_review_task", "find_duplicate_review_tasks", "delete_review_tasks",
-        "suggest_knowledge_points_for_task", "clean_review_task_latex", "split_merged_options",
-        "deduplicate_review_task_questions", "update_review_task_draft", "submit_ai_generated_review",
-    },
-    "authoring": {
-        "list_teaching_projects", "get_teaching_project", "get_teaching_project_status",
-        "duplicate_teaching_project", "publish_teaching_artifact", "preflight_teaching_handout",
-        "sync_teaching_slides", "start_classroom_session", "get_classroom_session",
-        "update_classroom_session", "end_classroom_session", "list_composition_workbenches",
-        "get_composition_workbench", "create_composition_workbench", "add_questions_to_composition_workbench",
-        "add_knowledge_to_composition_workbench", "insert_teaching_block_to_composition_workbench",
-        "reorder_composition_workbench", "move_composition_item", "remove_items_from_composition_workbench",
-        "update_composition_item", "lock_composition_workbench", "apply_composition_workbench_plan",
-        "preview_composition_workbench", "export_composition_workbench", "list_word_export_templates",
-        "get_word_export_template", "propose_word_export_format", "validate_word_export_format",
-        "save_word_export_template", "rename_word_export_template", "list_saved_handouts", "get_saved_handout",
-        "list_saved_handout_versions", "restore_saved_handout_version", "rename_saved_handout",
-        "apply_word_format_to_saved_handout", "apply_word_format_to_workbench", "export_saved_handout",
-        "curate_questions_to_composition_workbench", "create_paper", "associate_questions_to_paper",
-        "export_questions_to_typst",
-    },
-    "operations": {
-        "submit_import_job", "submit_ai_clean_job", "submit_word_export_job", "submit_pptx_export_job",
-        "get_job_status", "list_jobs", "retry_job", "cancel_job",
-    },
-}
+_TOOL_REGISTRY = default_tool_registry()
 _mcp_server_tool = server.tool
 
 
-def _profiled_mcp_tool():
-    decorator = _mcp_server_tool()
+def _profiled_mcp_tool(*args: Any, **kwargs: Any):
+    decorator = _mcp_server_tool(*args, **kwargs)
 
     def register(func: Any) -> Any:
-        if _MCP_PROFILE == "all" or func.__name__ in _MCP_PROFILE_TOOLS.get(_MCP_PROFILE, set()):
+        tool_name = str(kwargs.get("name") or func.__name__)
+        _TOOL_REGISTRY.bind(tool_name, func)
+        if _MCP_PROFILE == "all" or tool_name in profile_tool_names(_MCP_PROFILE):
             return decorator(func)
         return func
 
@@ -251,44 +215,55 @@ def _profiled_mcp_tool():
 server.tool = _profiled_mcp_tool  # type: ignore[method-assign]
 
 
-def _search_service() -> QuestionSearchService:
-    return QuestionSearchService()
+def _validate_tool_registry() -> None:
+    """Fail startup if the declarative catalogue and MCP exposure diverge."""
+    _TOOL_REGISTRY.assert_all_bound()
+    expected = _TOOL_REGISTRY.names()
+    if _MCP_PROFILE != "all":
+        expected = profile_tool_names(_MCP_PROFILE)
+    exposed = {tool.name for tool in server._tool_manager.list_tools()}
+    if exposed != expected:
+        missing = sorted(expected - exposed)
+        unexpected = sorted(exposed - expected)
+        raise RuntimeError(
+            "MCP tool registry does not match exposed tools "
+            f"(missing={missing}, unexpected={unexpected})"
+        )
 
 
-def _import_service() -> ImportPipelineService:
-    return ImportPipelineService(
-        task_repo=SQLiteImportTaskRepository(str(_review_db_path())),
-        pandoc=PandocAdapter(),
-        cleaner=DocumentCleaningService(),
-        parser=StructuredQuestionParsingService(),
+def _service_factory() -> MCPServiceFactory:
+    return MCPServiceFactory(
+        formal_db_path=_formal_db_path,
+        review_db_path=_review_db_path,
     )
 
 
-def _task_center_service() -> TaskCenterService:
-    import_service = _import_service()
-    return TaskCenterService(
-        import_service,
-        lesson_export_service=LessonExportService(import_service._task_repo),
-    )
+def _search_service() -> Any:
+    return _service_factory().search()
 
 
-def _typst_export_service() -> TypstQuestionExportService:
-    return TypstQuestionExportService(db_path=_formal_db_path())
+def _import_service() -> Any:
+    return _service_factory().import_pipeline()
 
 
-def _paper_draft_service() -> PaperDraftService:
-    return PaperDraftService()
+def _task_center_service() -> Any:
+    return _service_factory().task_center()
 
 
-def _change_audit_service() -> ChangeAuditService:
-    return ChangeAuditService(
-        db_path=_formal_db_path(),
-        review_db_path=_review_db_path(),
-    )
+def _typst_export_service() -> Any:
+    return _service_factory().typst_export()
 
 
-def _metadata_management_service() -> MetadataManagementService:
-    return MetadataManagementService(_formal_db_path())
+def _paper_draft_service() -> Any:
+    return _service_factory().paper_draft()
+
+
+def _change_audit_service() -> Any:
+    return _service_factory().change_audit()
+
+
+def _metadata_management_service() -> Any:
+    return _service_factory().metadata_management()
 
 
 def _formal_db_path() -> Path:
@@ -301,32 +276,24 @@ def _review_db_path() -> Path:
     return review_path
 
 
+def _database_runtime() -> DatabaseRuntime:
+    return DatabaseRuntime(
+        formal_db_path=_formal_db_path,
+        review_db_path=_review_db_path,
+        ensure_review_schema=_ensure_review_db_schema,
+    )
+
+
 def _connect_formal_read_db() -> sqlite3.Connection:
-    db_path = _formal_db_path()
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA query_only = ON")
-    return conn
+    return _database_runtime().connect_formal_read()
 
 
 def _connect_formal_write_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(_formal_db_path(), timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    return _database_runtime().connect_formal_write()
 
 
 def _connect_review_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(_review_db_path(), timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    _ensure_review_db_schema(conn)
-    return conn
+    return _database_runtime().connect_review()
 
 
 _MCP_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".svg"}
@@ -767,7 +734,7 @@ def _dump_model(value: Any) -> Any:
 
 
 def _clean_args(args: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in args.items() if value not in (None, "")}
+    return clean_args(args)
 
 
 def _tool_error(
@@ -778,19 +745,40 @@ def _tool_error(
     retryable: bool = False,
     **extra: Any,
 ) -> dict[str, Any]:
-    """Return one stable MCP error shape while keeping the legacy text field."""
-    details = {"field": field} if field else {}
-    return {
-        "ok": False,
-        "error": message,
-        "error_info": {
-            "code": code,
-            "message": message,
-            "retryable": retryable,
-            "details": details,
-        },
-        **extra,
-    }
+    return tool_error(code, message, field=field, retryable=retryable, **extra)
+
+
+def _operation_plan_payload(
+    *,
+    action: str,
+    targets: list[dict[str, Any]],
+    summary: str,
+    warnings: list[str] | None = None,
+    version_snapshot: Any = None,
+    reversible: bool,
+) -> dict[str, Any]:
+    """Attach the SAFE-201 contract without changing a legacy tool response."""
+    return build_operation_plan(
+        action=action,
+        targets=targets,
+        summary=summary,
+        warnings=warnings,
+        version_snapshot=version_snapshot,
+        reversible=reversible,
+    ).model_dump(mode="json")
+
+
+def _question_operation_targets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert preview rows to stable operation-plan target descriptors."""
+    return [
+        {
+            "type": "question",
+            "id": str(item["question_id"]),
+            "label": str(item.get("title") or "").strip() or None,
+        }
+        for item in items
+        if item.get("status") == "changed" and str(item.get("question_id") or "").strip()
+    ]
 
 
 class ReviewTaskConflictError(RuntimeError):
@@ -844,14 +832,12 @@ def _looks_like_review_intent(text: str | None) -> bool:
     return bool(_REVIEW_INTENT_RE.search(value)) and not bool(_FORMAL_INTENT_RE.search(value))
 
 
-@server.tool()
-def list_teaching_projects(limit: int = 50) -> dict[str, Any]:
+def _legacy_list_teaching_projects(limit: int = 50) -> dict[str, Any]:
     """列出教学项目及讲义、课件、课堂产物状态。只读。"""
     return {"ok": True, "document_kind": "teaching_project", "items": _list_teaching_projects(limit)}
 
 
-@server.tool()
-def get_teaching_project(project_id: str) -> dict[str, Any]:
+def _legacy_get_teaching_project(project_id: str) -> dict[str, Any]:
     """读取一个教学项目的内容源、产物状态和发布快照。只读。"""
     project = _get_teaching_project(project_id)
     if not project:
@@ -859,8 +845,7 @@ def get_teaching_project(project_id: str) -> dict[str, Any]:
     return {"ok": True, **project, "document_kind": "teaching_project"}
 
 
-@server.tool()
-def get_teaching_project_status(project_id: str) -> dict[str, Any]:
+def _legacy_get_teaching_project_status(project_id: str) -> dict[str, Any]:
     """读取教学项目的内容版本、讲义/课件状态和发布版本号。"""
     project = _get_teaching_project(project_id)
     if not project:
@@ -884,8 +869,7 @@ def get_teaching_project_status(project_id: str) -> dict[str, Any]:
     return {"ok": True, "document_kind": "teaching_project_status", "status": result}
 
 
-@server.tool()
-def duplicate_teaching_project(project_id: str, title: str | None = None) -> dict[str, Any]:
+def _legacy_duplicate_teaching_project(project_id: str, title: str | None = None) -> dict[str, Any]:
     """复制教学项目；副本会重置为草稿并清除已发布产物快照。"""
     project = _duplicate_teaching_project(project_id, title=title)
     if not project:
@@ -893,8 +877,7 @@ def duplicate_teaching_project(project_id: str, title: str | None = None) -> dic
     return {"ok": True, **project, "document_kind": "teaching_project"}
 
 
-@server.tool()
-def publish_teaching_artifact(
+def _legacy_publish_teaching_artifact(
     project_id: str,
     artifact: Literal["handout", "slides"] = "slides",
     confirmed: bool = False,
@@ -936,8 +919,7 @@ def publish_teaching_artifact(
     return {"ok": True, "dry_run": False, "project": saved, "published_version": version}
 
 
-@server.tool()
-def preflight_teaching_handout(project_id: str, use_published: bool = False) -> dict[str, Any]:
+def _legacy_preflight_teaching_handout(project_id: str, use_published: bool = False) -> dict[str, Any]:
     """检查讲义是否具备可发布/可导出的基本条件，并返回结构化风险。"""
     project = _get_teaching_project(project_id)
     if not project:
@@ -968,8 +950,7 @@ def preflight_teaching_handout(project_id: str, use_published: bool = False) -> 
     }
 
 
-@server.tool()
-def sync_teaching_slides(
+def _legacy_sync_teaching_slides(
     project_id: str,
     strategy: Literal["preserve_manual", "replace"] = "preserve_manual",
     confirmed: bool = False,
@@ -1013,8 +994,7 @@ def sync_teaching_slides(
     return {"ok": True, "dry_run": False, "applied": True, "project": saved, "plan": plan}
 
 
-@server.tool()
-def start_classroom_session(project_id: str) -> dict[str, Any]:
+def _legacy_start_classroom_session(project_id: str) -> dict[str, Any]:
     """从已发布课件创建一个持久化课堂会话。"""
     project = _get_teaching_project(project_id)
     if not project:
@@ -1041,8 +1021,7 @@ def start_classroom_session(project_id: str) -> dict[str, Any]:
     return {"ok": True, "document_kind": "classroom_session", "session": session}
 
 
-@server.tool()
-def get_classroom_session(session_id: str) -> dict[str, Any]:
+def _legacy_get_classroom_session(session_id: str) -> dict[str, Any]:
     """读取课堂会话进度、教师备注和页面批注。"""
     session = next((item for item in _read_classroom_sessions() if str(item.get("id")) == str(session_id)), None)
     if not session:
@@ -1050,8 +1029,7 @@ def get_classroom_session(session_id: str) -> dict[str, Any]:
     return {"ok": True, "document_kind": "classroom_session", "session": session}
 
 
-@server.tool()
-def update_classroom_session(
+def _legacy_update_classroom_session(
     session_id: str,
     current_index: int | None = None,
     display_mode: Literal["stem_only", "stem_answer", "full"] | None = None,
@@ -1076,8 +1054,7 @@ def update_classroom_session(
     return {"ok": True, "document_kind": "classroom_session", "session": session}
 
 
-@server.tool()
-def end_classroom_session(session_id: str) -> dict[str, Any]:
+def _legacy_end_classroom_session(session_id: str) -> dict[str, Any]:
     """结束课堂会话并保留复盘所需的最终状态。"""
     sessions = _read_classroom_sessions()
     index = next((idx for idx, item in enumerate(sessions) if str(item.get("id")) == str(session_id)), None)
@@ -1092,14 +1069,12 @@ def end_classroom_session(session_id: str) -> dict[str, Any]:
     return {"ok": True, "document_kind": "classroom_session", "session": session}
 
 
-@server.tool()
-def list_filter_facets() -> dict[str, Any]:
+def _legacy_list_filter_facets() -> dict[str, Any]:
     """列出题库可用筛选项，包括年份、模块、题型、难度、状态和知识点层级取值。"""
     return _dump_model(_search_service().get_facets())
 
 
-@server.tool()
-def search_questions(
+def _legacy_search_questions(
     query: str | None = None,
     search_mode: Literal["browse", "strict", "hybrid", "similar", "comprehensive"] = "hybrid",
     question_type: str | None = None,
@@ -1208,8 +1183,7 @@ def search_questions(
     return result
 
 
-@server.tool()
-def download_question_images(
+def _legacy_download_question_images(
     question_id: str,
     destination_subdir: str | None = None,
     overwrite: bool = False,
@@ -1592,8 +1566,7 @@ def _search_questions_comprehensive(
     }
 
 
-@server.tool()
-def search_topic_questions(
+def _legacy_search_topic_questions(
     query: str,
     question_type: str | None = None,
     difficulty: str | None = None,
@@ -1831,8 +1804,7 @@ def _search_method_questions_indexed(
     }
 
 
-@server.tool()
-def search_method_questions(
+def _legacy_search_method_questions(
     query: str,
     year: int | None = None,
     region: str | None = None,
@@ -1921,8 +1893,7 @@ def record_method_retrieval_feedback(
         return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
 
 
-@server.tool()
-def list_method_retrieval_feedback(
+def _legacy_list_method_retrieval_feedback(
     question_id: str | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
@@ -1938,8 +1909,7 @@ def list_method_retrieval_feedback(
     return {"items": items, "total": len(items), "database_scope": "canonical_feedback_audit"}
 
 
-@server.tool()
-def method_retrieval_learning_report(limit: int = 50) -> dict[str, Any]:
+def _legacy_method_retrieval_learning_report(limit: int = 50) -> dict[str, Any]:
     """汇总方法检索的长期学习状态：教师反馈、回归约束和待维护元数据。只读。"""
     try:
         return _build_method_retrieval_learning_report(
@@ -1950,8 +1920,7 @@ def method_retrieval_learning_report(limit: int = 50) -> dict[str, Any]:
         return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
 
 
-@server.tool()
-def get_questions_by_ids(question_ids: list[str]) -> dict[str, Any]:
+def _legacy_get_questions_by_ids(question_ids: list[str]) -> dict[str, Any]:
     """按题号批量读取正式题库题目详情。只读。"""
     normalized_ids = list(dict.fromkeys(str(item).strip() for item in question_ids if str(item).strip()))
     if not normalized_ids:
@@ -1967,8 +1936,7 @@ def get_questions_by_ids(question_ids: list[str]) -> dict[str, Any]:
     return _dump_model(_search_service().get_by_ids(BatchQuestionFetchRequest(question_ids=normalized_ids)))
 
 
-@server.tool()
-def export_questions_to_typst(
+def _legacy_export_questions_to_typst(
     question_ids: list[str],
     title: str | None = None,
     include_answers: bool = False,
@@ -2092,15 +2060,13 @@ def _compose_insert_position(items: list[dict[str, Any]], insert_at: int | None)
     return min(max(int(insert_at), 0), len(items))
 
 
-@server.tool()
-def list_composition_workbenches(limit: int = 20) -> dict[str, Any]:
+def _legacy_list_composition_workbenches(limit: int = 20) -> dict[str, Any]:
     """列出已保存的组卷工作台草稿。只读；草稿不会修改正式题库。"""
     result = _paper_draft_service().list(limit=min(max(int(limit or 20), 1), 100))
     return {"ok": True, "items": _dump_model(result).get("items", []), "database_scope": "composition_workspace"}
 
 
-@server.tool()
-def get_composition_workbench(draft_id: str | None = None) -> dict[str, Any]:
+def _legacy_get_composition_workbench(draft_id: str | None = None) -> dict[str, Any]:
     """读取一份组卷工作台草稿；不传 draft_id 时读取最近编辑的一份。只读。"""
     draft, error = _get_compose_draft_or_error(draft_id)
     if error:
@@ -2108,8 +2074,7 @@ def get_composition_workbench(draft_id: str | None = None) -> dict[str, Any]:
     return {"ok": True, "database_scope": "composition_workspace", "draft": draft}
 
 
-@server.tool()
-def create_composition_workbench(
+def _legacy_create_composition_workbench(
     title: str,
     subtitle: str | None = None,
     dry_run: bool = False,
@@ -2147,8 +2112,7 @@ def create_composition_workbench(
     return {"ok": True, "dry_run": False, "action": "create_composition_workbench", "draft": saved}
 
 
-@server.tool()
-def add_questions_to_composition_workbench(
+def _legacy_add_questions_to_composition_workbench(
     question_ids: list[str],
     draft_id: str | None = None,
     insert_at: int | None = None,
@@ -2192,8 +2156,7 @@ def add_questions_to_composition_workbench(
     return {"ok": True, "dry_run": False, "action": "add_questions", "draft": saved, "added_question_ids": added, "missing_question_ids": missing, "already_present_question_ids": skipped}
 
 
-@server.tool()
-def add_knowledge_to_composition_workbench(
+def _legacy_add_knowledge_to_composition_workbench(
     topic3_ids: list[str],
     draft_id: str | None = None,
     insert_at: int | None = None,
@@ -2251,8 +2214,7 @@ def add_knowledge_to_composition_workbench(
     return {"ok": True, "dry_run": False, "action": "add_knowledge", "draft": saved, "added_topic3_ids": added, "missing_topic3_ids": missing, "already_present_topic3_ids": skipped}
 
 
-@server.tool()
-def insert_teaching_block_to_composition_workbench(
+def _legacy_insert_teaching_block_to_composition_workbench(
     title: str,
     content: str = "",
     block_kind: Literal["body", "exam_title", "name_line", "section_title", "text_box"] = "body",
@@ -2286,8 +2248,7 @@ def insert_teaching_block_to_composition_workbench(
     return {"ok": True, "dry_run": False, "action": "insert_teaching_block", "draft": saved, "inserted_item_id": item["id"]}
 
 
-@server.tool()
-def reorder_composition_workbench(
+def _legacy_reorder_composition_workbench(
     ordered_item_ids: list[str] | None = None,
     draft_id: str | None = None,
     dry_run: bool = False,
@@ -2338,8 +2299,7 @@ def _move_composition_ids(current_ids: list[str], item_id: str, after_item_id: s
     return result
 
 
-@server.tool()
-def move_composition_item(
+def _legacy_move_composition_item(
     item_id: str,
     after_item_id: str | None = None,
     draft_id: str | None = None,
@@ -2354,8 +2314,7 @@ def move_composition_item(
     )
 
 
-@server.tool()
-def remove_items_from_composition_workbench(
+def _legacy_remove_items_from_composition_workbench(
     item_ids: list[str],
     draft_id: str | None = None,
     dry_run: bool = False,
@@ -2381,8 +2340,7 @@ def remove_items_from_composition_workbench(
     return {"ok": True, "dry_run": False, "action": "remove_items", "draft": saved, "removed_item_ids": removed, "missing_item_ids": missing}
 
 
-@server.tool()
-def update_composition_item(
+def _legacy_update_composition_item(
     item_id: str,
     payload: dict[str, Any],
     draft_id: str | None = None,
@@ -2425,8 +2383,7 @@ def update_composition_item(
     return {"ok": True, "dry_run": False, "action": "update_item", "draft": saved, "updated_item_id": item_id}
 
 
-@server.tool()
-def lock_composition_workbench(
+def _legacy_lock_composition_workbench(
     locked: bool = True,
     draft_id: str | None = None,
     reason: str | None = None,
@@ -2456,8 +2413,7 @@ def lock_composition_workbench(
     return {"ok": True, "action": "lock_composition_workbench", "locked": bool(locked), "draft": saved}
 
 
-@server.tool()
-def apply_composition_workbench_plan(
+def _legacy_apply_composition_workbench_plan(
     operations: list[dict[str, Any]],
     draft_id: str | None = None,
     ordered_refs: list[str] | None = None,
@@ -2659,8 +2615,7 @@ def _composition_preview_markdown(draft: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-@server.tool()
-def preview_composition_workbench(
+def _legacy_preview_composition_workbench(
     draft_id: str | None = None,
     format: Literal["markdown", "html"] = "markdown",
 ) -> dict[str, Any]:
@@ -2720,8 +2675,7 @@ def _composition_draft_to_lesson_package(draft: dict[str, Any]) -> dict[str, Any
     }
 
 
-@server.tool()
-def export_composition_workbench(
+def _legacy_export_composition_workbench(
     draft_id: str | None = None,
     format: Literal["word", "pptx"] = "word",
     include_answers: bool | None = None,
@@ -2756,14 +2710,12 @@ def export_composition_workbench(
         return _tool_error("EXPORT_FAILED", str(exc), retryable=False, draft_id=draft["id"])
 
 
-@server.tool()
-def list_word_export_templates() -> dict[str, Any]:
+def _legacy_list_word_export_templates() -> dict[str, Any]:
     """列出可复用的 Word 排版模板；只读。"""
     return {"ok": True, "items": _list_word_export_templates_store(), "schema": "physics-vault/word-export-format/v1"}
 
 
-@server.tool()
-def get_word_export_template(template_id: str) -> dict[str, Any]:
+def _legacy_get_word_export_template(template_id: str) -> dict[str, Any]:
     """读取一个 Word 排版模板；只读。"""
     # The local tool name shadows the imported service function; resolve by id from the list instead.
     template = next((item for item in _list_word_export_templates_store() if item.get("id") == str(template_id or "").strip()), None)
@@ -2772,8 +2724,7 @@ def get_word_export_template(template_id: str) -> dict[str, Any]:
     return {"ok": True, "template": template}
 
 
-@server.tool()
-def propose_word_export_format(
+def _legacy_propose_word_export_format(
     purpose: Literal["formal_exam", "student_practice", "teacher_handout", "custom"] = "formal_exam",
     requirements: str | None = None,
 ) -> dict[str, Any]:
@@ -2799,14 +2750,12 @@ def propose_word_export_format(
     }
 
 
-@server.tool()
-def validate_word_export_format(format_spec: dict[str, Any]) -> dict[str, Any]:
+def _legacy_validate_word_export_format(format_spec: dict[str, Any]) -> dict[str, Any]:
     """校验 Word 排版规格并返回规范化结果；不修改模板或文档。"""
     return validate_format_spec(format_spec)
 
 
-@server.tool()
-def save_word_export_template(
+def _legacy_save_word_export_template(
     name: str,
     format_spec: dict[str, Any],
     template_id: str | None = None,
@@ -2817,20 +2766,17 @@ def save_word_export_template(
     return _save_word_export_template_store(name, format_spec, template_id=template_id, description=description, overwrite=overwrite)
 
 
-@server.tool()
-def rename_word_export_template(template_id: str, name: str) -> dict[str, Any]:
+def _legacy_rename_word_export_template(template_id: str, name: str) -> dict[str, Any]:
     """重命名用户自定义 Word 排版模板；内置模板不可改名。"""
     return _rename_word_export_template_store(template_id, name)
 
 
-@server.tool()
-def list_saved_handouts(limit: int = 100) -> dict[str, Any]:
+def _legacy_list_saved_handouts(limit: int = 100) -> dict[str, Any]:
     """列出已保存讲义；不会返回工作台草稿。"""
     return {"ok": True, "document_kind": "saved_handout", "items": _list_saved_handouts_store(limit)}
 
 
-@server.tool()
-def get_saved_handout(document_id: str) -> dict[str, Any]:
+def _legacy_get_saved_handout(document_id: str) -> dict[str, Any]:
     """读取一份已保存讲义的完整内容；不会读取工作台草稿。"""
     document = _get_saved_handout_store(document_id)
     if not document:
@@ -2838,8 +2784,7 @@ def get_saved_handout(document_id: str) -> dict[str, Any]:
     return {"ok": True, **document, "document_kind": "saved_handout"}
 
 
-@server.tool()
-def list_saved_handout_versions(document_id: str) -> dict[str, Any]:
+def _legacy_list_saved_handout_versions(document_id: str) -> dict[str, Any]:
     """列出已保存讲义的版本摘要；不会返回工作台草稿版本。"""
     versions = _list_saved_handout_versions_store(document_id)
     if versions is None:
@@ -2847,8 +2792,7 @@ def list_saved_handout_versions(document_id: str) -> dict[str, Any]:
     return {"ok": True, "document_kind": "saved_handout", "document_id": document_id, "items": versions}
 
 
-@server.tool()
-def restore_saved_handout_version(document_id: str, version: int, confirmed: bool = False) -> dict[str, Any]:
+def _legacy_restore_saved_handout_version(document_id: str, version: int, confirmed: bool = False) -> dict[str, Any]:
     """恢复已保存讲义的指定版本；必须 confirmed=true，恢复会生成新的当前版本。"""
     versions = _list_saved_handout_versions_store(document_id)
     if versions is None:
@@ -2872,8 +2816,7 @@ def restore_saved_handout_version(document_id: str, version: int, confirmed: boo
     return {"ok": True, "document_kind": "saved_handout", "restored_from_version": version, "document": document}
 
 
-@server.tool()
-def rename_saved_handout(document_id: str, title: str) -> dict[str, Any]:
+def _legacy_rename_saved_handout(document_id: str, title: str) -> dict[str, Any]:
     """重命名已保存讲义；不会修改工作台草稿。"""
     try:
         document = _rename_saved_handout_store(document_id, title)
@@ -2884,8 +2827,7 @@ def rename_saved_handout(document_id: str, title: str) -> dict[str, Any]:
     return {"ok": True, **document, "document_kind": "saved_handout"}
 
 
-@server.tool()
-def apply_word_format_to_saved_handout(
+def _legacy_apply_word_format_to_saved_handout(
     document_id: str,
     template_id: str | None = None,
     format_spec: dict[str, Any] | None = None,
@@ -2917,8 +2859,7 @@ def apply_word_format_to_saved_handout(
     }
 
 
-@server.tool()
-def apply_word_format_to_workbench(
+def _legacy_apply_word_format_to_workbench(
     draft_id: str | None = None,
     template_id: str | None = None,
     format_spec: dict[str, Any] | None = None,
@@ -2968,8 +2909,7 @@ def apply_word_format_to_workbench(
     }
 
 
-@server.tool()
-def export_saved_handout(
+def _legacy_export_saved_handout(
     document_id: str,
     format: Literal["word"] = "word",
     include_answers: bool | None = None,
@@ -3085,8 +3025,7 @@ def _select_balanced_composition_candidates(candidates: list[dict[str, Any]], ta
     return selected
 
 
-@server.tool()
-def curate_questions_to_composition_workbench(
+def _legacy_curate_questions_to_composition_workbench(
     query: str,
     target_count: int = 20,
     draft_id: str | None = None,
@@ -3136,8 +3075,7 @@ def curate_questions_to_composition_workbench(
     return {"ok": True, "dry_run": False, "action": "curate_questions_to_workbench", "draft": saved, "query": keyword, "candidate_count": len(candidates), "selected_question_ids": chosen_ids, "diversity": diversity}
 
 
-@server.tool()
-def list_knowledge_tree(keyword: str | None = None, limit: int = 200) -> dict[str, Any]:
+def _legacy_list_knowledge_tree(keyword: str | None = None, limit: int = 200) -> dict[str, Any]:
     """读取正式知识点树；关键词命中时返回命中节点所在的完整二级分支。只读。"""
     clean_keyword = str(keyword or "").strip()
     bounded_limit = min(max(int(limit or 200), 1), 500)
@@ -3167,8 +3105,7 @@ def list_knowledge_tree(keyword: str | None = None, limit: int = 200) -> dict[st
     }
 
 
-@server.tool()
-def search_knowledge_points(keyword: str, limit: int = 20) -> dict[str, Any]:
+def _legacy_search_knowledge_points(keyword: str, limit: int = 20) -> dict[str, Any]:
     """按中文关键词模糊搜索正式知识点，返回相关度与匹配说明。只读。"""
     clean_keyword = str(keyword or "").strip()
     if not clean_keyword:
@@ -3183,8 +3120,7 @@ def search_knowledge_points(keyword: str, limit: int = 20) -> dict[str, Any]:
     return {"items": items, "limit": bounded_limit, "total": len(items)}
 
 
-@server.tool()
-def get_question_knowledge_points(question_id: str) -> dict[str, Any]:
+def _legacy_get_question_knowledge_points(question_id: str) -> dict[str, Any]:
     """读取某道题绑定的知识点。只读。"""
     clean_question_id = str(question_id or "").strip()
     if not clean_question_id:
@@ -3285,8 +3221,7 @@ def batch_update_question_metadata(
         return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
 
 
-@server.tool()
-def create_paper(
+def _legacy_create_paper(
     paper_id: str,
     name: str,
     year: int,
@@ -3354,8 +3289,7 @@ def create_paper(
         return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
 
 
-@server.tool()
-def associate_questions_to_paper(
+def _legacy_associate_questions_to_paper(
     question_ids: list[str],
     paper_id: str,
     reason: str | None = None,
@@ -3378,8 +3312,7 @@ def associate_questions_to_paper(
         return _tool_error("DATABASE_ERROR", str(exc), retryable=True)
 
 
-@server.tool()
-def database_boundary_report() -> dict[str, Any]:
+def _legacy_database_boundary_report() -> dict[str, Any]:
     """说明 MCP 当前正式库/审核库边界、各库职责、遗留污染和推荐工具路由。只读。"""
     formal_path = _formal_db_path()
     review_path = _review_db_path()
@@ -3498,8 +3431,7 @@ def database_boundary_report() -> dict[str, Any]:
     }
 
 
-@server.tool()
-def database_health_report() -> dict[str, Any]:
+def _legacy_database_health_report() -> dict[str, Any]:
     """盘点正式数据库健康度，并附带审核库边界摘要。只读；不要用正式库 review_queue 判断校对中心。"""
     db_path = _formal_db_path()
     with _connect_formal_read_db() as conn:
@@ -3647,8 +3579,7 @@ def database_health_report() -> dict[str, Any]:
     }
 
 
-@server.tool()
-def list_review_queue(
+def _legacy_list_review_queue(
     status: str | None = "pending",
     queue_type: str | None = None,
     include_orphans: bool = False,
@@ -3739,8 +3670,7 @@ def list_review_queue(
     }
 
 
-@server.tool()
-def import_word_folder_to_review(
+def _legacy_import_word_folder_to_review(
     folder_path: str,
     recursive: bool = False,
     dry_run: bool = True,
@@ -3895,8 +3825,7 @@ def import_word_folder_to_review(
     }
 
 
-@server.tool()
-def list_review_tasks(
+def _legacy_list_review_tasks(
     status: str | None = None,
     task_type: str | None = None,
     question_count: int | None = None,
@@ -4002,8 +3931,7 @@ def list_review_tasks(
     return {"items": items, "total": len(items), "limit": limit, "review_database_path": str(_review_db_path())}
 
 
-@server.tool()
-def get_review_task(task_id: str, content_limit: int = 20) -> dict[str, Any]:
+def _legacy_get_review_task(task_id: str, content_limit: int = 20) -> dict[str, Any]:
     """读取审核库中一个校对任务的草稿内容摘要。只读。"""
     tid, row, error = _load_review_task(task_id)
     if error is not None:
@@ -4057,8 +3985,7 @@ def get_review_task(task_id: str, content_limit: int = 20) -> dict[str, Any]:
     }
 
 
-@server.tool()
-def get_review_task_full(
+def _legacy_get_review_task_full(
     task_id: str,
     question_ids: list[str] | None = None,
     include_knowledge: bool = True,
@@ -4326,8 +4253,7 @@ def _latex_delimiter_status(text: str) -> tuple[bool, bool]:
     return malformed, mode is not None
 
 
-@server.tool()
-def validate_review_task(
+def _legacy_validate_review_task(
     task_id: str,
     question_ids: list[str] | None = None,
     require_knowledge: bool = True,
@@ -4461,8 +4387,7 @@ def validate_review_task(
     }
 
 
-@server.tool()
-def find_duplicate_review_tasks(
+def _legacy_find_duplicate_review_tasks(
     task_type: str | None = None,
     source: str | None = None,
     limit: int = 200,
@@ -4478,8 +4403,7 @@ def find_duplicate_review_tasks(
         return _tool_error("REVIEW_TASK_QUERY_ERROR", str(exc), retryable=True)
 
 
-@server.tool()
-def delete_review_tasks(task_ids: list[str], confirmed: bool = False) -> dict[str, Any]:
+def _legacy_delete_review_tasks(task_ids: list[str], confirmed: bool = False) -> dict[str, Any]:
     """批量删除已结束的审核任务；confirmed=false 时只返回预览。"""
     normalized = list(dict.fromkeys(str(item).strip() for item in task_ids if str(item).strip()))
     if not normalized:
@@ -4506,8 +4430,7 @@ def delete_review_tasks(task_ids: list[str], confirmed: bool = False) -> dict[st
     return result
 
 
-@server.tool()
-def suggest_knowledge_points_for_task(
+def _legacy_suggest_knowledge_points_for_task(
     task_id: str,
     question_ids: list[str] | None = None,
     max_suggestions: int = 3,
@@ -4525,8 +4448,7 @@ def suggest_knowledge_points_for_task(
     return result
 
 
-@server.tool()
-def clean_review_task_latex(
+def _legacy_clean_review_task_latex(
     task_id: str,
     question_ids: list[str] | None = None,
     dry_run: bool = True,
@@ -4597,6 +4519,26 @@ def clean_review_task_latex(
         "changed_count": len(changed),
         "replacement_count": total_replacements,
         "items": changed,
+        "operation_plan": (
+            _operation_plan_payload(
+                action="review.latex_cleanup",
+                targets=[
+                    {"type": "review_question", "id": str(item["question_id"])}
+                    for item in changed
+                    if str(item.get("question_id") or "").strip()
+                ],
+                summary=f"清理审核任务 {resolved_task_id} 中 {len(changed)} 道题的 LaTeX 格式。",
+                warnings=["计划仅预览，不会写入审核库；确认机制将在 SAFE-202 接入。"],
+                version_snapshot={
+                    "task_id": resolved_task_id,
+                    "updated_at": full.get("task", {}).get("updated_at"),
+                    "items": changed,
+                },
+                reversible=False,
+            )
+            if dry_run and changed
+            else None
+        ),
         "remaining_risks": remaining_items,
         "manual_action_required": bool(remaining_items),
         "workflow": (remaining or {}).get("workflow") if isinstance(remaining, dict) else None,
@@ -4685,8 +4627,7 @@ def _build_split_options(raw_options: Any, split_options: list[tuple[str, str]])
     return [{"label": label, "text": text} for label, text in split_options]
 
 
-@server.tool()
-def split_merged_options(
+def _legacy_split_merged_options(
     task_id: str,
     question_ids: list[str] | None = None,
     dry_run: bool = True,
@@ -4757,6 +4698,18 @@ def split_merged_options(
         "dry_run": dry_run,
         "changed_count": len(changed),
         "items": changed,
+        "operation_plan": (
+            _operation_plan_payload(
+                action="review.split_merged_options",
+                targets=[{"type": "review_question", "id": str(item["question_id"])} for item in changed],
+                summary=f"拆分审核任务 {resolved_task_id} 中 {len(changed)} 道题的合并选项。",
+                warnings=["选项结构会被直接重写，请先核对原始识别文本。"],
+                version_snapshot={"task_id": resolved_task_id, "updated_at": full.get("task", {}).get("updated_at"), "items": changed},
+                reversible=False,
+            )
+            if dry_run and changed
+            else None
+        ),
         "validation": validation,
         "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
         "manual_action_required": bool((validation or {}).get("risk_count")) if isinstance(validation, dict) else False,
@@ -4769,8 +4722,7 @@ def split_merged_options(
     }
 
 
-@server.tool()
-def deduplicate_review_task_questions(
+def _legacy_deduplicate_review_task_questions(
     task_id: str,
     dry_run: bool = True,
     reason: str | None = None,
@@ -4841,6 +4793,22 @@ def deduplicate_review_task_questions(
         "kept_count": len(kept_ids),
         "remaining_question_count": len(updated_questions),
         "items": items,
+        "operation_plan": (
+            _operation_plan_payload(
+                action="review.deduplicate_questions",
+                targets=[
+                    {"type": "review_question", "id": str(question_id), "label": "待删除重复题"}
+                    for item in items
+                    for question_id in item["removed_question_ids"]
+                ],
+                summary=f"从审核任务 {resolved_task_id} 删除 {len(removed_ids)} 道完全重复的草稿题。",
+                warnings=["每个重复组仅保留导入顺序最靠前的题目。"],
+                version_snapshot={"task_id": resolved_task_id, "updated_at": full.get("task", {}).get("updated_at"), "items": items},
+                reversible=False,
+            )
+            if dry_run and removed_ids
+            else None
+        ),
         "validation": validation,
         "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
         "message": (
@@ -4851,8 +4819,7 @@ def deduplicate_review_task_questions(
     }
 
 
-@server.tool()
-def update_review_task_draft(
+def _legacy_update_review_task_draft(
     task_id: str,
     updates: list[dict[str, Any]],
     dry_run: bool = True,
@@ -4980,6 +4947,18 @@ def update_review_task_draft(
         "dry_run": dry_run,
         "changed_count": changed_count,
         "items": preview_items,
+        "operation_plan": (
+            _operation_plan_payload(
+                action="review.update_draft",
+                targets=_question_operation_targets(preview_items),
+                summary=f"更新审核任务 {resolved_task_id} 中 {changed_count} 道草稿题。",
+                warnings=["计划仅描述字段补丁；执行前应核对题干、选项、答案与解析。"],
+                version_snapshot={"task_id": resolved_task_id, "updated_at": full.get("task", {}).get("updated_at"), "items": preview_items},
+                reversible=False,
+            )
+            if dry_run and changed_count > 0
+            else None
+        ),
         "validation": validation,
         "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
         "manual_action_required": bool((validation or {}).get("risk_count")) if isinstance(validation, dict) else False,
@@ -4992,8 +4971,7 @@ def update_review_task_draft(
     }
 
 
-@server.tool()
-def list_question_tags(
+def _legacy_list_question_tags(
     query: str | None = None,
     question_ids: list[str] | None = None,
     limit: int = 200,
@@ -5097,7 +5075,7 @@ def maintain_question_tags(
 ) -> dict[str, Any]:
     """新增、删除或合并正式题库标签。默认只预览；dry_run=false 必须填写 reason。"""
     try:
-        return _maintain_question_tags(
+        result = _maintain_question_tags(
             question_ids=question_ids or [],
             add_tags=add_tags or [],
             remove_tags=remove_tags or [],
@@ -5107,6 +5085,17 @@ def maintain_question_tags(
             create_catalog_tags=bool(create_catalog_tags),
             db_path=_formal_db_path(),
         )
+        items = result.get("items") if isinstance(result.get("items"), list) else []
+        if result.get("ok") and dry_run and result.get("changed_count"):
+            result["operation_plan"] = _operation_plan_payload(
+                action="canonical.tag_maintenance",
+                targets=_question_operation_targets(items),
+                summary=f"维护 {result['changed_count']} 道正式题的检索标签。",
+                warnings=["执行后会刷新相关检索索引。"],
+                version_snapshot={"items": items, "merge_map": merge_map or {}},
+                reversible=True,
+            )
+        return result
     except (FileNotFoundError, sqlite3.Error, ValueError) as exc:
         return _tool_error("DATABASE_ERROR", str(exc), retryable=isinstance(exc, sqlite3.OperationalError))
 
@@ -5268,6 +5257,18 @@ def batch_replace_question_tags(
         "items": items,
         "canonical_database_path": str(_formal_db_path()),
         "audit_batch_id": batch_id,
+        "operation_plan": (
+            _operation_plan_payload(
+                action="canonical.batch_replace_tags",
+                targets=_question_operation_targets(items),
+                summary=f"批量替换 {changed} 道正式题的标签。",
+                warnings=[f"{len(missing)} 道题不存在，不会被写入。"] if missing else [],
+                version_snapshot=items,
+                reversible=True,
+            )
+            if dry_run and changed > 0
+            else None
+        ),
         "requires_confirmation": dry_run and changed > 0,
         "message": "预览完成，未写入数据库；确认后才可 dry_run=false。" if dry_run else "已批量替换正式题库标签，并记录审计批次。",
     }
@@ -5555,14 +5556,25 @@ def batch_replace_question_knowledge_points(
         "canonical_database_path": str(_formal_db_path()),
         "audit_batch_id": batch_id,
         "requires_confirmation": dry_run and changed_count > 0,
+        "operation_plan": (
+            _operation_plan_payload(
+                action="canonical.batch_replace_knowledge_points",
+                targets=_question_operation_targets(items),
+                summary=f"替换 {changed_count} 道正式题的知识目录绑定。",
+                warnings=[f"{len(missing_questions)} 道题不存在，不会被写入。"] if missing_questions else [],
+                version_snapshot=items,
+                reversible=True,
+            )
+            if dry_run and changed_count > 0
+            else None
+        ),
         "items": items,
         "reason": reason,
         "message": "预览完成，未写入数据库；确认后才可 dry_run=false。" if dry_run else "已批量更新正式题库知识目录绑定，并记录审计批次。",
     }
 
 
-@server.tool()
-def find_similar_questions(
+def _legacy_find_similar_questions(
     question_id: str,
     limit: int = 10,
     same_question_type: bool = False,
@@ -5858,8 +5870,7 @@ def _canonical_duplicate_merge_plan(
     }, None
 
 
-@server.tool()
-def scan_canonical_duplicate_questions(limit: int = 100) -> dict[str, Any]:
+def _legacy_scan_canonical_duplicate_questions(limit: int = 100) -> dict[str, Any]:
     """扫描正式题库的完全重复候选；只读，不删除、不归档、不修改题目。"""
     safe_limit = min(max(int(limit or 100), 1), 500)
     groups, hash_updates = _canonical_duplicate_candidates(prefer_persisted_hashes=True)
@@ -5945,6 +5956,27 @@ def merge_canonical_duplicate_questions(
         "dry_run": dry_run,
         "requires_confirmation": dry_run,
         "merge_plan": plan,
+        "operation_plan": (
+            _operation_plan_payload(
+                action="canonical.merge_duplicate_questions",
+                targets=[
+                    {"type": "canonical_question", "id": str(plan["primary_question_id"]), "label": "保留题"},
+                    *[
+                        {"type": "canonical_question", "id": str(question_id), "label": "待归档重复题"}
+                        for question_id in plan["duplicate_question_ids"]
+                    ],
+                ],
+                summary=(
+                    f"保留题 {plan['primary_question_id']}，合并并软归档 "
+                    f"{len(plan['duplicate_question_ids'])} 道重复题。"
+                ),
+                warnings=[str(item) for item in plan.get("warnings", [])],
+                version_snapshot=plan,
+                reversible=True,
+            )
+            if dry_run
+            else None
+        ),
         "message": "预览完成，尚未修改正式题库。" if dry_run else "已合并关联信息并软归档重复题；可用 restore_canonical_duplicate_merge 恢复。",
     }
     if dry_run:
@@ -6177,8 +6209,7 @@ def restore_canonical_duplicate_merge(
     return result
 
 
-@server.tool()
-def list_canonical_duplicate_merges(
+def _legacy_list_canonical_duplicate_merges(
     state: Literal["archived", "restored", "all"] = "archived",
     limit: int = 50,
 ) -> dict[str, Any]:
@@ -6220,8 +6251,7 @@ def list_canonical_duplicate_merges(
     return {"ok": True, "database_scope": "canonical_read_only", "items": items, "total": len(items), "limit": safe_limit}
 
 
-@server.tool()
-def submit_ai_generated_review(
+def _legacy_submit_ai_generated_review(
     source_text: str,
     source: str = "Claude Code MCP",
     chat_context: str | None = None,
@@ -6265,6 +6295,7 @@ def submit_import_job(
     source: str = "physics_vault_mcp",
     session_id: str | None = None,
     operator: str = "MCP user",
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     """为已有导入批次提交识别任务。返回简短任务摘要；重复请求由正式任务 service 幂等处理。"""
     bid = str(batch_id or "").strip()
@@ -6274,7 +6305,7 @@ def submit_import_job(
         task, audit_id = _task_center_service().submit_batch_job(
             "recognize",
             bid,
-            context=_task_action_context(source, session_id, operator),
+            context=_task_action_context(source, session_id, operator, trace_id=trace_id),
         )
     except Exception as exc:  # noqa: BLE001
         return _job_tool_error(exc)
@@ -6293,6 +6324,7 @@ def submit_ai_clean_job(
     source: str = "physics_vault_mcp",
     session_id: str | None = None,
     operator: str = "MCP user",
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     """为已有导入批次提交 AI 清洗任务。返回简短任务摘要。"""
     bid = str(batch_id or "").strip()
@@ -6302,7 +6334,7 @@ def submit_ai_clean_job(
         task, audit_id = _task_center_service().submit_batch_job(
             "ai_clean",
             bid,
-            context=_task_action_context(source, session_id, operator),
+            context=_task_action_context(source, session_id, operator, trace_id=trace_id),
         )
     except Exception as exc:  # noqa: BLE001
         return _job_tool_error(exc)
@@ -6327,6 +6359,7 @@ def submit_word_export_job(
     source: str = "physics_vault_mcp",
     session_id: str | None = None,
     operator: str = "MCP user",
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     """提交服务端 Word 导出任务；仅返回任务 ID、摘要和下载地址。"""
     return _submit_export_job(
@@ -6338,7 +6371,7 @@ def submit_word_export_job(
         template_id=template_id,
         format_spec=format_spec,
         answer_position=answer_position,
-        context=_task_action_context(source, session_id, operator),
+        context=_task_action_context(source, session_id, operator, trace_id=trace_id),
     )
 
 
@@ -6351,6 +6384,7 @@ def submit_pptx_export_job(
     source: str = "physics_vault_mcp",
     session_id: str | None = None,
     operator: str = "MCP user",
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     """提交服务端 PPTX 导出任务；仅返回任务 ID、摘要和下载地址。"""
     return _submit_export_job(
@@ -6359,7 +6393,7 @@ def submit_pptx_export_job(
         include_answers=include_answers,
         include_analysis=include_analysis,
         file_name=file_name,
-        context=_task_action_context(source, session_id, operator),
+        context=_task_action_context(source, session_id, operator, trace_id=trace_id),
     )
 
 
@@ -6415,6 +6449,7 @@ def retry_job(
     source: str = "physics_vault_mcp",
     session_id: str | None = None,
     operator: str = "MCP user",
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     """重试失败或已取消任务。必须先向用户说明目标任务，再以 confirmed=true 明确确认。"""
     tid = str(task_id or "").strip()
@@ -6436,7 +6471,7 @@ def retry_job(
     try:
         task, original_task_id, audit_id = service.retry_job(
             tid,
-            context=_task_action_context(source, session_id, operator, confirmed=True),
+            context=_task_action_context(source, session_id, operator, confirmed=True, trace_id=trace_id),
         )
     except Exception as exc:  # noqa: BLE001
         return _job_tool_error(exc)
@@ -6457,6 +6492,7 @@ def cancel_job(
     source: str = "physics_vault_mcp",
     session_id: str | None = None,
     operator: str = "MCP user",
+    trace_id: str | None = None,
 ) -> dict[str, Any]:
     """请求取消尚未结束的任务。必须先向用户说明目标任务，再以 confirmed=true 明确确认。"""
     tid = str(task_id or "").strip()
@@ -6478,7 +6514,7 @@ def cancel_job(
     try:
         task, audit_id = service.cancel_job(
             tid,
-            context=_task_action_context(source, session_id, operator, confirmed=True),
+            context=_task_action_context(source, session_id, operator, confirmed=True, trace_id=trace_id),
         )
     except Exception as exc:  # noqa: BLE001
         return _job_tool_error(exc)
@@ -6497,13 +6533,9 @@ def _task_action_context(
     operator: str,
     *,
     confirmed: bool = False,
+    trace_id: str | None = None,
 ) -> TaskActionContext:
-    return TaskActionContext(
-        source=(str(source or "physics_vault_mcp").strip() or "physics_vault_mcp")[:120],
-        session_id=(str(session_id).strip()[:160] if session_id else None),
-        operator=(str(operator or "MCP user").strip() or "MCP user")[:120],
-        confirmed=confirmed,
-    )
+    return build_task_action_context(source, session_id, operator, confirmed=confirmed, trace_id=trace_id)
 
 
 def _compact_job(task: dict[str, Any]) -> dict[str, Any]:
@@ -6511,6 +6543,7 @@ def _compact_job(task: dict[str, Any]) -> dict[str, Any]:
         key: _mcp_scalar(task.get(key))
         for key in (
             "task_id",
+            "trace_id",
             "task_type",
             "task_name",
             "status",
@@ -7089,5 +7122,50 @@ def _normalize_tags(value: Any) -> list[str]:
     return tags
 
 
+_MCP101_LEGACY_HANDLERS = {
+    spec.name: globals()[f"_legacy_{spec.name}"]
+    for spec in _TOOL_REGISTRY.discover(domain="search")
+}
+_SEARCH_KNOWLEDGE_DOMAIN = SearchKnowledgeDomain(_MCP101_LEGACY_HANDLERS)
+for _mcp101_tool_name in _MCP101_LEGACY_HANDLERS:
+    globals()[_mcp101_tool_name] = getattr(_SEARCH_KNOWLEDGE_DOMAIN, _mcp101_tool_name)
+
+_MCP101_TOOL_NAMES = register_search_knowledge_tools(
+    server.tool,
+    _TOOL_REGISTRY,
+    {name: getattr(_SEARCH_KNOWLEDGE_DOMAIN, name) for name in _MCP101_LEGACY_HANDLERS},
+)
+
+_MCP102_LEGACY_HANDLERS = {
+    spec.name: globals()[f"_legacy_{spec.name}"]
+    for spec in _TOOL_REGISTRY.discover(domain="import_review")
+}
+_IMPORT_REVIEW_DOMAIN = ImportReviewDomain(_MCP102_LEGACY_HANDLERS)
+for _mcp102_tool_name in _MCP102_LEGACY_HANDLERS:
+    globals()[_mcp102_tool_name] = getattr(_IMPORT_REVIEW_DOMAIN, _mcp102_tool_name)
+
+_MCP102_TOOL_NAMES = register_import_review_tools(
+    server.tool,
+    _TOOL_REGISTRY,
+    {name: getattr(_IMPORT_REVIEW_DOMAIN, name) for name in _MCP102_LEGACY_HANDLERS},
+)
+
+
+_MCP103_LEGACY_HANDLERS = {
+    spec.name: globals()[f"_legacy_{spec.name}"]
+    for spec in _TOOL_REGISTRY.discover(domain="authoring")
+}
+_AUTHORING_DOMAIN = AuthoringDomain(_MCP103_LEGACY_HANDLERS)
+for _mcp103_tool_name in _MCP103_LEGACY_HANDLERS:
+    globals()[_mcp103_tool_name] = getattr(_AUTHORING_DOMAIN, _mcp103_tool_name)
+
+_MCP103_TOOL_NAMES = register_authoring_tools(
+    server.tool,
+    _TOOL_REGISTRY,
+    {name: getattr(_AUTHORING_DOMAIN, name) for name in _MCP103_LEGACY_HANDLERS},
+)
+
+
 if __name__ == "__main__":
+    _validate_tool_registry()
     server.run("stdio")

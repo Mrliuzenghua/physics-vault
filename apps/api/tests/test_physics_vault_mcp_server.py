@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import json
 import sqlite3
 import sys
@@ -164,6 +165,19 @@ def test_catalog_profile_exposes_only_catalog_tools(monkeypatch) -> None:
     assert "merge_canonical_duplicate_questions" not in names
     assert "list_review_tasks" not in names
     assert "apply_composition_workbench_plan" not in names
+
+
+def test_authoring_profile_and_public_legacy_signatures_are_compatible(monkeypatch) -> None:
+    monkeypatch.setenv("PHYSICS_MCP_PROFILE", "authoring")
+    module = _load_mcp_server()
+    authoring_names = tuple(module._MCP103_TOOL_NAMES)
+
+    assert set(authoring_names) == module.profile_tool_names("authoring")
+    assert {tool.__name__ for tool in module.server.tools} == set(authoring_names)
+    for name in authoring_names:
+        assert inspect.signature(getattr(module, name)) == inspect.signature(
+            getattr(module, f"_legacy_{name}")
+        )
 
 
 def test_mcp_format_diff_reports_changed_sections_and_template_ids() -> None:

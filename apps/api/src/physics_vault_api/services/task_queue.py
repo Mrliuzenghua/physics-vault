@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from redis import Redis
 
 from ..config import TaskQueueSettings
+from ..observability import correlation_context, current_context
 from ..repositories.import_tasks import ImportTask
 from ..schemas.lesson_exports import LessonExportRequest
 from .document_pipeline import ImportPipelineService
@@ -32,17 +33,20 @@ class ImportTaskDispatcher:
         *,
         request_context: dict[str, Any] | None = None,
     ) -> ImportTask:
+        correlated_context = current_context().as_request_context()
+        correlated_context.update(request_context or {})
         task, should_dispatch = self._service.prepare_background_batch_task(
             operation,
             batch_id,
             max_attempts=self.settings.max_attempts,
-            request_context=request_context,
+            request_context=correlated_context,
         )
         if not should_dispatch:
             return task
         if not self.settings.enabled:
             try:
-                return self._service.execute_background_batch_task(task.task_id, operation, batch_id)
+                with correlation_context(trace_id=task.trace_id, task_id=task.task_id):
+                    return self._service.execute_background_batch_task(task.task_id, operation, batch_id)
             except Exception as exc:  # noqa: BLE001
                 return self._service.fail_background_task(task.task_id, str(exc))
 
@@ -92,11 +96,13 @@ class LessonExportDispatcher:
         *,
         request_context: dict[str, Any] | None = None,
     ) -> ImportTask:
+        correlated_context = current_context().as_request_context()
+        correlated_context.update(request_context or {})
         task = self._service.create_export_task(
             export_format,
             payload,
             max_attempts=self.settings.max_attempts,
-            request_context=request_context,
+            request_context=correlated_context,
         )
         return self._dispatch(task)
 
@@ -111,7 +117,8 @@ class LessonExportDispatcher:
             return task
         if not self.settings.enabled:
             try:
-                return self._service.execute_export_task(task.task_id)
+                with correlation_context(trace_id=task.trace_id, task_id=task.task_id):
+                    return self._service.execute_export_task(task.task_id)
             except Exception as exc:  # noqa: BLE001
                 return self._service.mark_failed(task.task_id, exc)
 

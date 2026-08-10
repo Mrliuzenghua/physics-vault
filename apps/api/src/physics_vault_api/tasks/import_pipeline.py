@@ -9,6 +9,7 @@ import dramatiq
 from dramatiq import Actor, Broker
 
 from ..config import TaskQueueSettings
+from ..observability import correlation_context
 from ..services.task_errors import classify_task_error
 from .broker import broker as _broker
 from .broker import settings as _settings
@@ -117,12 +118,13 @@ def build_import_actors(
             # duplicate delivery. The durable task remains the source of truth.
             return
         try:
-            with _TaskHeartbeat(
-                service,
-                task_id,
-                settings.worker_heartbeat_interval_seconds,
-            ):
-                service.execute_background_batch_task(task_id, operation, batch_id)
+            with correlation_context(trace_id=current.trace_id, task_id=task_id):
+                with _TaskHeartbeat(
+                    service,
+                    task_id,
+                    settings.worker_heartbeat_interval_seconds,
+                ):
+                    service.execute_background_batch_task(task_id, operation, batch_id)
         except Exception as exc:  # noqa: BLE001
             info = classify_task_error(exc)
             if info.retryable:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from ..schemas.contracts import BooleanMapResponse, IntegerMapResponse
 from ..schemas.favorites import (
     BatchFavoriteResponse,
     BatchStarRequest,
@@ -38,14 +39,14 @@ def build_favorites_router(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    @router.put("/groups/{group_id}", summary="重命名收藏分组")
+    @router.put("/groups/{group_id}", response_model=BooleanMapResponse, summary="重命名收藏分组")
     async def update_group(group_id: str, req: FavoriteGroupUpdate) -> dict[str, bool]:
         ok = service.update_group(group_id, req)
         if not ok:
             raise HTTPException(status_code=404, detail="分组不存在")
         return {"updated": True}
 
-    @router.delete("/groups/{group_id}", summary="删除收藏分组（题目不移除）")
+    @router.delete("/groups/{group_id}", response_model=BooleanMapResponse, summary="删除收藏分组（题目不移除）")
     async def delete_group(group_id: str) -> dict[str, bool]:
         ok = service.delete_group(group_id)
         if not ok:
@@ -68,7 +69,7 @@ def build_favorites_router(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    @router.post("/remove", summary="批量取消收藏")
+    @router.post("/remove", response_model=IntegerMapResponse, summary="批量取消收藏")
     async def remove(question_ids: list[str]) -> dict[str, int]:
         try:
             count = service.remove(question_ids)

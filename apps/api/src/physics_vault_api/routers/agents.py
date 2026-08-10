@@ -55,7 +55,7 @@ def build_agents_router(service: ClaudeCodeAgentService | None = None) -> APIRou
                 detail={"message": "选题智能体暂时不可用", "detail": str(exc)},
             ) from exc
 
-    @router.post("/question-picker/stream")
+    @router.post("/question-picker/stream", response_class=StreamingResponse)
     async def question_picker_stream(payload: QuestionPickerAgentRequest) -> StreamingResponse:
         async def event_lines():
             try:

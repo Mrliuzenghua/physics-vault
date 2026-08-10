@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from ..schemas.contracts import IntegerMapResponse
 from ..schemas.collections import (
     BatchMoveRequest,
     BatchMoveResponse,
@@ -62,6 +63,7 @@ def build_collections_router(
 
     @router.post(
         "/remove-questions",
+        response_model=IntegerMapResponse,
         summary="从目录/专题中移出题目",
     )
     async def remove_questions(

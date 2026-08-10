@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
+from ..schemas.contracts import BooleanMapResponse
 from ..schemas.image_management import (
     AddImageRequest,
     AddCachedImageRequest,
@@ -68,19 +69,19 @@ def build_image_management_router(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @router.patch("/{question_id}/images/{asset_id}", summary="更新图片元数据")
+    @router.patch("/{question_id}/images/{asset_id}", response_model=BooleanMapResponse, summary="更新图片元数据")
     async def update_image(question_id: str, asset_id: str, req: UpdateImageRequest) -> dict[str, bool]:
         ok = service.update_image(question_id, asset_id, req)
         return {"updated": ok}
 
-    @router.delete("/{question_id}/images/{asset_id}", summary="删除图片绑定")
+    @router.delete("/{question_id}/images/{asset_id}", response_model=BooleanMapResponse, summary="删除图片绑定")
     async def delete_image(question_id: str, asset_id: str) -> dict[str, bool]:
         ok = service.delete_image(question_id, asset_id)
         if not ok:
             raise HTTPException(status_code=404, detail="绑定不存在")
         return {"deleted": True}
 
-    @router.post("/{question_id}/images/reorder", summary="调整图片顺序")
+    @router.post("/{question_id}/images/reorder", response_model=BooleanMapResponse, summary="调整图片顺序")
     async def reorder_images(question_id: str, req: ReorderRequest) -> dict[str, bool]:
         service.reorder_images(question_id, req)
         return {"reordered": True}

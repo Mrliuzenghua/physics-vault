@@ -37,8 +37,7 @@
   Template,
   UploadImportFileResponse,
 } from '../types';
-import { extractErrorMessage } from '../utils/error';
-import { ApiError, API_BASE as BASE, request, requestForm } from './apiClient';
+import { ApiError, request, requestForm, requestResponse } from './apiClient';
 
 export {
   DEFAULT_AI_CONFIG,
@@ -72,6 +71,7 @@ export {
   downloadTaskResult,
   fetchProcessingRuns,
   fetchTask,
+  fetchTaskStageEvents,
   fetchTasks,
   retryTask,
 } from './taskApi';
@@ -535,7 +535,7 @@ export async function streamQuestionPickerAgent(
     onEvent: (event: AgentStreamEvent) => void;
   },
 ): Promise<void> {
-  const res = await fetch(`${BASE}/api/agents/question-picker/stream`, {
+  const res = await requestResponse('/api/agents/question-picker/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     signal: options.signal,
@@ -549,10 +549,6 @@ export async function streamQuestionPickerAgent(
     }),
   });
 
-  if (!res.ok) {
-    const payload = await res.json().catch(() => ({ detail: res.statusText || `HTTP ${res.status}` }));
-    throw new Error(extractErrorMessage(payload, `HTTP ${res.status}`));
-  }
   if (!res.body) {
     throw new Error('浏览器没有返回可读取的智能体事件流');
   }
@@ -771,18 +767,14 @@ export async function saveReviewDraft(
   taskId: string,
   body: import('../types').SaveReviewDraftRequest,
 ): Promise<import('../types').ReviewDraftResponse> {
-  const response = await fetch(`${BASE}/api/review/drafts/${encodeURIComponent(taskId)}`, {
+  const response = await requestResponse(`/api/review/drafts/${encodeURIComponent(taskId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }, [409]);
   if (response.status === 409) {
     const payload = await response.json().catch(() => null) as { detail?: { current?: import('../types').ReviewDraftResponse | null } } | null;
     throw new ReviewDraftConflictError(payload?.detail?.current ?? null);
-  }
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(extractErrorMessage(payload, `HTTP ${response.status}`));
   }
   return response.json();
 }

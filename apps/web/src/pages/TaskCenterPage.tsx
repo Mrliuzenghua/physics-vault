@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Ban,
@@ -11,9 +11,12 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  ListTree,
 } from 'lucide-react';
 import { cancelTask, downloadTaskResult, fetchTasks, retryTask } from '../services/api';
-import type { ImportTaskStatus, TaskCenterItem, TaskCenterListResponse } from '../types';
+import TaskStageTimeline from '../components/tasks/TaskStageTimeline';
+import { fetchTaskContext, fetchTaskStageEvents } from '../services/taskApi';
+import type { ImportTaskStatus, TaskCenterItem, TaskCenterListResponse, TaskContextResponse, TaskStageEvent } from '../types';
 
 const ACTIVE_STATUSES = new Set<ImportTaskStatus>(['pending', 'running', 'retrying', 'cancel_requested']);
 
@@ -53,6 +56,14 @@ export default function TaskCenterPage() {
   const [error, setError] = useState<string | null>(null);
   const [actionTaskId, setActionTaskId] = useState<string | null>(null);
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set());
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [stageEvents, setStageEvents] = useState<TaskStageEvent[]>([]);
+  const [stageEventsLoading, setStageEventsLoading] = useState(false);
+  const [stageEventsError, setStageEventsError] = useState<string | null>(null);
+  const [taskContext, setTaskContext] = useState<TaskContextResponse | null>(null);
+  const [taskContextLoading, setTaskContextLoading] = useState(false);
+  const [taskContextError, setTaskContextError] = useState<string | null>(null);
+  const stageRequestRef = useRef(0);
 
   const load = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -105,9 +116,45 @@ export default function TaskCenterPage() {
     };
   }, [data.items, load]);
 
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    const requestId = stageRequestRef.current + 1;
+    stageRequestRef.current = requestId;
+    setStageEventsLoading(true);
+    setStageEventsError(null);
+    void fetchTaskStageEvents(selectedTaskId)
+      .then((events) => {
+        if (stageRequestRef.current === requestId) setStageEvents(events);
+      })
+      .catch((reason) => {
+        if (stageRequestRef.current === requestId) {
+          setStageEvents([]);
+          setStageEventsError(reason instanceof Error ? reason.message : '无法加载阶段事件');
+        }
+      })
+      .finally(() => {
+        if (stageRequestRef.current === requestId) setStageEventsLoading(false);
+      });
+  }, [selectedTaskId]);
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    setTaskContext(null);
+    setTaskContextLoading(true);
+    setTaskContextError(null);
+    void fetchTaskContext(selectedTaskId)
+      .then(setTaskContext)
+      .catch((reason) => setTaskContextError(reason instanceof Error ? reason.message : '无法加载关联上下文'))
+      .finally(() => setTaskContextLoading(false));
+  }, [selectedTaskId]);
+
   const activeCount = useMemo(
     () => data.items.filter((task) => ACTIVE_STATUSES.has(task.status)).length,
     [data.items],
+  );
+  const selectedTask = useMemo(
+    () => data.items.find((task) => task.task_id === selectedTaskId) ?? null,
+    [data.items, selectedTaskId],
   );
 
   const resetPage = (setter: (value: string) => void, value: string) => {
@@ -237,9 +284,21 @@ export default function TaskCenterPage() {
               onRetry={() => void handleRetry(task)}
               onCancel={() => void handleCancel(task)}
               onDownload={() => void handleDownload(task)}
+              onShowTimeline={() => setSelectedTaskId(task.task_id)}
+              retryAllowed={taskContext && selectedTaskId === task.task_id ? taskContext.retry_allowed : undefined}
             />
           ))}
         </section>
+
+        {selectedTaskId && (
+          <section className="mt-4 border border-slate-200 bg-slate-50" aria-label="任务执行详情">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-4 py-3">
+              <div className="min-w-0"><h2 className="text-sm font-bold">执行时间线</h2><p className="mt-0.5 truncate text-[11px] text-slate-500">{selectedTask?.task_name || selectedTaskId}</p></div>
+              <button type="button" onClick={() => setSelectedTaskId(null)} className="text-xs font-semibold text-slate-500 hover:text-slate-900">关闭详情</button>
+            </div>
+            <TaskStageTimeline events={stageEvents} traceId={selectedTask?.trace_id} loading={stageEventsLoading} error={stageEventsError} context={taskContext} contextLoading={taskContextLoading} contextError={taskContextError} />
+          </section>
+        )}
 
         {data.pages > 1 && (
           <nav className="mt-4 flex items-center justify-end gap-2 text-xs" aria-label="任务分页">
@@ -253,7 +312,7 @@ export default function TaskCenterPage() {
   );
 }
 
-function TaskRow({ task, busy, errorExpanded, onToggleError, onRetry, onCancel, onDownload }: {
+function TaskRow({ task, busy, errorExpanded, onToggleError, onRetry, onCancel, onDownload, onShowTimeline, retryAllowed }: {
   task: TaskCenterItem;
   busy: boolean;
   errorExpanded: boolean;
@@ -261,11 +320,13 @@ function TaskRow({ task, busy, errorExpanded, onToggleError, onRetry, onCancel, 
   onRetry: () => void;
   onCancel: () => void;
   onDownload: () => void;
+  onShowTimeline: () => void;
+  retryAllowed?: boolean;
 }) {
   const meta = STATUS_META[task.status];
   const canCancel = ACTIVE_STATUSES.has(task.status) && task.status !== 'cancel_requested';
   const retrySupported = task.task_type.startsWith('background_') || task.task_type === 'word_export' || task.task_type === 'pptx_export';
-  const canRetry = (task.status === 'failed' || task.status === 'cancelled') && retrySupported;
+  const canRetry = retryAllowed ?? ((task.status === 'failed' || task.status === 'cancelled') && retrySupported);
   return (
     <article className="border-b border-slate-200 px-4 py-3 last:border-b-0">
       <div className="grid gap-3 md:grid-cols-[minmax(220px,1.5fr)_150px_minmax(170px,1fr)_150px_150px] md:items-center md:gap-4">
@@ -294,6 +355,7 @@ function TaskRow({ task, busy, errorExpanded, onToggleError, onRetry, onCancel, 
         </div>
 
         <div className="flex flex-wrap justify-start gap-1.5 md:justify-end">
+          <ActionButton icon={<ListTree size={13} />} label="执行详情" onClick={onShowTimeline} />
           {task.error && <ActionButton icon={<ChevronDown size={13} className={errorExpanded ? 'rotate-180' : ''} />} label="错误" onClick={onToggleError} />}
           {canRetry && <ActionButton icon={<RotateCcw size={13} />} label="重试" onClick={onRetry} disabled={busy} />}
           {canCancel && <ActionButton icon={<Ban size={13} />} label="取消" onClick={onCancel} disabled={busy} />}

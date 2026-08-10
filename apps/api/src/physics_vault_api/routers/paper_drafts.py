@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
+from ..schemas.contracts import BooleanMapResponse
 from ..schemas.paper_drafts import (
     PaperDraftListResponse,
     PaperDraftResponse,
@@ -52,7 +53,7 @@ def build_paper_drafts_router(service: PaperDraftService | None = None) -> APIRo
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    @router.delete("/{draft_id}", summary="删除试卷草稿")
+    @router.delete("/{draft_id}", response_model=BooleanMapResponse, summary="删除试卷草稿")
     async def delete_draft(draft_id: str) -> dict[str, bool]:
         try:
             return {"deleted": service.delete(draft_id)}

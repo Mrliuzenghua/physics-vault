@@ -189,6 +189,15 @@ def test_word_export_snapshot_structure_and_safe_download(tmp_path: Path) -> Non
     assert task["status"] == "completed"
     assert task["progress"] == 100
     assert task["task_type"] == "word_export"
+    events = client.get(f"/api/tasks/{task['task_id']}/events")
+    assert events.status_code == 200
+    assert [event["event_type"] for event in events.json()] == [
+        "queued", "started", "started", "started", "completed",
+    ]
+    assert [event["phase"] for event in events.json()] == [
+        "queued", "read", "export", "write", "complete",
+    ]
+    assert all(event["input_version"] == 1 for event in events.json())
     task_dir = project_dir / "data" / "exports" / task["task_id"]
     assert (task_dir / "snapshot.json").is_file()
     output_path = project_dir / task["result"]["result_file_path"]

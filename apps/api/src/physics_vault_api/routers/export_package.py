@@ -24,6 +24,7 @@ def build_export_package_router() -> APIRouter:
 
     @router.get(
         "/export-package",
+        response_class=FileResponse,
         summary="导出题库包",
         description=(
             "将数据库文件和素材目录打包为一个 .zip 文件下载。"

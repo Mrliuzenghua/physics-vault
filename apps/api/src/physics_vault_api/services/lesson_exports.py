@@ -94,6 +94,7 @@ class LessonExportService:
         input_summary = {
             "lesson_id": str(lesson.get("id") or ""),
             "revision": int(lesson.get("revision") or 0),
+            "input_version": max(1, int(lesson.get("revision") or 0)),
             "title": title,
             "filename": _safe_file_stem(payload.file_name or title, "physics-vault-export")
             + _EXPORT_SUFFIXES[export_format],
@@ -107,7 +108,7 @@ class LessonExportService:
             input_summary["request_context"] = {
                 key: str(value)
                 for key, value in request_context.items()
-                if value is not None and key in {"source", "session_id", "operator"}
+                if value is not None and key in {"source", "session_id", "operator", "trace_id"}
             }
         idempotency_payload = {
             "schema": snapshot["schema"],

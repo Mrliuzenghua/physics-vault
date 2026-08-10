@@ -8,17 +8,24 @@ from ..schemas.assets_manager import (
     CacheCleanupRequest,
     CleanupPreviewResponse,
     CleanupResponse,
+    ConfirmOperationPlanRequest,
     DeleteAssetResponse,
+    OperationPlanExecutionResponse,
     StorageAnalysisResponse,
 )
 from ..services.assets_manager import AssetsManagerService
+from ..services.operation_plans import OperationPlanError, OperationPlanService, OperationPlanVersionConflict, build_asset_cleanup_plan
+from ..repositories.operation_plans import OperationPlanRepository
 
 
 def build_assets_manager_router(
     service: AssetsManagerService | None = None,
+    operation_plan_service: OperationPlanService | None = None,
 ) -> APIRouter:
     if service is None:
         service = AssetsManagerService()
+    if operation_plan_service is None:
+        operation_plan_service = OperationPlanService(OperationPlanRepository())
 
     router = APIRouter(prefix="/api/assets", tags=["assets-manager"])
 
@@ -67,7 +74,18 @@ def build_assets_manager_router(
     @router.get("/cleanup-preview", response_model=CleanupPreviewResponse, summary="Preview safe cleanup")
     async def cleanup_preview() -> CleanupPreviewResponse:
         try:
-            return service.get_cleanup_preview()
+            preview = service.get_cleanup_preview()
+            plan = build_asset_cleanup_plan(
+                action="assets.cleanup_unreferenced", scope=preview.scope,
+                candidate_count=preview.candidate_count, reclaimable_bytes=preview.reclaimable_bytes,
+                protected_count=preview.protected_count,
+            )
+            operation_plan_service.save_preview(plan)
+            return preview.model_copy(
+                update={
+                    "operation_plan": plan
+                }
+            )
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
@@ -90,7 +108,14 @@ def build_assets_manager_router(
     @router.get("/cache-cleanup-preview", response_model=CacheCleanupPreviewResponse, summary="Preview import cache cleanup")
     async def cache_cleanup_preview(batch_id: str = Query(default="")) -> CacheCleanupPreviewResponse:
         try:
-            return service.get_import_cache_cleanup_preview(batch_id=batch_id)
+            preview = service.get_import_cache_cleanup_preview(batch_id=batch_id)
+            plan = build_asset_cleanup_plan(action="assets.cleanup_import_cache", scope="import_cache", batch_id=preview.batch_id, candidate_count=preview.candidate_count, reclaimable_bytes=preview.reclaimable_bytes, protected_count=preview.protected_count)
+            operation_plan_service.save_preview(plan)
+            return preview.model_copy(
+                update={
+                    "operation_plan": plan
+                }
+            )
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
@@ -100,7 +125,7 @@ def build_assets_manager_router(
     @router.post("/cleanup-import-cache", response_model=CleanupResponse, summary="Clear import image cache")
     async def cleanup_import_cache(payload: CacheCleanupRequest) -> CleanupResponse:
         try:
-            return service.cleanup_import_cache(batch_id=payload.batch_id or "")
+            return service.cleanup_import_cache(batch_id=payload.batch_id or "").model_copy(update={"compatibility_mode": True, "migration_message": "Use confirm-operation with operation_id."})
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
@@ -114,7 +139,14 @@ def build_assets_manager_router(
     )
     async def unused_cache_preview(batch_id: str = Query(default="")) -> CacheCleanupPreviewResponse:
         try:
-            return service.get_unused_cache_cleanup_preview(batch_id=batch_id)
+            preview = service.get_unused_cache_cleanup_preview(batch_id=batch_id)
+            plan = build_asset_cleanup_plan(action="assets.cleanup_unused_cache", scope="unused_cache", batch_id=preview.batch_id, candidate_count=preview.candidate_count, reclaimable_bytes=preview.reclaimable_bytes, protected_count=preview.protected_count)
+            operation_plan_service.save_preview(plan)
+            return preview.model_copy(
+                update={
+                    "operation_plan": plan
+                }
+            )
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
@@ -128,7 +160,7 @@ def build_assets_manager_router(
     )
     async def cleanup_unused_cache(payload: CacheCleanupRequest) -> CleanupResponse:
         try:
-            return service.cleanup_unused_cache(batch_id=payload.batch_id or "")
+            return service.cleanup_unused_cache(batch_id=payload.batch_id or "").model_copy(update={"compatibility_mode": True, "migration_message": "Use confirm-operation with operation_id."})
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
@@ -142,7 +174,7 @@ def build_assets_manager_router(
     )
     async def cleanup_unreferenced() -> CleanupResponse:
         try:
-            return service.cleanup_unreferenced()
+            return service.cleanup_unreferenced().model_copy(update={"compatibility_mode": True, "migration_message": "Use confirm-operation with operation_id."})
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
@@ -170,4 +202,47 @@ def build_assets_manager_router(
                 detail={"message": "删除失败", "detail": str(exc)},
             ) from exc
 
+    @router.post("/confirm-operation", response_model=OperationPlanExecutionResponse)
+    async def confirm_operation(payload: ConfirmOperationPlanRequest) -> OperationPlanExecutionResponse:
+        try:
+            result = operation_plan_service.execute(
+                payload.operation_id,
+                version_reader=lambda plan: _preview_for_plan(service, plan).expected_version or "",
+                executor=lambda plan: _run_plan(service, plan).model_dump(),
+            )
+            return OperationPlanExecutionResponse(
+                operation_id=result.operation_id, status=result.status,
+                result=CleanupResponse.model_validate(result.result) if result.result else None,
+                error=result.error, idempotent=result.idempotent,
+            )
+        except OperationPlanVersionConflict as exc:
+            raise HTTPException(status_code=409, detail={"code": "OPERATION_PLAN_VERSION_CONFLICT", "message": str(exc)}) from exc
+        except OperationPlanError as exc:
+            raise HTTPException(status_code=404, detail={"code": "OPERATION_PLAN_NOT_FOUND", "message": str(exc)}) from exc
+
     return router
+
+
+def _preview_for_plan(service: AssetsManagerService, plan):
+    target = plan.targets[0].id
+    if plan.action == "assets.cleanup_unreferenced":
+        p = service.get_cleanup_preview()
+        return build_asset_cleanup_plan(action=plan.action, scope=p.scope, candidate_count=p.candidate_count, reclaimable_bytes=p.reclaimable_bytes, protected_count=p.protected_count)
+    if plan.action == "assets.cleanup_import_cache":
+        p = service.get_import_cache_cleanup_preview(batch_id=target)
+        return build_asset_cleanup_plan(action=plan.action, scope="import_cache", batch_id=p.batch_id, candidate_count=p.candidate_count, reclaimable_bytes=p.reclaimable_bytes, protected_count=p.protected_count)
+    if plan.action == "assets.cleanup_unused_cache":
+        p = service.get_unused_cache_cleanup_preview(batch_id=target)
+        return build_asset_cleanup_plan(action=plan.action, scope="unused_cache", batch_id=p.batch_id, candidate_count=p.candidate_count, reclaimable_bytes=p.reclaimable_bytes, protected_count=p.protected_count)
+    raise OperationPlanError("unsupported operation action")
+
+
+def _run_plan(service: AssetsManagerService, plan) -> CleanupResponse:
+    target = plan.targets[0].id
+    if plan.action == "assets.cleanup_unreferenced":
+        return service.cleanup_unreferenced()
+    if plan.action == "assets.cleanup_import_cache":
+        return service.cleanup_import_cache(batch_id=target)
+    if plan.action == "assets.cleanup_unused_cache":
+        return service.cleanup_unused_cache(batch_id=target)
+    raise OperationPlanError("unsupported operation action")

@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from ..paths import default_import_batches_dir
+from ..schemas.contracts import ObjectMapResponse
 from ..schemas.import_pipeline import (
     AiParseDocumentRequest,
     AiParseDocumentResponse,
@@ -118,7 +119,7 @@ def build_import_pipeline_router(
         task = task_dispatcher.submit_batch_stage("recognize", batch_id)
         return ImportPipelineTaskResponse.model_validate(import_task_to_response(task))
 
-    @router.get("/task-queue/status")
+    @router.get("/task-queue/status", response_model=ObjectMapResponse)
     def get_task_queue_status() -> dict[str, str | bool]:
         return task_dispatcher.status()
 

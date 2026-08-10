@@ -8,6 +8,7 @@ import dramatiq
 from dramatiq import Actor, Broker
 
 from ..config import TaskQueueSettings
+from ..observability import correlation_context
 from ..services.task_errors import classify_task_error
 from .broker import broker as _broker
 from .broker import settings as _settings
@@ -75,7 +76,8 @@ def build_lesson_export_actors(
         if current.status in {"completed", "cancelled", "failed"}:
             return
         try:
-            service.execute_export_task(task_id)
+            with correlation_context(trace_id=current.trace_id, task_id=task_id):
+                service.execute_export_task(task_id)
         except Exception as exc:  # noqa: BLE001
             info = classify_task_error(exc)
             if info.retryable:

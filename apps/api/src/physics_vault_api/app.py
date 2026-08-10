@@ -7,12 +7,18 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
+from pydantic import BaseModel
 
 from .application import ApplicationContainer
 from .db_schema import initialize_database
+from .observability import TRACE_ID_HEADER, correlation_context, resolve_trace_id
 from .paths import project_root
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+class HealthResponse(BaseModel):
+    status: str
 
 
 def _resolve_project_file(file_path: str) -> Path:
@@ -64,15 +70,25 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    @app.middleware("http")
+    async def attach_correlation_id(request, call_next):
+        """Preserve a caller trace or create one for every HTTP boundary."""
+        trace_id = resolve_trace_id(request.headers.get(TRACE_ID_HEADER))
+        with correlation_context(trace_id=trace_id):
+            request.state.trace_id = trace_id
+            response = await call_next(request)
+        response.headers[TRACE_ID_HEADER] = trace_id
+        return response
 
-    @app.get("/files/{file_path:path}")
+    @app.get("/health", response_model=HealthResponse)
+    def health() -> HealthResponse:
+        return HealthResponse(status="ok")
+
+    @app.get("/files/{file_path:path}", response_class=FileResponse)
     def serve_file(file_path: str) -> FileResponse:
         return _cache_response(FileResponse(_resolve_project_file(file_path)))
 
-    @app.get("/thumbs/{file_path:path}")
+    @app.get("/thumbs/{file_path:path}", response_class=FileResponse)
     def serve_thumbnail(file_path: str, w: int = Query(default=720, ge=120, le=1600)) -> FileResponse:
         target = _resolve_project_file(file_path)
         if target.suffix.lower() not in IMAGE_EXTENSIONS:

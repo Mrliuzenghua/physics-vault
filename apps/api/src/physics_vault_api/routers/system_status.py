@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from ..schemas.contracts import ObjectMapResponse
 from ..database import connect_db
 from ..paths import default_db_path
 from ..repositories.question_search import QuestionSearchRepository
@@ -13,7 +14,7 @@ from ..repositories.question_search import QuestionSearchRepository
 def build_system_status_router(search_repo: QuestionSearchRepository) -> APIRouter:
     router = APIRouter(prefix="/api/system", tags=["system-status"])
 
-    @router.get("/db-status")
+    @router.get("/db-status", response_model=ObjectMapResponse)
     def db_status() -> dict[str, Any]:
         db_path = default_db_path()
         status: dict[str, Any] = {

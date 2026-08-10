@@ -2,6 +2,8 @@ import type {
   TaskActionResponse,
   TaskCenterItem,
   TaskCenterListResponse,
+  TaskContextResponse,
+  TaskStageEvent,
   TaskLog,
 } from '../types';
 import { request, requestResponse } from './apiClient';
@@ -30,6 +32,14 @@ export async function fetchTasks(params: TaskFilters = {}): Promise<TaskCenterLi
 
 export async function fetchTask(taskId: string): Promise<TaskCenterItem> {
   return request(`/api/tasks/${encodeURIComponent(taskId)}`);
+}
+
+export async function fetchTaskStageEvents(taskId: string): Promise<TaskStageEvent[]> {
+  return request(`/api/tasks/${encodeURIComponent(taskId)}/events`);
+}
+
+export async function fetchTaskContext(taskId: string): Promise<TaskContextResponse> {
+  return request(`/api/tasks/${encodeURIComponent(taskId)}/context`);
 }
 
 export async function retryTask(taskId: string): Promise<TaskActionResponse> {

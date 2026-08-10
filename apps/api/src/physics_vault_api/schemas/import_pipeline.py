@@ -248,6 +248,7 @@ class TaskErrorResponse(BaseModel):
 
 class ImportPipelineTaskResponse(BaseModel):
     task_id: str
+    trace_id: str = ""
     task_type: str
     status: TaskStatus
     created_at: datetime

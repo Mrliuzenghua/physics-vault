@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
+from ..schemas.contracts import IntegerMapResponse, StringMapResponse
 from ..schemas.knowledge_points import KnowledgePointItem, QuestionKnowledgePointBatchItem, QuestionKnowledgePointLink, QuestionKnowledgePointUpsert
 from ..services.knowledge_points import KnowledgePointService
 
@@ -33,7 +34,7 @@ def build_knowledge_points_router(service: KnowledgePointService) -> APIRouter:
             offset=offset,
         )
 
-    @router.get("/knowledge-points/counts", response_model=dict[str, int])
+    @router.get("/knowledge-points/counts", response_model=IntegerMapResponse)
     def knowledge_point_counts() -> dict[str, int]:
         return service.question_counts_by_topic3()
 
@@ -68,7 +69,7 @@ def build_knowledge_points_router(service: KnowledgePointService) -> APIRouter:
             raise HTTPException(status_code=404, detail="Question not found")
         return link
 
-    @router.delete("/questions/{question_id}/knowledge-points/{rank}", response_model=dict[str, str])
+    @router.delete("/questions/{question_id}/knowledge-points/{rank}", response_model=StringMapResponse)
     def delete_question_knowledge_point(question_id: str, rank: int) -> dict[str, str]:
         try:
             service.delete_for_question(question_id, rank)

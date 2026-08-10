@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from ..paths import project_root
 from ..repositories.import_tasks import ImportTask
+from ..observability import resolve_trace_id
 from ..schemas.lesson_exports import LessonExportRequest
 from .document_pipeline import ImportPipelineService
 from .task_queue import ImportTaskDispatcher
@@ -55,12 +56,14 @@ class TaskActionContext:
     session_id: str | None = None
     operator: str = "MCP user"
     confirmed: bool = False
+    trace_id: str | None = None
 
     def as_request_context(self) -> dict[str, str]:
         values = {
             "source": self.source.strip() or "physics_vault_mcp",
             "session_id": (self.session_id or "").strip(),
             "operator": self.operator.strip() or "MCP user",
+            "trace_id": resolve_trace_id(self.trace_id),
         }
         return {key: value for key, value in values.items() if value}
 
@@ -135,6 +138,63 @@ class TaskCenterService:
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         return self.serialize(self._import_service.get_task(task_id))
+
+    def list_stage_events(self, task_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        self._import_service.get_task(task_id)
+        reader = getattr(self._repository, "list_stage_events", None)
+        if not callable(reader):
+            return []
+        return [
+            {
+                "event_id": event.event_id,
+                "task_id": event.task_id,
+                "trace_id": event.trace_id,
+                "phase": event.phase,
+                "stage": event.stage,
+                "event_type": event.event_type,
+                "started_at": event.started_at,
+                "finished_at": event.finished_at,
+                "duration_ms": event.duration_ms,
+                "input_version": event.input_version,
+                "retry_count": event.retry_count,
+                "warning": event.warning,
+                "error_code": event.error_code,
+                "error_message": event.error_message,
+                "recommended_action": event.recommended_action,
+                "details": event.details,
+            }
+            for event in reader(task_id, limit=limit)
+        ]
+
+    def get_context(self, task_id: str) -> dict[str, Any]:
+        task = self._import_service.get_task(task_id)
+        artifacts: list[dict[str, str]] = []
+        try:
+            _, name = self.resolve_result_file(task_id)
+            artifacts.append({"display_name": name, "download_url": f"/api/tasks/{task_id}/download", "type": task.task_type})
+        except HTTPException:
+            pass
+        audits_reader = getattr(self._repository, "list_action_audits", None)
+        audits = []
+        if callable(audits_reader):
+            audits = [
+                {"audit_id": item.audit_id, "action": item.action, "created_at": item.created_at, "operator": item.operator, "confirmed": item.confirmed}
+                for item in audits_reader(task_id, limit=50)
+            ]
+            audits.sort(key=lambda item: item["created_at"], reverse=True)
+        allowed, reason = self._retry_context(task)
+        return {"artifacts": artifacts, "audits": audits, "retry_allowed": allowed, "retry_reason": reason}
+
+    def _retry_context(self, task: ImportTask) -> tuple[bool, str]:
+        if task.status != "failed":
+            return False, "Only failed tasks can be retried."
+        if task.task_type in {"word_export", "pptx_export"}:
+            return (self._export_dispatcher is not None, "Export retry service is unavailable." if self._export_dispatcher is None else "Retry is available.")
+        operation = str(task.input_summary.get("operation") or "")
+        batch_id = str(task.input_summary.get("batch_id") or "")
+        if task.task_type.startswith("background_") and operation and batch_id:
+            return True, "Retry is available."
+        return False, "This failed task cannot be retried automatically."
 
     def submit_batch_job(
         self,
@@ -276,6 +336,7 @@ class TaskCenterService:
             operator=context.operator.strip() or "MCP user",
             confirmed=context.confirmed,
             details=details,
+            trace_id=context.trace_id,
         )
         return str(audit.audit_id)
 
@@ -318,6 +379,7 @@ class TaskCenterService:
             finished_at = task.updated_at
         return {
             "task_id": task.task_id,
+            "trace_id": task.trace_id or resolve_trace_id(),
             "task_type": task.task_type,
             "task_name": self._task_name(task),
             "status": task.status,

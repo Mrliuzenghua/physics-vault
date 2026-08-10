@@ -943,6 +943,7 @@ export interface AiParseDocumentResponse {
 
 export interface ImportPipelineTaskResponse {
   task_id: string;
+  trace_id?: string;
   task_type: ImportTaskType | 'word_export' | 'pptx_export' | `background_${string}`;
   status: ImportTaskStatus;
   created_at: string;
@@ -972,6 +973,7 @@ export interface TaskCenterError {
 
 export interface TaskCenterItem {
   task_id: string;
+  trace_id?: string;
   task_type: string;
   task_name: string;
   status: ImportTaskStatus;
@@ -987,6 +989,46 @@ export interface TaskCenterItem {
   error: TaskCenterError | null;
   input_summary: Record<string, unknown>;
   result_summary: Record<string, unknown> | null;
+}
+
+export interface TaskStageEvent {
+  event_id: string;
+  task_id: string;
+  trace_id: string;
+  phase: string;
+  stage: string;
+  event_type: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  input_version: number | null;
+  retry_count: number;
+  warning: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  recommended_action: string | null;
+  details: Record<string, unknown>;
+}
+
+export interface TaskContextArtifact {
+  display_name: string;
+  download_url: string;
+  type: string;
+}
+
+export interface TaskContextAudit {
+  audit_id: string;
+  action: string;
+  created_at: string;
+  operator: string;
+  confirmed: boolean;
+}
+
+export interface TaskContextResponse {
+  artifacts: TaskContextArtifact[];
+  audits: TaskContextAudit[];
+  retry_allowed: boolean;
+  retry_reason: string;
 }
 
 export interface TaskCenterListResponse {

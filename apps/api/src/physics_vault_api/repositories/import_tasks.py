@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from ..database import connect_db
 from ..db_schema import ensure_import_task_lifecycle_schema
+from ..observability import resolve_trace_id
 from ..paths import default_review_db_path
 
 
@@ -92,6 +93,7 @@ class ImportTask:
     heartbeat_at: datetime | None = None
     result_file_path: str | None = None
     error_info: TaskErrorInfo | None = None
+    trace_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,12 +107,34 @@ class TaskActionAudit:
     confirmed: bool
     details: dict[str, Any]
     created_at: datetime
+    trace_id: str = ""
+
+
+@dataclass(slots=True)
+class TaskStageEvent:
+    event_id: str
+    task_id: str
+    trace_id: str
+    phase: str
+    stage: str
+    event_type: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+    input_version: int | None = None
+    retry_count: int = 0
+    warning: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    recommended_action: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 class InMemoryImportTaskRepository:
     def __init__(self) -> None:
         self._tasks: dict[str, ImportTask] = {}
         self._action_audits: list[TaskActionAudit] = []
+        self._stage_events: list[TaskStageEvent] = []
         self._lock = RLock()
 
     def create(
@@ -121,6 +145,7 @@ class InMemoryImportTaskRepository:
         max_attempts: int = 1,
         idempotency_key: str | None = None,
         message_id: str | None = None,
+        trace_id: str | None = None,
     ) -> ImportTask:
         now = datetime.now(UTC)
         task = ImportTask(
@@ -133,9 +158,11 @@ class InMemoryImportTaskRepository:
             max_attempts=max(1, int(max_attempts)),
             idempotency_key=idempotency_key,
             message_id=message_id,
+            trace_id=_resolve_task_trace_id(trace_id, input_summary),
         )
         with self._lock:
             self._tasks[task.task_id] = task
+            self._append_stage_event(task, phase="queued", stage="queued", event_type="queued", now=now, finish=True)
             return deepcopy(task)
 
     def create_or_get(
@@ -146,6 +173,7 @@ class InMemoryImportTaskRepository:
         max_attempts: int = 1,
         idempotency_key: str,
         message_id: str | None = None,
+        trace_id: str | None = None,
     ) -> tuple[ImportTask, bool]:
         """Create once for an idempotency key, atomically within the repository."""
         with self._lock:
@@ -160,6 +188,7 @@ class InMemoryImportTaskRepository:
                     max_attempts=max_attempts,
                     idempotency_key=idempotency_key,
                     message_id=message_id,
+                    trace_id=trace_id,
                 ),
                 True,
             )
@@ -272,11 +301,15 @@ class InMemoryImportTaskRepository:
             if task.status in TERMINAL_TASK_STATUSES:
                 raise InvalidTaskTransition(task_id, task.status, task.status)
             task.progress = _normalize_progress(progress)
+            previous_step = task.current_step
             if current_step is not None:
                 task.current_step = current_step
             now = datetime.now(UTC)
             task.updated_at = now
             task.heartbeat_at = now
+            if current_step and current_step != previous_step:
+                self._close_open_stage_events(task_id, now)
+                self._append_stage_event(task, phase=_phase_for(current_step, task.task_type), stage=current_step, event_type="started", now=now)
             return deepcopy(task)
 
     def heartbeat(self, task_id: str) -> ImportTask:
@@ -364,6 +397,7 @@ class InMemoryImportTaskRepository:
         operator: str,
         confirmed: bool,
         details: dict[str, Any] | None = None,
+        trace_id: str | None = None,
     ) -> TaskActionAudit:
         with self._lock:
             self._require_task(task_id)
@@ -377,6 +411,7 @@ class InMemoryImportTaskRepository:
                 confirmed=bool(confirmed),
                 details=deepcopy(details or {}),
                 created_at=datetime.now(UTC),
+                trace_id=resolve_trace_id(trace_id or self._require_task(task_id).trace_id),
             )
             self._action_audits.append(audit)
             return deepcopy(audit)
@@ -386,6 +421,12 @@ class InMemoryImportTaskRepository:
             audits = [item for item in self._action_audits if item.task_id == task_id]
             audits.sort(key=lambda item: item.created_at, reverse=True)
             return deepcopy(audits[:_normalize_limit(limit)])
+
+    def list_stage_events(self, task_id: str, limit: int = 200) -> list[TaskStageEvent]:
+        with self._lock:
+            events = [item for item in self._stage_events if item.task_id == task_id]
+            events.sort(key=lambda item: (item.started_at, item.event_id))
+            return deepcopy(events[:_normalize_limit(limit)])
 
     def _require_task(self, task_id: str) -> ImportTask:
         task = self._tasks.get(task_id)
@@ -440,7 +481,58 @@ class InMemoryImportTaskRepository:
                     task.error_info = cast(TaskErrorInfo | None, error_info)
             if touch_heartbeat:
                 task.heartbeat_at = now
+            self._record_transition_events(task, previous_status, status, now, error_info, result)
             return deepcopy(task)
+
+    def _record_transition_events(
+        self,
+        task: ImportTask,
+        previous_status: TaskStatus,
+        status: TaskStatus,
+        now: datetime,
+        error_info: TaskErrorInfo | None | object,
+        result: dict[str, Any] | object,
+    ) -> None:
+        if status == "running":
+            self._close_open_stage_events(task.task_id, now)
+            self._append_stage_event(task, phase=_phase_for(task.current_step, task.task_type), stage=task.current_step or "processing", event_type="started", now=now)
+        elif status == "retrying":
+            self._close_open_stage_events(task.task_id, now)
+            info = error_info if isinstance(error_info, TaskErrorInfo) else task.error_info
+            self._append_stage_event(task, phase=_phase_for(task.current_step, task.task_type), stage=task.current_step or "processing", event_type="retrying", now=now, finish=True, error_info=info)
+        elif status in TERMINAL_TASK_STATUSES:
+            self._close_open_stage_events(task.task_id, now)
+            event_type = "completed" if status == "completed" else status
+            info = error_info if isinstance(error_info, TaskErrorInfo) else task.error_info
+            self._append_stage_event(task, phase="complete", stage=task.current_step or status, event_type=event_type, now=now, finish=True, error_info=info)
+            if isinstance(result, dict):
+                for warning in result.get("warnings") or []:
+                    self._append_stage_event(task, phase="complete", stage=task.current_step or status, event_type="warning", now=now, finish=True, warning=str(warning))
+        elif status == "cancel_requested" and previous_status != status:
+            self._close_open_stage_events(task.task_id, now)
+            self._append_stage_event(task, phase="complete", stage="cancel_requested", event_type="started", now=now)
+
+    def _append_stage_event(
+        self,
+        task: ImportTask,
+        *,
+        phase: str,
+        stage: str,
+        event_type: str,
+        now: datetime,
+        finish: bool = False,
+        error_info: TaskErrorInfo | None = None,
+        warning: str | None = None,
+    ) -> None:
+        self._stage_events.append(
+            _new_stage_event(task, phase=phase, stage=stage, event_type=event_type, now=now, finish=finish, error_info=error_info, warning=warning)
+        )
+
+    def _close_open_stage_events(self, task_id: str, now: datetime) -> None:
+        for event in self._stage_events:
+            if event.task_id == task_id and event.finished_at is None:
+                event.finished_at = now
+                event.duration_ms = _duration_ms(event.started_at, now)
 
 
 class SQLiteImportTaskRepository:
@@ -528,6 +620,7 @@ class SQLiteImportTaskRepository:
         max_attempts: int = 1,
         idempotency_key: str | None = None,
         message_id: str | None = None,
+        trace_id: str | None = None,
     ) -> ImportTask:
         now = datetime.now(UTC)
         task = ImportTask(
@@ -540,6 +633,7 @@ class SQLiteImportTaskRepository:
             max_attempts=max(1, int(max_attempts)),
             idempotency_key=idempotency_key,
             message_id=message_id,
+            trace_id=_resolve_task_trace_id(trace_id, input_summary),
         )
         conn = self._connect()
         try:
@@ -552,11 +646,11 @@ class SQLiteImportTaskRepository:
                     current_step, attempt, max_attempts, idempotency_key,
                     message_id, started_at, finished_at, heartbeat_at,
                     result_file_path, error_type, error_message,
-                    error_details, error_retryable
+                    error_details, error_retryable, trace_id
                 )
                 VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 0,
                         NULL, 0, ?, ?, ?, NULL, NULL, NULL,
-                        NULL, NULL, NULL, NULL, 0)
+                        NULL, NULL, NULL, NULL, 0, ?)
                 """,
                 (
                     task.task_id,
@@ -568,7 +662,12 @@ class SQLiteImportTaskRepository:
                     task.max_attempts,
                     task.idempotency_key,
                     task.message_id,
+                    task.trace_id,
                 ),
+            )
+            _insert_stage_event(
+                conn,
+                _new_stage_event(task, phase="queued", stage="queued", event_type="queued", now=now, finish=True),
             )
             conn.commit()
         except Exception:
@@ -586,6 +685,7 @@ class SQLiteImportTaskRepository:
         max_attempts: int = 1,
         idempotency_key: str,
         message_id: str | None = None,
+        trace_id: str | None = None,
     ) -> tuple[ImportTask, bool]:
         """Serialize lookup+insert so concurrent submitters share one task."""
         conn = self._connect()
@@ -615,6 +715,7 @@ class SQLiteImportTaskRepository:
                 max_attempts=max(1, int(max_attempts)),
                 idempotency_key=idempotency_key,
                 message_id=message_id,
+                trace_id=_resolve_task_trace_id(trace_id, input_summary),
             )
             conn.execute(
                 """
@@ -624,11 +725,11 @@ class SQLiteImportTaskRepository:
                     current_step, attempt, max_attempts, idempotency_key,
                     message_id, started_at, finished_at, heartbeat_at,
                     result_file_path, error_type, error_message,
-                    error_details, error_retryable
+                    error_details, error_retryable, trace_id
                 )
                 VALUES (?, ?, 'pending', ?, ?, ?, NULL, NULL, 0,
                         NULL, 0, ?, ?, ?, NULL, NULL, NULL,
-                        NULL, NULL, NULL, NULL, 0)
+                        NULL, NULL, NULL, NULL, 0, ?)
                 """,
                 (
                     task.task_id,
@@ -639,7 +740,12 @@ class SQLiteImportTaskRepository:
                     task.max_attempts,
                     task.idempotency_key,
                     task.message_id,
+                    task.trace_id,
                 ),
+            )
+            _insert_stage_event(
+                conn,
+                _new_stage_event(task, phase="queued", stage="queued", event_type="queued", now=now, finish=True),
             )
             conn.commit()
             return task, True
@@ -671,6 +777,9 @@ class SQLiteImportTaskRepository:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            previous_row = conn.execute(
+                "SELECT * FROM import_pipeline_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
             cursor = conn.execute(
                 """
                 UPDATE import_pipeline_tasks
@@ -699,6 +808,16 @@ class SQLiteImportTaskRepository:
                 conn.commit()
                 return None
             row = conn.execute("SELECT * FROM import_pipeline_tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if previous_row is not None and row is not None:
+                _record_sqlite_transition_events(
+                    conn,
+                    _row_to_task(cast(sqlite3.Row, previous_row)),
+                    _row_to_task(cast(sqlite3.Row, row)),
+                    status="running",
+                    now=now,
+                    error_info=_UNSET,
+                    result=_UNSET,
+                )
             conn.commit()
             return _row_to_task(cast(sqlite3.Row, row))
         except Exception:
@@ -803,6 +922,9 @@ class SQLiteImportTaskRepository:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            previous_row = conn.execute(
+                "SELECT * FROM import_pipeline_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
             cursor = conn.execute(
                 """
                 UPDATE import_pipeline_tasks
@@ -816,6 +938,21 @@ class SQLiteImportTaskRepository:
             if cursor.rowcount == 0:
                 self._raise_missing_or_invalid(conn, task_id, "progress_update")
             row = conn.execute("SELECT * FROM import_pipeline_tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if current_step and previous_row is not None:
+                previous_task = _row_to_task(cast(sqlite3.Row, previous_row))
+                updated_task = _row_to_task(cast(sqlite3.Row, row))
+                if previous_task.current_step != updated_task.current_step:
+                    _close_open_stage_events(conn, task_id, now)
+                    _insert_stage_event(
+                        conn,
+                        _new_stage_event(
+                            updated_task,
+                            phase=_phase_for(updated_task.current_step, updated_task.task_type),
+                            stage=updated_task.current_step or "processing",
+                            event_type="started",
+                            now=now,
+                        ),
+                    )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -986,19 +1123,9 @@ class SQLiteImportTaskRepository:
         operator: str,
         confirmed: bool,
         details: dict[str, Any] | None = None,
+        trace_id: str | None = None,
     ) -> TaskActionAudit:
         now = datetime.now(UTC)
-        audit = TaskActionAudit(
-            audit_id=str(uuid4()),
-            task_id=task_id,
-            action=action,
-            source=source,
-            session_id=session_id,
-            operator=operator,
-            confirmed=bool(confirmed),
-            details=deepcopy(details or {}),
-            created_at=now,
-        )
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -1007,12 +1134,24 @@ class SQLiteImportTaskRepository:
             ).fetchone()
             if exists is None:
                 raise KeyError(task_id)
+            audit = TaskActionAudit(
+                audit_id=str(uuid4()),
+                task_id=task_id,
+                action=action,
+                source=source,
+                session_id=session_id,
+                operator=operator,
+                confirmed=bool(confirmed),
+                details=deepcopy(details or {}),
+                created_at=now,
+                trace_id=resolve_trace_id(trace_id or _task_trace_id(conn, task_id)),
+            )
             conn.execute(
                 """
                 INSERT INTO task_action_audit (
                     audit_id, task_id, action, source, session_id, operator,
-                    confirmed, details_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    confirmed, details_json, created_at, trace_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     audit.audit_id,
@@ -1024,6 +1163,7 @@ class SQLiteImportTaskRepository:
                     int(audit.confirmed),
                     json.dumps(audit.details, ensure_ascii=False),
                     _dt_to_text(audit.created_at),
+                    audit.trace_id,
                 ),
             )
             conn.commit()
@@ -1059,9 +1199,26 @@ class SQLiteImportTaskRepository:
                 confirmed=bool(row["confirmed"]),
                 details=_json_dict(row["details_json"]),
                 created_at=cast(datetime, _dt_from_text(str(row["created_at"]))),
+                trace_id=str(row["trace_id"]) if row["trace_id"] else "",
             )
             for row in rows
         ]
+
+    def list_stage_events(self, task_id: str, limit: int = 200) -> list[TaskStageEvent]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM task_stage_events
+                WHERE task_id = ?
+                ORDER BY started_at ASC, event_id ASC
+                LIMIT ?
+                """,
+                (task_id, _normalize_limit(limit)),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [_row_to_stage_event(row) for row in rows]
 
     def _transition(
         self,
@@ -1081,11 +1238,12 @@ class SQLiteImportTaskRepository:
         try:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute(
-                "SELECT status FROM import_pipeline_tasks WHERE task_id = ?", (task_id,)
+                "SELECT * FROM import_pipeline_tasks WHERE task_id = ?", (task_id,)
             ).fetchone()
             if current is None:
                 raise KeyError(task_id)
-            previous_status = str(current["status"])
+            previous_task = _row_to_task(cast(sqlite3.Row, current))
+            previous_status = previous_task.status
             _validate_transition(task_id, previous_status, status)
 
             now = datetime.now(UTC)
@@ -1160,6 +1318,16 @@ class SQLiteImportTaskRepository:
             if cursor.rowcount != 1:
                 self._raise_missing_or_invalid(conn, task_id, status)
             row = conn.execute("SELECT * FROM import_pipeline_tasks WHERE task_id = ?", (task_id,)).fetchone()
+            updated_task = _row_to_task(cast(sqlite3.Row, row))
+            _record_sqlite_transition_events(
+                conn,
+                previous_task,
+                updated_task,
+                status=status,
+                now=now,
+                error_info=error_info,
+                result=result,
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1216,6 +1384,184 @@ def _json_dict(raw: str | None) -> dict[str, Any]:
         return {}
 
 
+def _resolve_task_trace_id(trace_id: str | None, input_summary: dict[str, Any]) -> str:
+    request_context = input_summary.get("request_context")
+    contextual_trace = request_context.get("trace_id") if isinstance(request_context, dict) else None
+    return resolve_trace_id(trace_id or str(contextual_trace or ""))
+
+
+def _task_trace_id(conn: sqlite3.Connection, task_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT trace_id FROM import_pipeline_tasks WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    return str(row["trace_id"]) if row and row["trace_id"] else None
+
+
+def _phase_for(current_step: str | None, task_type: str) -> str:
+    value = str(current_step or "").lower()
+    task_kind = str(task_type or "").lower()
+    if not value:
+        return "export" if task_kind.endswith("_export") else "queued"
+    if any(token in value for token in ("read", "读取")):
+        return "read"
+    if any(token in value for token in ("pandoc", "convert", "转换", "转化")):
+        return "convert"
+    if any(token in value for token in ("clean", "清洗")):
+        return "clean"
+    if any(token in value for token in ("recognize", "识别")):
+        return "recognize"
+    if any(token in value for token in ("parse", "structure", "解析", "结构")):
+        return "parse"
+    if any(token in value for token in ("save", "write", "校验", "保存", "写入")):
+        return "write"
+    if task_kind.endswith("_export"):
+        return "export"
+    return "transform"
+
+
+def _duration_ms(started_at: datetime, finished_at: datetime) -> int:
+    return max(0, int((finished_at - started_at).total_seconds() * 1000))
+
+
+def _input_version(task: ImportTask) -> int | None:
+    value = task.input_summary.get("input_version")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _recommended_action(error_info: TaskErrorInfo | None) -> str | None:
+    if error_info is None:
+        return None
+    return "retry" if error_info.retryable else "check_input_or_configuration"
+
+
+def _new_stage_event(
+    task: ImportTask,
+    *,
+    phase: str,
+    stage: str,
+    event_type: str,
+    now: datetime,
+    finish: bool = False,
+    error_info: TaskErrorInfo | None = None,
+    warning: str | None = None,
+) -> TaskStageEvent:
+    return TaskStageEvent(
+        event_id=str(uuid4()),
+        task_id=task.task_id,
+        trace_id=task.trace_id or resolve_trace_id(),
+        phase=phase,
+        stage=str(stage or phase),
+        event_type=event_type,
+        started_at=now,
+        finished_at=now if finish else None,
+        duration_ms=0 if finish else None,
+        input_version=_input_version(task),
+        retry_count=task.attempt,
+        warning=warning,
+        error_code=error_info.error_type if error_info else None,
+        error_message=error_info.message if error_info else None,
+        recommended_action=_recommended_action(error_info),
+    )
+
+
+def _insert_stage_event(conn: sqlite3.Connection, event: TaskStageEvent) -> None:
+    conn.execute(
+        """
+        INSERT INTO task_stage_events (
+            event_id, task_id, trace_id, phase, stage, event_type,
+            started_at, finished_at, duration_ms, input_version, retry_count,
+            warning, error_code, error_message, recommended_action, details_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event.event_id,
+            event.task_id,
+            event.trace_id,
+            event.phase,
+            event.stage,
+            event.event_type,
+            _dt_to_text(event.started_at),
+            _dt_to_text(event.finished_at) if event.finished_at else None,
+            event.duration_ms,
+            event.input_version,
+            event.retry_count,
+            event.warning,
+            event.error_code,
+            event.error_message,
+            event.recommended_action,
+            json.dumps(event.details, ensure_ascii=False),
+            _dt_to_text(event.started_at),
+        ),
+    )
+
+
+def _close_open_stage_events(conn: sqlite3.Connection, task_id: str, now: datetime) -> None:
+    rows = conn.execute(
+        "SELECT event_id, started_at FROM task_stage_events WHERE task_id = ? AND finished_at IS NULL",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        started_at = _dt_from_text(str(row["started_at"])) or now
+        conn.execute(
+            "UPDATE task_stage_events SET finished_at = ?, duration_ms = ? WHERE event_id = ?",
+            (_dt_to_text(now), _duration_ms(started_at, now), row["event_id"]),
+        )
+
+
+def _record_sqlite_transition_events(
+    conn: sqlite3.Connection,
+    previous_task: ImportTask,
+    task: ImportTask,
+    *,
+    status: TaskStatus,
+    now: datetime,
+    error_info: TaskErrorInfo | None | object,
+    result: dict[str, Any] | object,
+) -> None:
+    if status == "running":
+        _close_open_stage_events(conn, task.task_id, now)
+        _insert_stage_event(conn, _new_stage_event(task, phase=_phase_for(task.current_step, task.task_type), stage=task.current_step or "processing", event_type="started", now=now))
+    elif status == "retrying":
+        _close_open_stage_events(conn, task.task_id, now)
+        info = error_info if isinstance(error_info, TaskErrorInfo) else task.error_info
+        _insert_stage_event(conn, _new_stage_event(task, phase=_phase_for(task.current_step, task.task_type), stage=task.current_step or "processing", event_type="retrying", now=now, finish=True, error_info=info))
+    elif status in TERMINAL_TASK_STATUSES:
+        _close_open_stage_events(conn, task.task_id, now)
+        event_type = "completed" if status == "completed" else status
+        info = error_info if isinstance(error_info, TaskErrorInfo) else task.error_info
+        _insert_stage_event(conn, _new_stage_event(task, phase="complete", stage=task.current_step or status, event_type=event_type, now=now, finish=True, error_info=info))
+        if isinstance(result, dict):
+            for warning in result.get("warnings") or []:
+                _insert_stage_event(conn, _new_stage_event(task, phase="complete", stage=task.current_step or status, event_type="warning", now=now, finish=True, warning=str(warning)))
+    elif status == "cancel_requested" and previous_task.status != status:
+        _close_open_stage_events(conn, task.task_id, now)
+        _insert_stage_event(conn, _new_stage_event(task, phase="complete", stage="cancel_requested", event_type="started", now=now))
+
+
+def _row_to_stage_event(row: sqlite3.Row) -> TaskStageEvent:
+    return TaskStageEvent(
+        event_id=str(row["event_id"]),
+        task_id=str(row["task_id"]),
+        trace_id=str(row["trace_id"]),
+        phase=str(row["phase"]),
+        stage=str(row["stage"]),
+        event_type=str(row["event_type"]),
+        started_at=cast(datetime, _dt_from_text(str(row["started_at"]))),
+        finished_at=_dt_from_text(row["finished_at"]),
+        duration_ms=int(row["duration_ms"]) if row["duration_ms"] is not None else None,
+        input_version=int(row["input_version"]) if row["input_version"] is not None else None,
+        retry_count=int(row["retry_count"] or 0),
+        warning=str(row["warning"]) if row["warning"] else None,
+        error_code=str(row["error_code"]) if row["error_code"] else None,
+        error_message=str(row["error_message"]) if row["error_message"] else None,
+        recommended_action=str(row["recommended_action"]) if row["recommended_action"] else None,
+        details=_json_dict(row["details_json"]),
+    )
+
+
 def _row_to_task(row: sqlite3.Row) -> ImportTask:
     legacy_error = str(row["error"]) if row["error"] else None
     error_message = str(row["error_message"]) if row["error_message"] else None
@@ -1248,4 +1594,5 @@ def _row_to_task(row: sqlite3.Row) -> ImportTask:
         heartbeat_at=_dt_from_text(row["heartbeat_at"]),
         result_file_path=str(row["result_file_path"]) if row["result_file_path"] else None,
         error_info=error_info,
+        trace_id=str(row["trace_id"]) if row["trace_id"] else "",
     )

@@ -4,7 +4,9 @@ Scope: every public HTTP endpoint assembled by `apps/api/src/physics_vault_api/a
 
 ## Current architecture
 
-- **188 public routes**: 3 application infrastructure routes and 185 modular-router routes; no legacy compatibility routes remain.
+- Root-path compatibility routes remain available for existing callers. Every
+  non-root modular route now has an equivalent canonical `/api/...` route that
+  reuses the same handler and response contract.
 - Request flow: `React or MCP -> Router -> Service -> Repository -> Canonical DB or Review DB`. Long-running import and Office export work uses durable task records; Redis only transports jobs.
 - Legacy compatibility endpoints are intentionally retained where callers still use root paths. New capabilities belong in a dedicated router and must not create additional root-path contracts.
 - Embedding construction uses `services/embedding_runtime.py`; application startup no longer imports `legacy_app.py`. The remaining legacy file is isolated historical code pending an explicit offline-reference audit and deletion.
@@ -56,14 +58,36 @@ Each completed client has request-level tests for encoded IDs, bounded list para
 
 The next client split should move the remaining question-adjacent governance capabilities (images, favorites, collections, mistakes, annotations and metadata) by their own bounded domain, rather than growing `questionApi.ts` into another catch-all. The next contract gate should enforce response models for JSON Router endpoints in domains that have no deliberate file/HTML/stream exception; do not infer this from source-text formatting.
 
+### API-303 contract gate
+
+`apps/api/tests/test_api_contract_gate.py` runs as part of the standard backend
+test command. It rejects duplicate HTTP method/path pairs and operation IDs,
+JSON routes without an explicit response model, new bare-`dict` JSON responses,
+frontend `fetch` calls outside `apiClient.ts`, and duplicate MCP tool names.
+Downloads, HTML pages, and NDJSON streams must declare their response class
+explicitly and are checked as non-JSON contracts.
+
+API-301 completed the bare-map migration. `BARE_DICT_RESPONSE_ALLOWLIST` is
+intentionally empty, so every new bare `dict` response fails the contract gate.
+
+### API-301 canonical path migration
+
+`ApplicationContainer.router_manifest()` mounts each remaining root-path router
+twice: once at its established compatibility path and once below `/api`. The
+canonical copy is assembled from the same endpoint function, request schema,
+response model, and error mapping; no business logic is forked. For example,
+`/search/questions` maps to `/api/search/questions` and
+`/questions/{question_id}` maps to `/api/questions/{question_id}`. The root
+paths are retained until API-302 migrates every client caller.
+
 ## Architecture actions
 
 | Priority | Action | Safe implementation |
 |---|---|---|
 | P0 | Lightweight status polling | Completed: query the paged task endpoint for an aggregate count. |
-| P1 | Legacy migration | Move the 30 compatibility routes by domain: question read/write, review, papers/statistics, embeddings. Delete both implementation and manifest key only after callers move. |
-| P1 | Path normalization | New routes use `/api/<domain>`. Root routes such as `/search/questions`, `/filters/facets`, `/review-queue`, and legacy endpoints remain compatibility contracts until client migration. |
-| P1 | Contract consistency | New and migrated endpoints must use explicit response models, pagination metadata, and normalized error payloads instead of bare `dict` responses. |
+| P1 | Legacy migration | API-301 completed: root routes now have equivalent `/api/...` contracts; delete a compatibility route only after every caller migrates. |
+| P1 | Path normalization | API-301 completed: new work uses `/api/<domain>`; existing root routes are compatibility contracts until API-302 client migration. |
+| P1 | Contract consistency | API-301 completed: every public map response publishes a named response model. |
 | P2 | Client bundle size | Dynamically load PDF and rich-editor dependencies at the page that needs them. This is independent of the API contract. |
 
 ## Infrastructure routes
@@ -408,7 +432,6 @@ The next client split should move the remaining question-adjacent governance cap
 | Method | Path | Handler |
 |---|---|---|
 | GET | `/review-queue` | `list_review_queue` |
-| GET | `/api/review-queue` | `list_review_queue_api` |
 
 ## `review_save.py` - Review drafts and submission
 
@@ -474,7 +497,7 @@ The next client split should move the remaining question-adjacent governance cap
 ## Business flows
 
 1. **Import to canonical bank**: `/api/import/*` creates a batch, converts/cleans/structures/recognizes it, sends review tasks, and confirms approved questions into the canonical bank. Prefer the task endpoints for long-running stages.
-2. **Question governance**: `/search/questions` finds questions; image, annotation, favorite, collection, mistake, and metadata endpoints enrich governance. `return-to-review` moves a canonical question back into the review workflow.
+2. **Question governance**: `/api/search/questions` finds questions; image, annotation, favorite, collection, mistake, and metadata endpoints enrich governance. `return-to-review` moves a canonical question back into the review workflow.
 3. **Teaching production**: paper drafts, saved handouts, and teaching projects create an immutable export request; `/api/tasks/{task_id}` supplies status and download.
 4. **AI and MCP**: `/api/mcp/*` is the model-capability gateway, while `/api/ai/*` owns business results. MCP mirrors reuse the same service and must not fork business logic.
 

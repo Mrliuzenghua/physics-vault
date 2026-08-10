@@ -127,7 +127,7 @@ class ImportTaskCoordinator:
             summary["request_context"] = {
                 key: str(value)
                 for key, value in request_context.items()
-                if value is not None and key in {"source", "session_id", "operator"}
+                if value is not None and key in {"source", "session_id", "operator", "trace_id"}
             }
         task, created = self._create_or_get(operation, summary, max_attempts, idempotency_key)
         should_dispatch = created

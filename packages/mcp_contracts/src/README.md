@@ -16,6 +16,7 @@
 - `client.py`：MCP 客户端抽象与 stdio 客户端
 - `providers.py`：真实 / Mock / Disabled Provider
 - `container.py`：服务装配入口
+- `runtime/`：MCP 入口共用的数据库连接、服务工厂、参数/错误载荷与审计上下文；不承载业务工具或数据库表结构
 
 ## 快速使用
 

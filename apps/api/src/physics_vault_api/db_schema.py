@@ -27,6 +27,7 @@ IMPORT_TASK_LIFECYCLE_COLUMNS: dict[str, str] = {
     "error_message": "TEXT",
     "error_details": "TEXT",
     "error_retryable": "INTEGER NOT NULL DEFAULT 0",
+    "trace_id": "TEXT",
 }
 
 SCHEMA_SQL = f"""
@@ -42,6 +43,23 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     migration_id TEXT PRIMARY KEY,
     applied_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS operation_plans (
+    operation_id     TEXT PRIMARY KEY,
+    plan_json        TEXT NOT NULL,
+    expected_version TEXT,
+    status           TEXT NOT NULL CHECK(status IN ('planned', 'executing', 'completed', 'failed', 'expired')),
+    expires_at       TEXT NOT NULL,
+    result_json      TEXT,
+    error            TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    started_at       TEXT,
+    finished_at      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_operation_plans_status_expiry
+ON operation_plans(status, expires_at);
 
 CREATE TABLE IF NOT EXISTS import_pipeline_tasks (
     task_id             TEXT PRIMARY KEY,
@@ -65,7 +83,8 @@ CREATE TABLE IF NOT EXISTS import_pipeline_tasks (
     error_type          TEXT,
     error_message       TEXT,
     error_details       TEXT,
-    error_retryable     INTEGER NOT NULL DEFAULT 0
+    error_retryable     INTEGER NOT NULL DEFAULT 0,
+    trace_id            TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_import_pipeline_tasks_work
@@ -77,6 +96,9 @@ ON import_pipeline_tasks(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_import_pipeline_tasks_idempotency
 ON import_pipeline_tasks(idempotency_key);
 
+CREATE INDEX IF NOT EXISTS idx_import_pipeline_tasks_trace
+ON import_pipeline_tasks(trace_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS task_action_audit (
     audit_id       TEXT PRIMARY KEY,
     task_id        TEXT NOT NULL,
@@ -86,11 +108,41 @@ CREATE TABLE IF NOT EXISTS task_action_audit (
     operator       TEXT NOT NULL,
     confirmed      INTEGER NOT NULL DEFAULT 0,
     details_json   TEXT NOT NULL DEFAULT '{{}}',
-    created_at     TEXT NOT NULL
+    created_at     TEXT NOT NULL,
+    trace_id       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_action_audit_task_created
 ON task_action_audit(task_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_task_action_audit_trace_created
+ON task_action_audit(trace_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS task_stage_events (
+    event_id             TEXT PRIMARY KEY,
+    task_id              TEXT NOT NULL,
+    trace_id             TEXT NOT NULL,
+    phase                TEXT NOT NULL,
+    stage                TEXT NOT NULL,
+    event_type           TEXT NOT NULL,
+    started_at           TEXT NOT NULL,
+    finished_at          TEXT,
+    duration_ms          INTEGER,
+    input_version        INTEGER,
+    retry_count          INTEGER NOT NULL DEFAULT 0,
+    warning              TEXT,
+    error_code           TEXT,
+    error_message        TEXT,
+    recommended_action   TEXT,
+    details_json         TEXT NOT NULL DEFAULT '{{}}',
+    created_at           TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_stage_events_task_created
+ON task_stage_events(task_id, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_task_stage_events_trace_created
+ON task_stage_events(trace_id, created_at ASC);
 
 CREATE TABLE IF NOT EXISTS import_batches (
     import_batch_id   TEXT PRIMARY KEY,
@@ -530,7 +582,8 @@ def ensure_import_task_lifecycle_schema(conn: sqlite3.Connection) -> None:
             error_type TEXT,
             error_message TEXT,
             error_details TEXT,
-            error_retryable INTEGER NOT NULL DEFAULT 0
+            error_retryable INTEGER NOT NULL DEFAULT 0,
+            trace_id TEXT
         )
         """
     )
@@ -563,6 +616,12 @@ def ensure_import_task_lifecycle_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_import_pipeline_tasks_trace
+        ON import_pipeline_tasks(trace_id, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS task_action_audit (
             audit_id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL,
@@ -572,14 +631,62 @@ def ensure_import_task_lifecycle_schema(conn: sqlite3.Connection) -> None:
             operator TEXT NOT NULL,
             confirmed INTEGER NOT NULL DEFAULT 0,
             details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            trace_id TEXT
+        )
+        """
+    )
+    audit_columns = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+        for row in conn.execute("PRAGMA table_info(task_action_audit)")
+    }
+    if "trace_id" not in audit_columns:
+        conn.execute("ALTER TABLE task_action_audit ADD COLUMN trace_id TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_action_audit_task_created
+        ON task_action_audit(task_id, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_action_audit_trace_created
+        ON task_action_audit(trace_id, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_stage_events (
+            event_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            trace_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            duration_ms INTEGER,
+            input_version INTEGER,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            warning TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            recommended_action TEXT,
+            details_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL
         )
         """
     )
     conn.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_task_action_audit_task_created
-        ON task_action_audit(task_id, created_at DESC)
+        CREATE INDEX IF NOT EXISTS idx_task_stage_events_task_created
+        ON task_stage_events(task_id, created_at ASC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_stage_events_trace_created
+        ON task_stage_events(trace_id, created_at ASC)
         """
     )
 

@@ -26,6 +26,7 @@ class TaskErrorInfo(BaseModel):
 
 class TaskCenterItem(BaseModel):
     task_id: str
+    trace_id: str = ""
     task_type: str
     task_name: str
     status: TaskCenterStatus
@@ -43,6 +44,25 @@ class TaskCenterItem(BaseModel):
     result_summary: dict[str, Any] | None = None
 
 
+class TaskStageEventItem(BaseModel):
+    event_id: str
+    task_id: str
+    trace_id: str
+    phase: str
+    stage: str
+    event_type: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+    input_version: int | None = None
+    retry_count: int = 0
+    warning: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    recommended_action: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class TaskCenterListResponse(BaseModel):
     items: list[TaskCenterItem] = Field(default_factory=list)
     total: int
@@ -55,3 +75,24 @@ class TaskActionResponse(BaseModel):
     task: TaskCenterItem
     message: str
     original_task_id: str | None = None
+
+
+class TaskArtifactItem(BaseModel):
+    display_name: str
+    download_url: str
+    type: str
+
+
+class TaskAuditItem(BaseModel):
+    audit_id: str
+    action: str
+    created_at: datetime
+    operator: str
+    confirmed: bool
+
+
+class TaskContextResponse(BaseModel):
+    artifacts: list[TaskArtifactItem] = Field(default_factory=list)
+    audits: list[TaskAuditItem] = Field(default_factory=list)
+    retry_allowed: bool
+    retry_reason: str

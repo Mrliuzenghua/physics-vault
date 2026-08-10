@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from ..bootstrap import configure_workspace_imports
+
+configure_workspace_imports()
+
+from mcp_contracts.src.operation_plan import OperationPlan
+
 
 class AssetItem(BaseModel):
     """A single asset file with its reference status."""
@@ -59,6 +65,7 @@ class CleanupPreviewResponse(BaseModel):
     reclaimable_bytes: int = 0
     protected_count: int = 0
     scope: str = "question_bank"
+    operation_plan: OperationPlan | None = None
 
 
 class CacheCleanupPreviewResponse(BaseModel):
@@ -68,10 +75,15 @@ class CacheCleanupPreviewResponse(BaseModel):
     reclaimable_bytes: int = 0
     protected_count: int = 0
     active_batches: list[str] = Field(default_factory=list)
+    operation_plan: OperationPlan | None = None
 
 
 class CacheCleanupRequest(BaseModel):
     batch_id: str | None = None
+
+
+class ConfirmOperationPlanRequest(BaseModel):
+    operation_id: str
 
 
 class DuplicateAssetGroup(BaseModel):
@@ -97,6 +109,16 @@ class CleanupResponse(BaseModel):
     deleted_count: int = 0
     freed_bytes: int = 0
     errors: list[str] = Field(default_factory=list)
+    compatibility_mode: bool = False
+    migration_message: str | None = None
+
+
+class OperationPlanExecutionResponse(BaseModel):
+    operation_id: str
+    status: str
+    result: CleanupResponse | None = None
+    error: str | None = None
+    idempotent: bool = False
 
 
 class DeleteAssetResponse(BaseModel):

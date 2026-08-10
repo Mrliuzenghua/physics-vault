@@ -35,6 +35,7 @@ import {
   saveReviewedQuestions,
   uploadBatchImage,
 } from '../services/api';
+import { requestResponse } from '../services/apiClient';
 import {
   clearReviewCache,
   mediaAssetsFromDrafts,
@@ -554,7 +555,7 @@ export default function ReviewWorkbenchPage() {
       return;
     }
     try {
-      const response = await fetch(imageUrl);
+      const response = await requestResponse(imageUrl);
       const blob = await response.blob();
       await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })]);
       setCopyMessage('已复制图片');

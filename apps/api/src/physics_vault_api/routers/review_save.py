@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from ..schemas.contracts import ObjectMapResponse
 from ..repositories.review_drafts import ReviewDraftConflictError, ReviewDraftSnapshot, SQLiteReviewDraftRepository
 
 from ..schemas.review_save import (
@@ -63,7 +64,7 @@ def build_review_save_router(
             items=[draft_response(item) for item in draft_repository.list_versions(task_id, limit=limit)]
         )
 
-    @router.delete("/drafts/{task_id}")
+    @router.delete("/drafts/{task_id}", response_model=ObjectMapResponse)
     async def delete_review_draft(task_id: str) -> dict[str, bool | str]:
         draft_repository.delete(task_id)
         return {"task_id": task_id, "deleted": True}

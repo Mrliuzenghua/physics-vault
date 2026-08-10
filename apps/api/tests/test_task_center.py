@@ -142,11 +142,13 @@ def test_mcp_submission_records_source_session_operator_and_audit() -> None:
 
     persisted = repository.get(task["task_id"])
     assert persisted is not None
-    assert persisted.input_summary["request_context"] == {
+    request_context = persisted.input_summary["request_context"]
+    assert {key: request_context[key] for key in ("source", "session_id", "operator")} == {
         "source": "physics_vault_mcp",
         "session_id": "session-42",
         "operator": "teacher-li",
     }
+    assert request_context["trace_id"] == persisted.trace_id
     audits = repository.list_action_audits(task["task_id"])
     assert [item.audit_id for item in audits] == [audit_id]
     assert audits[0].action == "submit_ai_clean"

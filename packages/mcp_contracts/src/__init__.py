@@ -20,6 +20,17 @@ from .models import (
     VariantQuestion,
     VariantSourceQuestion,
 )
+from .tool_registry import (
+    DuplicateToolNameError,
+    ToolDomain,
+    ToolRegistry,
+    ToolRisk,
+    ToolSpec,
+    default_tool_registry,
+    discover_tools,
+    profile_tool_names,
+)
+from .operation_plan import OperationPlan, OperationTarget, build_operation_plan, snapshot_version
 
 __all__ = [
     "AnalysisGenerator",
@@ -27,6 +38,7 @@ __all__ = [
     "AppWarning",
     "DetectQuestionRegionsInput",
     "DocumentParser",
+    "DuplicateToolNameError",
     "ErrorCode",
     "GenerateAnalysisInput",
     "GenerateKnowledgeInput",
@@ -38,6 +50,8 @@ __all__ = [
     "MetadataConstraints",
     "MetadataGenerator",
     "MetadataTaskItem",
+    "OperationPlan",
+    "OperationTarget",
     "ParseDocumentInput",
     "ParseQuestionRegionInput",
     "QuestionFigure",
@@ -46,8 +60,17 @@ __all__ = [
     "ServiceContainer",
     "StandardQuestion",
     "SubQuestion",
+    "ToolDomain",
+    "ToolRegistry",
+    "ToolRisk",
+    "ToolSpec",
     "VariantQuestion",
     "VariantSourceQuestion",
     "WarningCode",
     "build_container",
+    "build_operation_plan",
+    "default_tool_registry",
+    "discover_tools",
+    "profile_tool_names",
+    "snapshot_version",
 ]

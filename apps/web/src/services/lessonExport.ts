@@ -4,6 +4,7 @@ import { imageFileUrl } from '../utils/imageUrl';
 import { extractLatexFragments, latexToSvgDataUri } from '../utils/mathSvg';
 import { getQuestionSourceLabel } from '../utils/questionSource';
 import { normalizeLessonPackageForOutput } from './lessonLayoutModel';
+import { requestResponse } from './apiClient';
 
 export interface LessonExportOptions {
   includeAnswers: boolean;
@@ -309,7 +310,7 @@ async function fetchFigureData(
   const url = imageFileUrl(path);
   if (!url) return null;
   try {
-    const response = await fetch(url);
+    const response = await requestResponse(url);
     if (!response.ok) return null;
     const blob = await response.blob();
     let sourceWidth = maxWidth;
@@ -336,7 +337,7 @@ async function fetchFigureDataUri(path?: string | null): Promise<string | null> 
   const url = imageFileUrl(path);
   if (!url) return null;
   try {
-    const response = await fetch(url);
+    const response = await requestResponse(url);
     if (!response.ok) return null;
     const blob = await response.blob();
     return await new Promise((resolve, reject) => {

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from ..schemas.contracts import BooleanMapResponse, IntegerMapResponse
 from ..schemas.ai_generation import (
     GenerateAnalysisRequest,
     GenerateAnalysisResponse,
@@ -67,6 +68,7 @@ def build_ai_generation_router(service: AiGenerationService) -> APIRouter:
 
     @router.delete(
         "/knowledge/cache",
+        response_model=IntegerMapResponse,
         summary="清空知识点生成缓存",
         description="删除全部知识点生成缓存条目。下次请求相同知识点将重新调用 AI。",
     )
@@ -76,6 +78,7 @@ def build_ai_generation_router(service: AiGenerationService) -> APIRouter:
 
     @router.delete(
         "/knowledge/cache/{cache_key}",
+        response_model=BooleanMapResponse,
         summary="删除单个缓存条目",
         description="按缓存键删除单条知识点生成缓存。",
     )

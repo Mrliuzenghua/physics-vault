@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from fastapi import APIRouter
+from fastapi.routing import APIRoute
 
 from .config import McpSettings, TaskQueueSettings
 from .paths import default_review_db_path
@@ -125,6 +126,48 @@ def _build_import_pipeline_service(
         document_parser=mcp_gateway.document_parser,
         mcp_gateway=mcp_gateway,
     )
+
+
+def _build_api_compatibility_router(router: APIRouter) -> APIRouter | None:
+    """Expose root-path compatibility routes under the canonical ``/api`` tree."""
+
+    root_routes = [
+        route
+        for route in router.routes
+        if isinstance(route, APIRoute) and route.path != "/" and not route.path.startswith("/api/")
+    ]
+    if not root_routes:
+        return None
+
+    canonical = APIRouter(prefix="/api")
+    for route in root_routes:
+        canonical.add_api_route(
+            route.path,
+            route.endpoint,
+            response_model=route.response_model,
+            status_code=route.status_code,
+            tags=route.tags,
+            dependencies=route.dependencies,
+            summary=route.summary,
+            description=route.description,
+            response_description=route.response_description,
+            responses=route.responses,
+            deprecated=route.deprecated,
+            methods=route.methods,
+            response_model_include=route.response_model_include,
+            response_model_exclude=route.response_model_exclude,
+            response_model_by_alias=route.response_model_by_alias,
+            response_model_exclude_unset=route.response_model_exclude_unset,
+            response_model_exclude_defaults=route.response_model_exclude_defaults,
+            response_model_exclude_none=route.response_model_exclude_none,
+            include_in_schema=route.include_in_schema,
+            response_class=route.response_class,
+            name=f"api_{route.name}",
+            callbacks=route.callbacks,
+            openapi_extra=route.openapi_extra,
+            strict_content_type=route.strict_content_type,
+        )
+    return canonical
 
 
 @dataclass(slots=True)
@@ -377,7 +420,7 @@ class ApplicationContainer:
             paper_service=PaperService(paper_repo),
         )
 
-    def router_manifest(self) -> Iterable[tuple[str, APIRouter]]:
+    def _base_router_manifest(self) -> Iterable[tuple[str, APIRouter]]:
         """Return the ordered Web router assembly manifest.
 
         Router factories belong here rather than in ``app.create_app`` so every
@@ -441,6 +484,14 @@ class ApplicationContainer:
         yield "metadata_batch", build_metadata_batch_router(self.metadata_batch_service)
         yield "paper_drafts", build_paper_drafts_router(self.paper_draft_service)
         yield "change_audit", build_change_audit_router(self.change_audit_service)
+
+    def router_manifest(self) -> Iterable[tuple[str, APIRouter]]:
+        """Return legacy routes plus their canonical ``/api`` compatibility aliases."""
+
+        for name, router in self._base_router_manifest():
+            yield name, router
+            if compatibility_router := _build_api_compatibility_router(router):
+                yield f"{name}_api_compat", compatibility_router
 
     def routers(self) -> Iterable[APIRouter]:
         """Expose only router instances to FastAPI while retaining manifest labels."""
