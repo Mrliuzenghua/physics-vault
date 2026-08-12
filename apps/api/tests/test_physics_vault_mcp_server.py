@@ -222,6 +222,90 @@ def test_publish_plan_token_is_version_bound_and_idempotent(tmp_path, monkeypatc
     assert len(saves) == 1
 
 
+def test_saved_handout_format_plan_is_version_bound_and_idempotent(tmp_path, monkeypatch) -> None:
+    module = _load_mcp_server()
+    service = module.OperationPlanService(module.OperationPlanRepository(tmp_path / "plans.sqlite3"))
+    monkeypatch.setattr(module, "_mcp_operation_plan_service", lambda: service)
+    state = {
+        "id": "handout-1",
+        "title": "力学讲义",
+        "currentVersion": 1,
+        "updatedAt": "2026-08-12T00:00:00+00:00",
+        "lessonPackage": {"formatSpec": {"styleConfig": {"fontSize": 10}}},
+    }
+    writes = []
+
+    monkeypatch.setattr(
+        module,
+        "_get_saved_handout_store",
+        lambda document_id: deepcopy(state) if document_id == "handout-1" else None,
+    )
+    monkeypatch.setattr(module, "format_spec_for_template", lambda _template_id, spec: deepcopy(spec or {}))
+    monkeypatch.setattr(
+        module,
+        "validate_format_spec",
+        lambda spec: {"ok": True, "formatSpec": deepcopy(spec)},
+    )
+
+    def update(document_id, format_spec, *, template_id=None):
+        assert document_id == "handout-1"
+        writes.append({"format_spec": deepcopy(format_spec), "template_id": template_id})
+        state["currentVersion"] += 1
+        state["updatedAt"] = f"saved-{len(writes)}"
+        state["formatTemplateId"] = template_id
+        state["lessonPackage"]["formatSpec"] = deepcopy(format_spec)
+        return deepcopy(state)
+
+    monkeypatch.setattr(module, "_update_saved_handout_format_store", update)
+    target = {"styleConfig": {"fontSize": 12}}
+
+    preview = module.apply_word_format_to_saved_handout(
+        "handout-1", template_id="teacher", format_spec=target
+    )
+    assert preview["dry_run"] is True
+    assert preview["plan_token"] == preview["operation_plan"]["operation_id"]
+
+    missing = module.apply_word_format_to_saved_handout(
+        "handout-1", template_id="teacher", format_spec=target, dry_run=False
+    )
+    assert missing["error_info"]["code"] == "PLAN_TOKEN_REQUIRED"
+
+    executed = module.apply_word_format_to_saved_handout(
+        "handout-1",
+        template_id="teacher",
+        format_spec=target,
+        dry_run=False,
+        plan_token=preview["plan_token"],
+    )
+    assert executed["ok"] is True
+    assert executed["idempotent"] is False
+    assert len(writes) == 1
+
+    replay = module.apply_word_format_to_saved_handout(
+        "handout-1",
+        template_id="teacher",
+        format_spec=target,
+        dry_run=False,
+        plan_token=preview["plan_token"],
+    )
+    assert replay["idempotent"] is True
+    assert len(writes) == 1
+
+    stale_preview = module.apply_word_format_to_saved_handout(
+        "handout-1", template_id="student", format_spec=target
+    )
+    state["updatedAt"] = "changed-after-preview"
+    conflict = module.apply_word_format_to_saved_handout(
+        "handout-1",
+        template_id="student",
+        format_spec=target,
+        dry_run=False,
+        plan_token=stale_preview["plan_token"],
+    )
+    assert conflict["error_info"]["code"] == "OPERATION_PLAN_VERSION_CONFLICT"
+    assert len(writes) == 1
+
+
 def test_catalog_profile_exposes_only_catalog_tools(monkeypatch) -> None:
     monkeypatch.setenv("PHYSICS_MCP_PROFILE", "catalog")
     module = _load_mcp_server()

@@ -246,7 +246,7 @@ _WRITE_POLICIES = {
     "rename_word_export_template": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.SAVED_HANDOUT, ToolReversibility.VERSIONED, ToolConfirmation.DIRECT),
     "restore_saved_handout_version": _write_policy(ToolRisk.HIGH, ToolImpactScope.SAVED_HANDOUT, ToolReversibility.VERSIONED, ToolConfirmation.PLAN_TOKEN),
     "rename_saved_handout": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.SAVED_HANDOUT, ToolReversibility.VERSIONED, ToolConfirmation.DIRECT),
-    "apply_word_format_to_saved_handout": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.SAVED_HANDOUT, ToolReversibility.VERSIONED, ToolConfirmation.DRY_RUN),
+    "apply_word_format_to_saved_handout": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.SAVED_HANDOUT, ToolReversibility.VERSIONED, ToolConfirmation.PLAN_TOKEN),
     "apply_word_format_to_workbench": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.WORKBENCH_DRAFT, ToolReversibility.VERSIONED, ToolConfirmation.DRY_RUN),
     "export_saved_handout": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.EXPORT_FILES, ToolReversibility.REGENERABLE, ToolConfirmation.DIRECT),
     "create_paper": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.CANONICAL_METADATA, ToolReversibility.AUDITED, ToolConfirmation.DIRECT),
