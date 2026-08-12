@@ -272,7 +272,7 @@ export default function TemplatesPage() {
       </aside>
 
       {/* ── Right: config editor ── */}
-      <main className="flex-1 overflow-y-auto p-6" style={{ background: 'var(--color-bg)' }}>
+      <section aria-label="模板配置" className="flex-1 overflow-y-auto p-6" style={{ background: 'var(--color-bg)' }}>
         <div className="mx-auto max-w-4xl space-y-5">
           {/* Header */}
           <div className="flex items-center justify-between">
@@ -642,7 +642,7 @@ export default function TemplatesPage() {
             </div>
           </Section>
         </div>
-      </main>
+      </section>
     </div>
   );
 }

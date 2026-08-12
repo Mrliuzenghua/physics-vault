@@ -27,6 +27,7 @@ def build_system_status_router(search_repo: QuestionSearchRepository) -> APIRout
             "db_exists": db_path.exists(),
             "search_uses_mock": bool(getattr(search_repo, "_mock", False)),
             "questions_count": 0,
+            "browsable_questions_count": 0,
             "text_index_count": 0,
             "fts_count": 0,
             "error": None,
@@ -37,6 +38,7 @@ def build_system_status_router(search_repo: QuestionSearchRepository) -> APIRout
         try:
             with connect_db(db_path, writable=False) as conn:
                 status["questions_count"] = _count_table(conn, "questions")
+                status["browsable_questions_count"] = _count_browsable_questions(conn)
                 status["text_index_count"] = _count_table(conn, "question_text_index")
                 status["fts_count"] = _count_table(conn, "question_search_fts")
         except Exception as exc:  # noqa: BLE001
@@ -54,3 +56,11 @@ def _count_table(conn: sqlite3.Connection, table: str) -> int:
     if row is None:
         return 0
     return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def _count_browsable_questions(conn: sqlite3.Connection) -> int:
+    """Match the default question-search scope used by the teaching UI."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM questions WHERE COALESCE(status, '') != 'archived_duplicate'"
+    ).fetchone()
+    return int(row[0])

@@ -134,7 +134,10 @@ export default function AppShell() {
       // endpoint avoids serialising a complete question card every poll.
       fetchDatabaseStatus()
         .then((databaseStatus) => {
-          if (!isCancelled) setQuestionCount(databaseStatus.questions_count);
+          if (!isCancelled) {
+            // Keep the shell count aligned with the default browse scope.
+            setQuestionCount(databaseStatus.browsable_questions_count ?? databaseStatus.questions_count);
+          }
         })
         .catch(() => {
           // Keep the previous count when the backend is temporarily unavailable.

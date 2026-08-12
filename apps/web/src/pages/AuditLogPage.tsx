@@ -248,7 +248,7 @@ export default function AuditLogPage() {
           )}
         </aside>
 
-        <main className="min-h-0 overflow-y-auto p-4">
+        <section aria-label="变更详情" className="min-h-0 overflow-y-auto p-4">
           {!selectedBatch ? (
             <EmptyState label="请选择一个变更批次" />
           ) : (
@@ -355,7 +355,7 @@ export default function AuditLogPage() {
               </section>
             </div>
           )}
-        </main>
+        </section>
       </div>
     </div>
   );

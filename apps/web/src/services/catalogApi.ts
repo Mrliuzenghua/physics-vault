@@ -3,6 +3,7 @@ import { request } from './apiClient.ts';
 
 export interface DatabaseStatus {
   questions_count: number;
+  browsable_questions_count?: number;
 }
 
 export async function fetchDatabaseStatus(): Promise<DatabaseStatus> { return request('/api/system/db-status'); }

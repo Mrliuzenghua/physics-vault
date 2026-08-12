@@ -57,6 +57,8 @@ EXPECTED_MCP_TOOLS = {
     "end_classroom_session",
     "list_filter_facets",
     "search_questions",
+    "search_questions_compact",
+    "search_questions_curated",
     "search_method_questions",
     "record_method_retrieval_feedback",
     "list_method_retrieval_feedback",

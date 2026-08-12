@@ -425,7 +425,10 @@ class InMemoryImportTaskRepository:
     def list_stage_events(self, task_id: str, limit: int = 200) -> list[TaskStageEvent]:
         with self._lock:
             events = [item for item in self._stage_events if item.task_id == task_id]
-            events.sort(key=lambda item: (item.started_at, item.event_id))
+            # Events emitted by one transition intentionally share a timestamp.
+            # Python's stable sort preserves their append order in that case,
+            # which keeps a terminal event before its attached warnings.
+            events.sort(key=lambda item: item.started_at)
             return deepcopy(events[:_normalize_limit(limit)])
 
     def _require_task(self, task_id: str) -> ImportTask:
@@ -1211,7 +1214,10 @@ class SQLiteImportTaskRepository:
                 """
                 SELECT * FROM task_stage_events
                 WHERE task_id = ?
-                ORDER BY started_at ASC, event_id ASC
+                -- Several events can be emitted in one transition and share a
+                -- timestamp. rowid preserves their insertion order, matching
+                -- the in-memory repository and the user-facing timeline.
+                ORDER BY started_at ASC, rowid ASC
                 LIMIT ?
                 """,
                 (task_id, _normalize_limit(limit)),

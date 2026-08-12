@@ -63,7 +63,7 @@ export default function StatusBar({
     <footer className="hidden h-6 flex-shrink-0 items-center gap-4 border-t border-[var(--color-border)] bg-[var(--color-bg-sidebar)] px-3 md:flex">
       <span className="text-[11px] text-[var(--color-text-muted)]">
         <span className="font-semibold text-[var(--color-text-secondary)]">{questionCount.toLocaleString()}</span>
-        {' '}道题
+        {' '}题库题目
       </span>
 
       {lastImportTime && (

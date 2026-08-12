@@ -229,7 +229,7 @@ export default function TaskCenterPage() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1440px] px-4 py-4 sm:px-6">
+      <section aria-label="任务列表" className="mx-auto max-w-[1440px] px-4 py-4 sm:px-6">
         <section aria-label="任务筛选" className="mb-4 flex flex-wrap items-end gap-2 border-b border-slate-200 pb-4">
           <FilterSelect label="状态" value={status} onChange={(value) => resetPage(setStatus, value)}>
             <option value="">全部状态</option>
@@ -307,7 +307,7 @@ export default function TaskCenterPage() {
             <button type="button" disabled={page >= data.pages} onClick={() => setPage((value) => value + 1)} className="inline-flex h-8 items-center gap-1 rounded border border-slate-300 px-2 disabled:opacity-40">下一页<ChevronRight size={14} /></button>
           </nav>
         )}
-      </main>
+      </section>
     </div>
   );
 }

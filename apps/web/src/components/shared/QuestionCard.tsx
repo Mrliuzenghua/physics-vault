@@ -174,7 +174,7 @@ export default function QuestionCard({
                   <img
                     key={figure.fig_uuid || `${question.question_id}-${figureIndex}`}
                     src={imageThumbnailUrl(figure.local_path, 640) || ''}
-                    alt=""
+                    alt={figure.caption?.trim() ? `题目附图 ${figureIndex + 1}：${figure.caption.trim()}` : `题目附图 ${figureIndex + 1}`}
                     loading="lazy"
                     decoding="async"
                     draggable={false}
@@ -247,10 +247,10 @@ export default function QuestionCard({
                 <MoreHorizontal size={16} />
               </summary>
               <div className="absolute bottom-9 right-0 z-20 w-40 overflow-hidden rounded-md border border-[var(--color-border)] bg-white p-1 shadow-lg">
-                {onReturnToReview && <MenuAction onClick={() => !returningToReview && onReturnToReview(question.question_id)}><RotateCcw size={14} />{returningToReview ? '送回中...' : '打回校对'}</MenuAction>}
-                {onToggleFavorite && <MenuAction onClick={() => onToggleFavorite(question.question_id)}><Star size={14} />{favorite ? '已收藏' : '收藏'}</MenuAction>}
-                {onAddToAiContext && <MenuAction onClick={() => !inAiContext && onAddToAiContext(question)} disabled={inAiContext}><Bot size={14} />{inAiContext ? '已在 AI 上下文' : '加入 AI 上下文'}</MenuAction>}
-                {onDelete && <MenuAction onClick={() => onDelete(question)} disabled={deleting} danger><Trash2 size={14} />{deleting ? '删除中...' : '删除题目'}</MenuAction>}
+                {onReturnToReview && <MenuAction label={returningToReview ? '正在送回校对' : '打回校对'} onClick={() => !returningToReview && onReturnToReview(question.question_id)}><RotateCcw size={14} />{returningToReview ? '送回中...' : '打回校对'}</MenuAction>}
+                {onToggleFavorite && <MenuAction label={favorite ? '取消收藏' : '收藏题目'} onClick={() => onToggleFavorite(question.question_id)}><Star size={14} />{favorite ? '已收藏' : '收藏'}</MenuAction>}
+                {onAddToAiContext && <MenuAction label={inAiContext ? '题目已在 AI 上下文' : '加入 AI 上下文'} onClick={() => !inAiContext && onAddToAiContext(question)} disabled={inAiContext}><Bot size={14} />{inAiContext ? '已在 AI 上下文' : '加入 AI 上下文'}</MenuAction>}
+                {onDelete && <MenuAction label={deleting ? '正在删除题目' : '删除题目'} onClick={() => onDelete(question)} disabled={deleting} danger><Trash2 size={14} />{deleting ? '删除中...' : '删除题目'}</MenuAction>}
               </div>
             </details>
           )}
@@ -280,12 +280,14 @@ export default function QuestionCard({
   );
 }
 
-function MenuAction({ children, onClick, disabled = false, danger = false }: { children: ReactNode; onClick: () => void; disabled?: boolean; danger?: boolean }) {
+function MenuAction({ children, label, onClick, disabled = false, danger = false }: { children: ReactNode; label: string; onClick: () => void; disabled?: boolean; danger?: boolean }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-label={label}
+      title={label}
       className={`flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-xs font-semibold transition-colors disabled:opacity-50 ${danger ? 'text-rose-600 hover:bg-rose-50' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'}`}
     >
       {children}

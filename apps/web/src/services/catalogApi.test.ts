@@ -16,10 +16,10 @@ test('catalog client uses canonical API endpoints', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     urls.push(String(input));
-    return Response.json(urls.length === 1 ? { questions_count: 24 } : urls.length === 7 ? { status: 'ok' } : []);
+    return Response.json(urls.length === 1 ? { questions_count: 25, browsable_questions_count: 24 } : urls.length === 7 ? { status: 'ok' } : []);
   };
   try {
-    assert.deepEqual(await fetchDatabaseStatus(), { questions_count: 24 });
+    assert.deepEqual(await fetchDatabaseStatus(), { questions_count: 25, browsable_questions_count: 24 });
     assert.deepEqual(await fetchImages({ q: 'force diagram' }), []);
     assert.deepEqual(await fetchPapers(), []);
     assert.deepEqual(await fetchPaperQuestions('paper/a b'), []);

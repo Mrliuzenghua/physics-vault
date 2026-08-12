@@ -352,7 +352,7 @@ export default function AssetsManagerPage() {
       )}
       {error && <div className="bg-[var(--color-red-light)] px-5 py-2 text-xs text-[var(--color-red)]">{error}</div>}
 
-      <main className="min-h-0 flex-1 overflow-y-auto p-5">
+      <section aria-label="素材列表" className="min-h-0 flex-1 overflow-y-auto p-5">
         {loading && !data ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--color-text-muted)]">正在扫描素材…</div>
         ) : !error && (data?.assets.length ?? 0) === 0 ? (
@@ -411,7 +411,7 @@ export default function AssetsManagerPage() {
             ))}
           </div>
         )}
-      </main>
+      </section>
 
       {pagination && pagination.total_items > 0 && (
         <footer className="flex flex-shrink-0 items-center justify-between border-t border-[var(--color-border)] bg-[var(--color-bg-card)] px-5 py-2 text-xs text-[var(--color-text-muted)]">

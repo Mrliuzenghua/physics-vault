@@ -1268,7 +1268,7 @@ export default function AiChatPage() {
 
   return (
     <div className="relative flex h-full min-h-0 overflow-hidden bg-slate-50 text-slate-900">
-      <main className="flex min-w-0 flex-1 flex-col">
+      <section aria-label="AI 对话" className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-[56px] shrink-0 items-center justify-between border-b border-slate-200 bg-white/95 px-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -1491,7 +1491,7 @@ export default function AiChatPage() {
             </div>
           </div>
         </footer>
-      </main>
+      </section>
 
       <aside className={`${sidePanelOpen ? 'flex' : 'hidden'} absolute inset-y-0 right-0 z-20 w-[260px] flex-col border-l border-slate-200 bg-white shadow-[-16px_0_36px_rgba(15,23,42,0.12)]`}>
         <div className="flex h-[46px] shrink-0 items-center gap-1 border-b border-slate-200 px-2">

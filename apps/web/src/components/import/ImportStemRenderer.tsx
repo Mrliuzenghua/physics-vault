@@ -76,7 +76,7 @@ export default function ImportStemRenderer({ title, figures, maxImageHeight = 18
               </span>
             );
           }
-          return <ResizableStemFigure key={i} figure={fig} maxImageHeight={maxImageHeight} thumbnailWidth={thumbnailWidth} questionId={questionId} onScaleChange={onScaleChange} onLayoutChange={onLayoutChange} compact={compactImages} />;
+          return <ResizableStemFigure key={i} figure={fig} figureIndex={Math.max(1, safeFigures.findIndex((item) => item.fig_uuid === fig.fig_uuid) + 1)} maxImageHeight={maxImageHeight} thumbnailWidth={thumbnailWidth} questionId={questionId} onScaleChange={onScaleChange} onLayoutChange={onLayoutChange} compact={compactImages} />;
         }
         if (!part.trim()) return null;
         return <LatexRenderer key={i} text={part} />;
@@ -87,6 +87,7 @@ export default function ImportStemRenderer({ title, figures, maxImageHeight = 18
 
 function ResizableStemFigure({
   figure,
+  figureIndex,
   maxImageHeight,
   thumbnailWidth,
   questionId,
@@ -95,6 +96,7 @@ function ResizableStemFigure({
   compact,
 }: {
   figure: Figure;
+  figureIndex: number;
   maxImageHeight: number;
   thumbnailWidth?: number;
   questionId?: string;
@@ -181,10 +183,11 @@ function ResizableStemFigure({
           <span style={compact
             ? { display: 'block', maxWidth: '100%' }
             : { display: 'block', width: `${scale}%`, marginLeft: alignment === 'left' ? 0 : 'auto', marginRight: alignment === 'right' ? 0 : 'auto', transition: 'width 0.16s ease' }}>
-            <img
-              src={activeSrc}
-              alt={figure.caption || figure.fig_uuid}
-              decoding="async"
+          <img
+            src={activeSrc}
+            alt={figure.caption?.trim() ? `题图 ${figureIndex}：${figure.caption.trim()}` : `题图 ${figureIndex}`}
+            loading="lazy"
+            decoding="async"
               onError={() => setBroken(true)}
               draggable={false}
               onClick={stopImageInteraction}
