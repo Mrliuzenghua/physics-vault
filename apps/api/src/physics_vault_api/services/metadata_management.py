@@ -28,6 +28,46 @@ KNOWLEDGE_SUGGESTION_THRESHOLD = 18
 # points always remain review-only.
 KNOWLEDGE_AUTO_FIX_THRESHOLD = 95
 
+# Topic names in the taxonomy are intentionally concise, while exam questions
+# often use a phenomenon, apparatus or classroom nickname instead.  These cues
+# bridge that vocabulary gap without inventing new topic ids.  Scores below the
+# auto-fix threshold keep alias matches review-only.
+KNOWLEDGE_CONCEPT_CUES: dict[str, tuple[tuple[str, int], ...]] = {
+    "天然放射现象": (("半衰期", 94), ("放射性", 92), ("α衰变", 94), ("β衰变", 94), ("伽马射线", 90), ("γ射线", 90)),
+    "物理学史与科学方法": (("控制变量", 94), ("科学方法", 92), ("研究方案", 82)),
+    "物理量、单位与测量": (("估算", 88), ("曝光时间", 92), ("有效数字", 92), ("测量误差", 94)),
+    "机械波的传播": (("简谐横波", 94), ("波速", 92), ("波长", 88), ("波的传播", 94), ("质点振动", 86)),
+    "波形图与振动图像": (("波形图", 94), ("波形曲线", 92), ("振动图像", 94), ("振动曲线", 92)),
+    "抛体运动": (("平抛", 94), ("斜抛", 94), ("抛物线轨迹", 90)),
+    "匀变速直线运动": (("速度时间图像", 92), ("位移时间图像", 90), ("v-t图像", 92), ("x-t图像", 90)),
+    "万有引力定律": (("中心天体", 88), ("黑洞", 90), ("开普勒", 88), ("引力提供向心力", 92)),
+    "卫星轨道": (("人造卫星", 94), ("环绕速度", 90), ("椭圆轨道", 86)),
+    "电流与电阻定律": (("伏安特性", 94), ("伏安特性曲线", 94), ("电阻率", 90)),
+    "测量电阻与电源电动势": (("多用电表", 90), ("欧姆表", 92), ("测电阻", 90), ("测电动势", 92)),
+    "串并联电路": (("串联电路", 92), ("并联电路", 92), ("限流接法", 86), ("分压接法", 88)),
+    "电势能与电势": (("等势面", 94), ("电势差", 92), ("电势能", 94)),
+    "电场强度": (("电场线", 92), ("试探电荷", 88), ("电场力", 86), ("场强", 94)),
+    "电容器": (("平行板电容", 94), ("电容", 90)),
+    "光的波粒二象性": (("光子", 94), ("光量子", 94), ("普朗克常量", 92), ("光子数", 94)),
+    "狭义相对论基本假设": (("光速不变", 94), ("惯性参考系", 92), ("真空中的光速", 94)),
+    "LC振荡回路": (("LC振荡", 94), ("振荡电路", 92), ("接收电路", 88), ("固有频率", 88)),
+    "分子动能与势能": (("分子势能", 94), ("分子间作用力", 92), ("分子距离", 84)),
+    "折射定律": (("折射率", 94), ("入射角", 86), ("折射角", 90), ("三棱镜", 86)),
+    "全反射": (("临界角", 94), ("没有光线射出", 88), ("恰好不射出", 90)),
+    "理想气体状态方程": (("一定量的理想气体", 94), ("气缸", 84), ("活塞", 82)),
+    "碰撞": (("碰撞过程", 94), ("碰撞结束", 94), ("碰后", 90)),
+}
+
+# A single shared bigram such as “关系” or “速度” is not evidence of a
+# knowledge point.  Removing these generic fragments prevents false positives
+# like “随时间变化关系” -> “功能关系”.
+GENERIC_KNOWLEDGE_BIGRAMS = {
+    "关系", "定律", "运动", "能量", "质量", "速度", "时间", "变化", "平衡",
+    "实验", "测量", "方法", "电路", "图像", "作用", "过程", "状态", "条件",
+    "分析", "问题", "规律", "描述", "基本", "现象", "大小", "方向", "物理",
+    "牛顿", "顿第", "第一", "一律", "第二", "二定", "第三", "三定",
+}
+
 
 class MetadataManagementService:
     """Autonomous maintenance of searchable question metadata."""
@@ -181,7 +221,8 @@ class MetadataManagementService:
             question_rows = conn.execute(
                 f"""
                 SELECT q.question_id, q.canonical_title, qti.title_text, qti.stem_text,
-                       qti.stem_clean_text, qti.analysis_text
+                       qti.stem_clean_text, qti.analysis_text, qti.options_json,
+                       qti.figures_json
                 FROM questions q
                 LEFT JOIN question_text_index qti ON qti.question_id = q.question_id
                 WHERE q.question_id IN ({placeholders})
@@ -213,21 +254,65 @@ class MetadataManagementService:
             if question is None:
                 missing_ids.append(question_id)
                 continue
-            evidence_text = " ".join(
-                str(question.get(key) or "")
-                for key in ("canonical_title", "title_text", "stem_clean_text", "stem_text", "analysis_text")
+            prompt_text = " ".join([
+                str(question.get("canonical_title") or ""),
+                str(question.get("title_text") or ""),
+                _question_prompt_only(question.get("stem_clean_text")),
+                _question_prompt_only(question.get("stem_text")),
+            ])
+            options_text = _question_options_text(
+                question.get("options_json"),
+                question.get("stem_clean_text"),
+                question.get("stem_text"),
             )
-            corpus = _search_text(evidence_text)
+            figure_text, figure_count = _question_figure_text(question.get("figures_json"))
+            analysis_text = str(question.get("analysis_text") or "")
+            primary_corpus = _search_text(prompt_text)
+            options_corpus = _search_text(options_text)
+            figure_corpus = _search_text(figure_text)
+            analysis_corpus = _search_text(analysis_text)
+            content_quality = _assess_question_content(
+                prompt_text,
+                options_text,
+                figure_count=figure_count,
+                has_figure_text=bool(figure_text.strip()),
+            )
             ranked = sorted(
-                ((_knowledge_score(corpus, point), point) for point in points),
+                (
+                    (
+                        _question_knowledge_score(
+                            point,
+                            prompt_corpus=primary_corpus,
+                            options_corpus=options_corpus,
+                            figure_corpus=figure_corpus,
+                            analysis_corpus=analysis_corpus,
+                        ),
+                        point,
+                    )
+                    for point in points
+                ),
                 key=lambda item: (-item[0], item[1]["topic3_id"]),
             )
-            suggestions = [
+            suggestions = [] if content_quality["status"] != "ok" else [
                 {
                     **point,
                     "score": score,
                     "confidence": _confidence(score),
-                    "rationale": _knowledge_rationale(corpus, point, score),
+                    "evidence_source": _question_knowledge_source(
+                        point,
+                        prompt_corpus=primary_corpus,
+                        options_corpus=options_corpus,
+                        figure_corpus=figure_corpus,
+                        analysis_corpus=analysis_corpus,
+                    ),
+                    "rationale": _question_knowledge_rationale(
+                        point,
+                        score=score,
+                        prompt_corpus=primary_corpus,
+                        options_corpus=options_corpus,
+                        figure_corpus=figure_corpus,
+                        analysis_corpus=analysis_corpus,
+                    ),
                 }
                 for score, point in ranked
                 if score >= KNOWLEDGE_SUGGESTION_THRESHOLD
@@ -246,9 +331,14 @@ class MetadataManagementService:
                 if int(point["score"]) >= 45
             ][:MAX_KNOWLEDGE_POINTS_PER_QUESTION]
             top_score = int(suggestions[0]["score"]) if suggestions else 0
+            second_score = int(suggestions[1]["score"]) if len(suggestions) > 1 else 0
+            top_topic_name = _search_text(suggestions[0].get("topic3_name")) if suggestions else ""
+            top_has_primary_direct_evidence = bool(top_topic_name and top_topic_name in primary_corpus)
             primary_score = score_by_id.get(current_ids[0], 0) if current_ids else 0
 
-            if not current_ids:
+            if content_quality["status"] != "ok":
+                status = str(content_quality["status"])
+            elif not current_ids:
                 status = "missing"
             elif top_score >= KNOWLEDGE_AUTO_FIX_THRESHOLD and suggested_ids[0] not in current_ids and primary_score < 45:
                 status = "suspected_mismatch"
@@ -273,6 +363,8 @@ class MetadataManagementService:
             auto_fix_safe = (
                 status == "missing"
                 and top_score >= KNOWLEDGE_AUTO_FIX_THRESHOLD
+                and top_has_primary_direct_evidence
+                and top_score - second_score >= 20
                 and len(recommended_ids) == 1
                 and recommended_ids != current_ids
             )
@@ -280,13 +372,22 @@ class MetadataManagementService:
                 "question_id": question_id,
                 "title_preview": " ".join(str(question.get("title_text") or question.get("canonical_title") or "").split())[:160],
                 "status": status,
+                "content_quality": content_quality,
                 "current": current_with_evidence,
                 "suggestions": suggestions,
                 "recommended_topic3_ids": recommended_ids,
                 "target_count": MAX_KNOWLEDGE_POINTS_PER_QUESTION,
                 "auto_fix_safe": auto_fix_safe,
+                "auto_fix_evidence": {
+                    "top_score": top_score,
+                    "second_score": second_score,
+                    "score_margin": top_score - second_score,
+                    "direct_match_in_title_or_stem": top_has_primary_direct_evidence,
+                },
                 "reason": (
-                    "题目正文直接命中了新的三级知识点，且当前主知识点缺少文本证据。"
+                    str(content_quality["message"])
+                    if status in {"content_fragment", "suspected_cross_subject"}
+                    else "题目正文直接命中了新的三级知识点，且当前主知识点缺少文本证据。"
                     if status == "suspected_mismatch"
                     else "题目还有证据充分的辅助知识点，可补充到最多三个。"
                     if status == "incomplete"
@@ -319,11 +420,39 @@ class MetadataManagementService:
                 "requested": len(clean_ids),
                 "diagnosed": len(items),
                 "missing_questions": len(missing_ids),
+                "missing": sum(item["status"] == "missing" for item in items),
                 "healthy": sum(item["status"] == "healthy" for item in items),
                 "incomplete": sum(item["status"] == "incomplete" for item in items),
                 "suspected_mismatch": sum(item["status"] == "suspected_mismatch" for item in items),
                 "needs_review": sum(item["status"] == "needs_review" for item in items),
+                "content_fragment_count": sum(item["status"] == "content_fragment" for item in items),
+                "suspected_cross_subject_count": sum(item["status"] == "suspected_cross_subject" for item in items),
+                "option_evidence_count": sum(
+                    bool(item["content_quality"].get("has_option_evidence")) for item in items
+                ),
+                "figure_review_required_count": sum(
+                    bool(item["content_quality"].get("requires_image_review")) for item in items
+                ),
                 "safe_fix_count": len(safe_updates),
+                "high_confidence_top_count": sum(
+                    bool(item["suggestions"]) and int(item["suggestions"][0]["score"]) >= 80
+                    for item in items
+                ),
+                "review_ready_count": sum(
+                    bool(item["suggestions"])
+                    and int(item["suggestions"][0]["score"]) >= 80
+                    and int(item["auto_fix_evidence"]["score_margin"]) >= 15
+                    for item in items
+                ),
+                "ambiguous_top_count": sum(
+                    bool(item["suggestions"])
+                    and int(item["auto_fix_evidence"]["score_margin"]) < 10
+                    for item in items
+                ),
+                "no_reliable_suggestion_count": sum(
+                    not item["suggestions"] or int(item["suggestions"][0]["score"]) < 45
+                    for item in items
+                ),
             },
         }
 
@@ -952,24 +1081,289 @@ def _bigrams(value: str) -> set[str]:
     return {value[index : index + 2] for index in range(len(value) - 1)}
 
 
-def _knowledge_score(corpus: str, point: dict[str, Any]) -> int:
+def _knowledge_score(
+    corpus: str,
+    point: dict[str, Any],
+    *,
+    primary_corpus: str | None = None,
+) -> int:
+    full_score = _knowledge_score_for_text(corpus, point)
+    if primary_corpus is None:
+        return full_score
+    # An exact match found only in an appended answer or analysis is useful for
+    # review, but must rank below strong evidence in the actual question.
+    primary_score = _knowledge_score_for_text(primary_corpus, point)
+    return max(primary_score, min(full_score, 88))
+
+
+def _knowledge_score_for_text(corpus: str, point: dict[str, Any]) -> int:
     topic3 = _search_text(point.get("topic3_name"))
     topic2 = _search_text(point.get("topic2_name"))
     topic1 = _search_text(point.get("topic1_name"))
     if topic3 and topic3 in corpus:
         return 100
+    cue_score = max(
+        (
+            score
+            for cue, score in KNOWLEDGE_CONCEPT_CUES.get(str(point.get("topic3_name") or ""), ())
+            if _search_text(cue) in corpus
+        ),
+        default=0,
+    )
     score = 0
+    source_pairs = _distinctive_bigrams(corpus)
     for value, weight in ((topic3, 70), (topic2, 35), (topic1, 15)):
         if not value:
             continue
         if value in corpus:
             score = max(score, weight)
-        source_pairs = _bigrams(corpus)
-        value_pairs = _bigrams(value)
-        if value_pairs:
+        value_pairs = _distinctive_bigrams(value)
+        overlap_count = len(source_pairs & value_pairs)
+        # Fuzzy evidence must contain at least two distinctive fragments.
+        # Exact two-character terms were already handled by `value in corpus`.
+        if value_pairs and overlap_count >= 2:
             overlap = len(source_pairs & value_pairs) / len(value_pairs)
             score = max(score, round(weight * overlap))
-    return score
+        elif value_pairs and overlap_count == 1:
+            # Preserve a weak nearest-parent hint for terse queries, but keep it
+            # below the suggestion threshold.
+            score = max(score, min(round(weight / len(value_pairs)), 12))
+    return max(score, cue_score)
+
+
+def _distinctive_bigrams(value: str) -> set[str]:
+    return _bigrams(value) - GENERIC_KNOWLEDGE_BIGRAMS
+
+
+def _question_knowledge_layers(
+    point: dict[str, Any],
+    *,
+    prompt_corpus: str,
+    options_corpus: str,
+    figure_corpus: str,
+    analysis_corpus: str,
+) -> list[tuple[str, str, int]]:
+    layers = (
+        ("prompt", prompt_corpus, 100),
+        ("options", options_corpus, 90),
+        ("figure", figure_corpus, 86),
+        ("analysis", analysis_corpus, 84),
+    )
+    return [
+        (source, corpus, min(_knowledge_score_for_text(corpus, point), cap) if corpus else 0)
+        for source, corpus, cap in layers
+    ]
+
+
+def _question_knowledge_score(
+    point: dict[str, Any],
+    *,
+    prompt_corpus: str,
+    options_corpus: str,
+    figure_corpus: str,
+    analysis_corpus: str,
+) -> int:
+    return max(
+        (
+            score
+            for _, _, score in _question_knowledge_layers(
+                point,
+                prompt_corpus=prompt_corpus,
+                options_corpus=options_corpus,
+                figure_corpus=figure_corpus,
+                analysis_corpus=analysis_corpus,
+            )
+        ),
+        default=0,
+    )
+
+
+def _question_knowledge_source(
+    point: dict[str, Any],
+    *,
+    prompt_corpus: str,
+    options_corpus: str,
+    figure_corpus: str,
+    analysis_corpus: str,
+) -> str:
+    layers = _question_knowledge_layers(
+        point,
+        prompt_corpus=prompt_corpus,
+        options_corpus=options_corpus,
+        figure_corpus=figure_corpus,
+        analysis_corpus=analysis_corpus,
+    )
+    best = max(layers, key=lambda item: item[2], default=("none", "", 0))
+    return best[0] if best[2] > 0 else "none"
+
+
+def _question_knowledge_rationale(
+    point: dict[str, Any],
+    *,
+    score: int,
+    prompt_corpus: str,
+    options_corpus: str,
+    figure_corpus: str,
+    analysis_corpus: str,
+) -> str:
+    source = _question_knowledge_source(
+        point,
+        prompt_corpus=prompt_corpus,
+        options_corpus=options_corpus,
+        figure_corpus=figure_corpus,
+        analysis_corpus=analysis_corpus,
+    )
+    corpus_by_source = {
+        "prompt": prompt_corpus,
+        "options": options_corpus,
+        "figure": figure_corpus,
+        "analysis": analysis_corpus,
+    }
+    label_by_source = {
+        "prompt": "题干",
+        "options": "选项",
+        "figure": "图片说明",
+        "analysis": "解析",
+    }
+    corpus = corpus_by_source.get(source, "")
+    phrase = _knowledge_evidence_phrase(corpus, point)
+    topic3 = str(point.get("topic3_name") or "")
+    if phrase:
+        suffix = "；解析证据已降权。" if source == "analysis" else "。"
+        return f"{label_by_source.get(source, '题目')}中的“{phrase}”支持“{topic3}”{suffix}"
+    return f"{label_by_source.get(source, '题目')}与“{topic3}”存在多个有效关键词重合，分层匹配分为 {score}。"
+
+
+def _knowledge_evidence_phrase(corpus: str, point: dict[str, Any]) -> str | None:
+    topic3 = str(point.get("topic3_name") or "")
+    if _search_text(topic3) in corpus:
+        return topic3
+    return next(
+        (
+            cue
+            for cue, _ in KNOWLEDGE_CONCEPT_CUES.get(topic3, ())
+            if _search_text(cue) in corpus
+        ),
+        None,
+    )
+
+
+def _decode_json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return decoded if isinstance(decoded, list) else []
+
+
+def _question_options_text(options_json: Any, *stem_values: Any) -> str:
+    parts: list[str] = []
+    for option in _decode_json_list(options_json):
+        if isinstance(option, dict):
+            text = option.get("text") or option.get("content") or option.get("value")
+        else:
+            text = option
+        if text:
+            parts.append(str(text))
+    if not parts:
+        for value in stem_values:
+            block = _question_option_block(value)
+            if block:
+                parts.append(block)
+    return " ".join(parts)
+
+
+def _question_figure_text(figures_json: Any) -> tuple[str, int]:
+    figures = [item for item in _decode_json_list(figures_json) if isinstance(item, dict)]
+    parts = [
+        str(value)
+        for figure in figures
+        for key in ("caption", "caption_text", "alt", "alt_text", "description", "ocr_text")
+        if (value := figure.get(key))
+    ]
+    return " ".join(parts), len(figures)
+
+
+def _assess_question_content(
+    prompt_text: str,
+    options_text: str,
+    *,
+    figure_count: int,
+    has_figure_text: bool,
+) -> dict[str, Any]:
+    combined = f"{prompt_text} {options_text}".strip()
+    without_latex_commands = re.sub(r"\\[A-Za-z]+", "", combined)
+    semantic_char_count = len(re.findall(r"[A-Za-z\u4e00-\u9fff]", without_latex_commands))
+    has_option_evidence = bool(options_text.strip())
+    if semantic_char_count < 8:
+        requires_image_review = figure_count > 0 and not has_figure_text
+        return {
+            "status": "content_fragment",
+            "semantic_char_count": semantic_char_count,
+            "has_option_evidence": has_option_evidence,
+            "has_figure_text_evidence": has_figure_text,
+            "requires_image_review": requires_image_review,
+            "issues": ["正文有效文字过少", *( ["存在图片但没有可检索的图片说明"] if requires_image_review else [])],
+            "message": (
+                "题目正文疑似表格或图片切分片段，需要回看原图后修复，暂不推荐知识点。"
+                if requires_image_review
+                else "题目正文有效信息不足，疑似导入切分片段，暂不推荐知识点。"
+            ),
+        }
+
+    normalized = _search_text(combined).casefold()
+    chemistry_cues = (
+        "mol", "反应热", "化学键", "键能", "焓变", "氧化还原", "有机物", "化学反应", "元素周期",
+    )
+    matched_chemistry = [cue for cue in chemistry_cues if _search_text(cue).casefold() in normalized]
+    if len(matched_chemistry) >= 2:
+        return {
+            "status": "suspected_cross_subject",
+            "semantic_char_count": semantic_char_count,
+            "has_option_evidence": has_option_evidence,
+            "has_figure_text_evidence": has_figure_text,
+            "requires_image_review": False,
+            "issues": [f"检测到跨学科线索：{'、'.join(matched_chemistry[:4])}"],
+            "message": "题目包含多个化学学科线索，疑似混入物理题库，已停止知识点推荐。",
+        }
+    return {
+        "status": "ok",
+        "semantic_char_count": semantic_char_count,
+        "has_option_evidence": has_option_evidence,
+        "has_figure_text_evidence": has_figure_text,
+        "requires_image_review": False,
+        "issues": [],
+        "message": "题目内容可用于知识点诊断。",
+    }
+
+
+def _question_prompt_only(value: Any) -> str:
+    """Exclude options and appended answers/analyses from prompt evidence."""
+    text = str(value or "")
+    answer_positions = [
+        position
+        for marker in ("【答案】", "【解析】", "答案：", "解析：")
+        if (position := text.find(marker)) >= 0
+    ]
+    before_answer = text[: min(answer_positions)] if answer_positions else text
+    option_match = re.search(r"(?:^|\n)\s*(?:>\s*)?[A-HＡ-Ｈ][.．、]\s*", before_answer)
+    return before_answer[: option_match.start()] if option_match else before_answer
+
+
+def _question_option_block(value: Any) -> str:
+    text = str(value or "")
+    answer_positions = [
+        position
+        for marker in ("【答案】", "【解析】", "答案：", "解析：")
+        if (position := text.find(marker)) >= 0
+    ]
+    before_answer = text[: min(answer_positions)] if answer_positions else text
+    option_match = re.search(r"(?:^|\n)\s*(?:>\s*)?[A-HＡ-Ｈ][.．、]\s*", before_answer)
+    return before_answer[option_match.start() :] if option_match else ""
 
 
 def _confidence(score: int) -> str:
@@ -980,10 +1374,39 @@ def _confidence(score: int) -> str:
     return "low"
 
 
-def _knowledge_rationale(corpus: str, point: dict[str, Any], score: int) -> str:
+def _knowledge_rationale(
+    corpus: str,
+    point: dict[str, Any],
+    score: int,
+    *,
+    primary_corpus: str | None = None,
+) -> str:
     topic3 = str(point.get("topic3_name") or "")
-    if _search_text(topic3) in corpus:
+    topic3_key = _search_text(topic3)
+    if primary_corpus is not None and topic3_key in primary_corpus:
         return f"题目文本直接包含“{topic3}”。"
+    matched_primary_cue = next(
+        (
+            cue
+            for cue, _ in KNOWLEDGE_CONCEPT_CUES.get(topic3, ())
+            if primary_corpus is not None and _search_text(cue) in primary_corpus
+        ),
+        None,
+    )
+    if matched_primary_cue:
+        return f"题干中的“{matched_primary_cue}”是“{topic3}”的直接语义证据。"
+    if topic3_key in corpus:
+        return f"题目解析或补充文本直接包含“{topic3}”，已按辅助证据降权。"
+    matched_cue = next(
+        (
+            cue
+            for cue, _ in KNOWLEDGE_CONCEPT_CUES.get(topic3, ())
+            if _search_text(cue) in corpus
+        ),
+        None,
+    )
+    if matched_cue:
+        return f"题目中的“{matched_cue}”与“{topic3}”直接相关。"
     return f"题目文本与“{topic3}”及其上级目录存在关键词重合，规则匹配分为 {score}。"
 
 

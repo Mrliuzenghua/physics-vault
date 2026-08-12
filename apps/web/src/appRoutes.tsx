@@ -5,6 +5,7 @@ const AssetsManagerPage = lazy(() => import('./pages/AssetsManagerPage'));
 const AuditLogPage = lazy(() => import('./pages/AuditLogPage'));
 const BrowsePage = lazy(() => import('./pages/BrowsePage'));
 const ClassroomPage = lazy(() => import('./pages/ClassroomPage'));
+const CatalogMaintenancePage = lazy(() => import('./pages/CatalogMaintenancePage'));
 const CollectionsPage = lazy(() => import('./pages/CollectionsPage'));
 const ComposePage = lazy(() => import('./pages/ComposePage'));
 const DashboardPage = lazy(() => import('./pages/DashboardPage'));
@@ -21,6 +22,7 @@ export const appRoutes = [
   { path: '/', element: <DashboardPage /> },
   { path: '/dashboard', element: <DashboardPage /> },
   { path: '/browse', element: <BrowsePage /> },
+  { path: '/catalog-maintenance', element: <CatalogMaintenancePage /> },
   { path: '/question/new', element: <Navigate to="/browse" replace /> },
   { path: '/question/:questionId', element: <Navigate to="/browse" replace /> },
   { path: '/settings', element: <SettingsPage /> },

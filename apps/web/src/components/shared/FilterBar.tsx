@@ -2,17 +2,12 @@ import type React from 'react';
 import { useCallback, useEffect, useState } from 'react';
 import { Search, SlidersHorizontal, X } from 'lucide-react';
 
-import type { SearchFilters } from '../../types';
+import type { FilterFacets, SearchFilters } from '../../types';
 
 interface Props {
   filters: SearchFilters;
   onChange: (filters: SearchFilters) => void;
-  facets?: {
-    years: number[];
-    modules: string[];
-    question_types: string[];
-    difficulties: string[];
-  };
+  facets?: FilterFacets;
 }
 
 const MODULES = ['力学', '电磁学', '热学', '光学', '原子物理', '实验'];
@@ -36,6 +31,8 @@ const SEARCH_MODES = [
   { value: 'hybrid', label: '混合' },
   { value: 'similar', label: '相似' },
 ];
+
+const INTERNAL_FACET_VALUES = new Set(['demo', 'standard']);
 
 export default function FilterBar({ filters, onChange, facets }: Props) {
   const [keyword, setKeyword] = useState(filters.query || '');
@@ -74,11 +71,13 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
   };
 
   const hasAdvancedFilters = Boolean(
-    filters.year || filters.module || filters.question_type || filters.difficulty || filters.status,
+    filters.year || filters.region || filters.exam_type || filters.module || filters.question_type || filters.difficulty || filters.status,
   );
   const activeFilterCount = [
     filters.query,
     filters.year,
+    filters.region,
+    filters.exam_type,
     filters.module,
     filters.question_type,
     filters.difficulty,
@@ -87,6 +86,25 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
     filters.topic2_id,
     filters.topic3_id,
   ].filter(Boolean).length;
+  const years = Array.from(new Set([
+    ...(facets?.years || []),
+    ...(filters.year ? [filters.year] : []),
+  ])).sort((left, right) => right - left);
+  const regions = (facets?.regions || []).filter(
+    (value) => !INTERNAL_FACET_VALUES.has(value.trim().toLowerCase()),
+  );
+  const examTypes = (facets?.exam_types || []).filter(
+    (value) => !INTERNAL_FACET_VALUES.has(value.trim().toLowerCase()),
+  );
+  const clearAdvanced = () => update({
+    year: undefined,
+    region: undefined,
+    exam_type: undefined,
+    module: undefined,
+    question_type: undefined,
+    difficulty: undefined,
+    status: undefined,
+  });
   const showAdvanced = advancedOpen || hasAdvancedFilters;
 
   return (
@@ -162,11 +180,35 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
           onChange={(event) => update({ year: event.target.value ? Number(event.target.value) : undefined })}
           className="h-8 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs text-[var(--color-text-main)] outline-none focus:border-[var(--color-accent)]"
         >
-          <option value="">年份</option>
-          {(facets?.years || [2025, 2024, 2023, 2022, 2021, 2020]).map((year) => (
+          <option value="">年份{facets ? `（${years.length}）` : '（加载中）'}</option>
+          {years.map((year) => (
             <option key={year} value={year}>
               {year}
             </option>
+          ))}
+        </select>
+
+        <select
+          value={filters.region || ''}
+          onChange={(event) => update({ region: event.target.value || undefined })}
+          disabled={!facets}
+          className="h-8 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs text-[var(--color-text-main)] outline-none focus:border-[var(--color-accent)] disabled:opacity-60"
+        >
+          <option value="">地区</option>
+          {regions.map((region) => (
+            <option key={region} value={region}>{region}</option>
+          ))}
+        </select>
+
+        <select
+          value={filters.exam_type || ''}
+          onChange={(event) => update({ exam_type: event.target.value || undefined })}
+          disabled={!facets}
+          className="h-8 rounded-md border border-[var(--color-border)] bg-white px-2 text-xs text-[var(--color-text-main)] outline-none focus:border-[var(--color-accent)] disabled:opacity-60"
+        >
+          <option value="">考试类型</option>
+          {examTypes.map((examType) => (
+            <option key={examType} value={examType}>{examType}</option>
           ))}
         </select>
 
@@ -224,7 +266,7 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
         {hasAdvancedFilters && (
           <button
             type="button"
-            onClick={clearAll}
+            onClick={clearAdvanced}
             className="h-8 cursor-pointer rounded-md px-2 text-xs font-bold text-[var(--color-danger)] hover:bg-[var(--color-danger-soft)]"
           >
             重置高级筛选

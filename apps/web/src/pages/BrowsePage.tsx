@@ -218,6 +218,8 @@ export default function BrowsePage() {
       query: searchParams.get('query') || undefined,
       search_mode: (searchParams.get('search_mode') as SearchFilters['search_mode']) || (searchParams.get('query') ? 'hybrid' : 'browse'),
       year: searchParams.get('year') ? Number(searchParams.get('year')) : undefined,
+      region: searchParams.get('region') || undefined,
+      exam_type: searchParams.get('exam_type') || undefined,
       module: searchParams.get('module') || undefined,
       question_type: searchParams.get('question_type') || undefined,
       difficulty: searchParams.get('difficulty') || undefined,
@@ -283,8 +285,8 @@ export default function BrowsePage() {
         if (!cancelled) setFacets(data);
       })
       .catch(() => {
-        // Keep the filter bar usable with its built-in fallback if the facet
-        // endpoint is temporarily unavailable.
+        // Keep text search available; database-backed facet controls remain
+        // visibly unavailable instead of showing a misleading hard-coded list.
         if (!cancelled) setFacets(undefined);
       });
 
@@ -342,12 +344,15 @@ export default function BrowsePage() {
     () =>
       [
         filters.question_type && `题型: ${QUESTION_TYPE_LABELS[filters.question_type] || filters.question_type}`,
+        filters.year && `年份: ${filters.year}`,
+        filters.region && `地区: ${filters.region}`,
+        filters.exam_type && `考试类型: ${filters.exam_type}`,
         filters.difficulty && `难度: ${buildDifficultyStars(Number(filters.difficulty))}`,
         filters.module && `模块: ${filters.module}`,
         filters.topic3_id && `考点: ${filters.topic3_id}`,
         filters.query && `关键词: ${filters.query}`,
       ].filter(Boolean) as string[],
-    [filters.difficulty, filters.module, filters.query, filters.question_type, filters.topic3_id],
+    [filters.difficulty, filters.exam_type, filters.module, filters.query, filters.question_type, filters.region, filters.topic3_id, filters.year],
   );
 
   const randomConditionSummary = useMemo(

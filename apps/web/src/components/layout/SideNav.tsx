@@ -6,6 +6,7 @@ import {
   ClipboardList,
   FileStack,
   FolderTree,
+  HeartPulse,
   History,
   Images,
   LayoutDashboard,
@@ -38,6 +39,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { path: '/review', icon: CheckSquare, label: '校对中心' },
       { path: '/collections', icon: FolderTree, label: '目录与合集' },
       { path: '/assets-manager', icon: Images, label: '素材管理' },
+      { path: '/catalog-maintenance', icon: HeartPulse, label: '目录维护' },
     ],
   },
   {

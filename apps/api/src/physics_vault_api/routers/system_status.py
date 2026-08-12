@@ -4,16 +4,22 @@ import sqlite3
 from typing import Any
 
 from fastapi import APIRouter
+from fastapi import Query
 
 from ..schemas.contracts import HealthResponse, ObjectMapResponse
 from ..database import connect_db
 from ..paths import default_db_path
 from ..repositories.question_search import QuestionSearchRepository
 from ..services.catalog_health import build_catalog_health_report
+from ..services.metadata_management import MetadataManagementService
 
 
-def build_system_status_router(search_repo: QuestionSearchRepository) -> APIRouter:
+def build_system_status_router(
+    search_repo: QuestionSearchRepository,
+    metadata_management_service: MetadataManagementService | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/api/system", tags=["system-status"])
+    metadata_service = metadata_management_service or MetadataManagementService()
 
     @router.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -55,6 +61,52 @@ def build_system_status_router(search_repo: QuestionSearchRepository) -> APIRout
                 return build_catalog_health_report(conn)
         with connect_db(db_path, writable=False) as conn:
             return build_catalog_health_report(conn)
+
+    @router.get("/catalog-health/missing-knowledge", response_model=ObjectMapResponse)
+    def missing_knowledge_review(
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        """Return evidence-backed suggestions for active questions without knowledge links."""
+        db_path = default_db_path()
+        if not db_path.exists():
+            return {"items": [], "total": 0, "limit": limit, "offset": offset, "summary": {}}
+        with connect_db(db_path, writable=False) as conn:
+            total = int(conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM questions q
+                WHERE COALESCE(q.status, '') != 'archived_duplicate'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM question_knowledge_points qkp
+                      WHERE qkp.question_id = q.question_id
+                  )
+                """
+            ).fetchone()[0])
+            rows = conn.execute(
+                """
+                SELECT q.question_id
+                FROM questions q
+                WHERE COALESCE(q.status, '') != 'archived_duplicate'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM question_knowledge_points qkp
+                      WHERE qkp.question_id = q.question_id
+                  )
+                ORDER BY q.updated_at DESC, q.question_id
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            ).fetchall()
+        diagnosis = metadata_service.diagnose_question_knowledge_points(
+            [str(row["question_id"]) for row in rows]
+        )
+        return {
+            "items": diagnosis.get("items", []),
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "summary": diagnosis.get("summary", {}),
+        }
 
     return router
 

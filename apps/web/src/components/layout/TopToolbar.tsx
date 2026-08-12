@@ -16,6 +16,7 @@ const ROUTE_LABELS: Array<[string, string]> = [
   ['/settings/mcp', 'AI 与 MCP'],
   ['/assets-manager', '素材管理'],
   ['/collections', '目录与合集'],
+  ['/catalog-maintenance', '目录维护'],
   ['/dashboard', '工作概览'],
   ['/browse', '题库'],
   ['/import', '导入识别'],

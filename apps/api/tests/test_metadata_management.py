@@ -193,6 +193,153 @@ def test_knowledge_suggestions_return_only_existing_topic_ids(tmp_path: Path) ->
     assert weak["unmatched"][0]["suggested_parent"]["topic2_name"] == "万有引力与航天"
 
 
+def test_knowledge_suggestions_use_physics_cues_and_suppress_generic_words(tmp_path: Path) -> None:
+    service = MetadataManagementService(_database(tmp_path))
+    created = service.create_knowledge_points(
+        [
+            {"topic1_id": "KP-MECH", "topic1_name": "力学", "topic2_name": "机械能", "topic3_name": "功能关系"},
+            {"topic1_id": "KP-MODERN", "topic1_name": "近代物理", "topic2_name": "原子核物理", "topic3_name": "天然放射现象"},
+            {"topic1_id": "KP-MECH", "topic1_name": "力学", "topic2_name": "万有引力与航天", "topic3_name": "宇宙速度"},
+            {"topic1_id": "KP-BASE", "topic1_name": "物理学基础", "topic2_name": "基础概念与科学方法", "topic3_name": "物理量、单位与测量"},
+        ]
+    )
+    by_name = {item["topic3_name"]: item["topic3_id"] for item in created["created"]}
+
+    decay = service.suggest_knowledge_points(
+        [{"question_id": "decay", "title": "碘131发生β衰变，原子核个数随时间变化，求半衰期"}]
+    )
+    assert decay["matched"][0]["suggestions"][0]["topic3_id"] == by_name["天然放射现象"]
+    assert decay["matched"][0]["suggestions"][0]["score"] >= 90
+    assert all(item["topic3_name"] != "功能关系" for item in decay["matched"][0]["suggestions"])
+
+    measurement = service.suggest_knowledge_points(
+        [{"question_id": "camera", "title": "根据高速摄影照片估算曝光时间"}]
+    )
+    assert measurement["matched"][0]["suggestions"][0]["topic3_id"] == by_name["物理量、单位与测量"]
+
+    generic_only = service.suggest_knowledge_points(
+        [{"question_id": "generic", "title": "某物理量随时间变化关系如下"}]
+    )
+    assert generic_only["summary"]["unmatched"] == 1
+    assert generic_only["unmatched"][0]["suggested_parent"]["topic1_name"] == "物理学基础"
+
+
+def test_knowledge_suggestions_do_not_confuse_numbered_laws(tmp_path: Path) -> None:
+    service = MetadataManagementService(_database(tmp_path))
+    created = service.create_knowledge_points(
+        [
+            {"topic1_id": "KP-MECH", "topic1_name": "力学", "topic2_name": "相互作用与牛顿运动定律", "topic3_name": "牛顿第二定律"},
+            {"topic1_id": "KP-MECH", "topic1_name": "力学", "topic2_name": "相互作用与牛顿运动定律", "topic3_name": "牛顿第三定律"},
+            {"topic1_id": "KP-THERMAL", "topic1_name": "热学", "topic2_name": "热力学定律", "topic3_name": "热力学第二定律"},
+        ]
+    )
+    by_name = {item["topic3_name"]: item["topic3_id"] for item in created["created"]}
+
+    result = service.suggest_knowledge_points(
+        [{"question_id": "law", "title": "根据牛顿第二定律求物体的加速度"}]
+    )
+
+    suggestions = result["matched"][0]["suggestions"]
+    assert suggestions[0]["topic3_id"] == by_name["牛顿第二定律"]
+    assert [item["topic3_name"] for item in suggestions] == ["牛顿第二定律"]
+
+
+def test_diagnosis_prioritizes_primary_question_over_analysis_matches(tmp_path: Path) -> None:
+    db_path = _database(tmp_path)
+    service = MetadataManagementService(db_path)
+    created = service.create_knowledge_points(
+        [
+            {"topic1_id": "KP-MECH", "topic1_name": "力学", "topic2_name": "动量", "topic3_name": "碰撞"},
+            {"topic1_id": "KP-MECH", "topic1_name": "力学", "topic2_name": "相互作用与牛顿运动定律", "topic3_name": "牛顿第二定律"},
+            {"topic1_id": "KP-MECH", "topic1_name": "力学", "topic2_name": "机械能", "topic3_name": "动能定理"},
+        ]
+    )
+    by_name = {item["topic3_name"]: item["topic3_id"] for item in created["created"]}
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM question_knowledge_points WHERE question_id='q-1'")
+        conn.execute(
+            "UPDATE question_text_index SET stem_text=?, analysis_text=? WHERE question_id='q-1'",
+            ("物块与弹簧接触后发生碰撞，碰撞结束时两物块分离。", "根据牛顿第二定律和动能定理计算。"),
+        )
+
+    diagnosis = service.diagnose_question_knowledge_points(["q-1"])
+    item = diagnosis["items"][0]
+
+    assert item["suggestions"][0]["topic3_id"] == by_name["碰撞"]
+    assert item["suggestions"][0]["score"] == 100
+    secondary_scores = {suggestion["topic3_name"]: suggestion["score"] for suggestion in item["suggestions"][1:]}
+    assert secondary_scores["牛顿第二定律"] == 84
+    assert secondary_scores["动能定理"] == 84
+    assert item["suggestions"][1]["evidence_source"] == "analysis"
+    assert diagnosis["summary"]["high_confidence_top_count"] == 1
+    assert diagnosis["summary"]["no_reliable_suggestion_count"] == 0
+
+
+def test_diagnosis_uses_options_as_separate_lower_weight_evidence(tmp_path: Path) -> None:
+    db_path = _database(tmp_path)
+    service = MetadataManagementService(db_path)
+    created = service.create_knowledge_points(
+        [{"topic1_id": "KP-EM", "topic1_name": "电磁学", "topic2_name": "静电场", "topic3_name": "电场强度"}]
+    )
+    topic_id = created["created"][0]["topic3_id"]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM question_knowledge_points WHERE question_id='q-1'")
+        conn.execute(
+            "UPDATE question_text_index SET stem_text=?, options_json=?, analysis_text=NULL WHERE question_id='q-1'",
+            (
+                "如图所示，关于该装置，下列说法正确的是（ ）",
+                '[{"opt":"A","content":"M点的电场强度大于N点"},{"opt":"B","content":"两点电势相等"}]',
+            ),
+        )
+
+    diagnosis = service.diagnose_question_knowledge_points(["q-1"])
+    item = diagnosis["items"][0]
+
+    assert item["suggestions"][0]["topic3_id"] == topic_id
+    assert item["suggestions"][0]["score"] == 90
+    assert item["suggestions"][0]["evidence_source"] == "options"
+    assert "选项" in item["suggestions"][0]["rationale"]
+    assert item["content_quality"]["has_option_evidence"] is True
+    assert diagnosis["summary"]["option_evidence_count"] == 1
+
+
+def test_diagnosis_quarantines_numeric_fragments_and_cross_subject_questions(tmp_path: Path) -> None:
+    db_path = _database(tmp_path)
+    service = MetadataManagementService(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM question_knowledge_points WHERE question_id='q-1'")
+        conn.execute(
+            "UPDATE questions SET canonical_title='10.0 0.352 2.84' WHERE question_id='q-1'"
+        )
+        conn.execute(
+            "UPDATE question_text_index SET title_text='10.0 0.352 2.84', stem_text='10.0 0.352 2.84', options_json='[]', figures_json=?, analysis_text=NULL WHERE question_id='q-1'",
+            ('[{"fig_uuid":"figure-only","local_path":"figure.png"}]',),
+        )
+
+    fragment = service.diagnose_question_knowledge_points(["q-1"])
+    item = fragment["items"][0]
+    assert item["status"] == "content_fragment"
+    assert item["suggestions"] == []
+    assert item["content_quality"]["requires_image_review"] is True
+    assert fragment["summary"]["content_fragment_count"] == 1
+    assert fragment["summary"]["figure_review_required_count"] == 1
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE questions SET canonical_title='反应热计算' WHERE question_id='q-1'"
+        )
+        conn.execute(
+            "UPDATE question_text_index SET title_text='反应热计算', stem_text=?, figures_json='[]' WHERE question_id='q-1'",
+            ("已知1mol物质的化学键键能，求该化学反应的反应热。",),
+        )
+
+    cross_subject = service.diagnose_question_knowledge_points(["q-1"])
+    item = cross_subject["items"][0]
+    assert item["status"] == "suspected_cross_subject"
+    assert item["suggestions"] == []
+    assert cross_subject["summary"]["suspected_cross_subject_count"] == 1
+
+
 def test_organize_knowledge_tree_creates_reuses_and_binds(tmp_path: Path) -> None:
     db_path = _database(tmp_path)
     service = MetadataManagementService(db_path)
@@ -298,6 +445,32 @@ def test_knowledge_maintenance_does_not_auto_replace_an_existing_label(tmp_path:
             "SELECT topic3_id, source FROM question_knowledge_points WHERE question_id='q-1'"
         ).fetchone()
     assert repaired == (by_name["折射定律"], "ai_metadata")
+
+
+def test_missing_knowledge_requires_unambiguous_primary_text_evidence_for_auto_fix(tmp_path: Path) -> None:
+    db_path = _database(tmp_path)
+    service = MetadataManagementService(db_path)
+    created = service.create_knowledge_points(
+        [{"topic1_id": "KP-EM", "topic1_name": "电磁学", "topic2_name": "电磁感应", "topic3_name": "法拉第电磁感应定律"}]
+    )
+    topic_id = created["created"][0]["topic3_id"]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM question_knowledge_points WHERE question_id='q-1'")
+        conn.execute(
+            "UPDATE question_text_index SET stem_text='线圈位于变化磁场中', analysis_text='根据法拉第电磁感应定律计算' WHERE question_id='q-1'"
+        )
+
+    analysis_only = service.diagnose_question_knowledge_points(["q-1"])["items"][0]
+    assert analysis_only["recommended_topic3_ids"] == [topic_id]
+    assert analysis_only["auto_fix_safe"] is False
+    assert analysis_only["auto_fix_evidence"]["direct_match_in_title_or_stem"] is False
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE question_text_index SET stem_text='根据法拉第电磁感应定律求感应电动势' WHERE question_id='q-1'")
+
+    primary_direct = service.diagnose_question_knowledge_points(["q-1"])["items"][0]
+    assert primary_direct["auto_fix_safe"] is True
+    assert primary_direct["auto_fix_evidence"]["direct_match_in_title_or_stem"] is True
 
 
 def test_knowledge_search_uses_fuzzy_chinese_aliases(tmp_path: Path) -> None:

@@ -330,7 +330,7 @@ function CatalogHealthPanel({ report, loading }: { report: CatalogHealthReport |
                 <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-[#7b8998]">{issue.description}</p>
                 {sample && (
                   <Link
-                    to={`/browse?query=${encodeURIComponent(sample.question_id)}&search_mode=strict`}
+                    to={issue.code === 'missing_knowledge' ? '/catalog-maintenance' : `/browse?query=${encodeURIComponent(sample.question_id)}&search_mode=strict`}
                     title={sample.title}
                     className="mt-2 inline-flex max-w-full items-center gap-1 text-[11px] font-semibold text-[#1768c5] hover:text-[#1159aa]"
                   >
