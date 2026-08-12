@@ -3,8 +3,19 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 
 from ..schemas.contracts import IntegerMapResponse, StringMapResponse
-from ..schemas.knowledge_points import KnowledgePointItem, QuestionKnowledgePointBatchItem, QuestionKnowledgePointLink, QuestionKnowledgePointUpsert
+from ..schemas.knowledge_points import (
+    ConfirmQuestionKnowledgePointOperationRequest,
+    KnowledgePointItem,
+    QuestionKnowledgePointBatchItem,
+    QuestionKnowledgePointLink,
+    QuestionKnowledgePointOperationExecutionResponse,
+    QuestionKnowledgePointOperationResult,
+    QuestionKnowledgePointReplacePreviewRequest,
+    QuestionKnowledgePointReplacePreviewResponse,
+    QuestionKnowledgePointUpsert,
+)
 from ..services.knowledge_points import KnowledgePointService
+from ..services.operation_plans import OperationPlanError, OperationPlanVersionConflict
 
 
 def build_knowledge_points_router(service: KnowledgePointService) -> APIRouter:
@@ -56,6 +67,49 @@ def build_knowledge_points_router(service: KnowledgePointService) -> APIRouter:
         if links is None:
             raise HTTPException(status_code=404, detail="Question not found")
         return links
+
+    @router.post(
+        "/api/questions/{question_id}/knowledge-points/preview-replace",
+        response_model=QuestionKnowledgePointReplacePreviewResponse,
+    )
+    def preview_question_knowledge_point_replacement(
+        question_id: str,
+        payload: QuestionKnowledgePointReplacePreviewRequest,
+    ) -> QuestionKnowledgePointReplacePreviewResponse:
+        try:
+            result = service.preview_replacement_for_question(question_id, payload.items, payload.reason)
+            return QuestionKnowledgePointReplacePreviewResponse.model_validate(result)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.post(
+        "/api/questions/knowledge-points/confirm-operation",
+        response_model=QuestionKnowledgePointOperationExecutionResponse,
+    )
+    def confirm_question_knowledge_point_replacement(
+        payload: ConfirmQuestionKnowledgePointOperationRequest,
+    ) -> QuestionKnowledgePointOperationExecutionResponse:
+        try:
+            result = service.confirm_replacement_operation(payload.operation_id)
+            return QuestionKnowledgePointOperationExecutionResponse(
+                operation_id=result.operation_id,
+                status=result.status,
+                result=QuestionKnowledgePointOperationResult.model_validate(result.result) if result.result else None,
+                error=result.error,
+                idempotent=result.idempotent,
+            )
+        except OperationPlanVersionConflict as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "OPERATION_PLAN_VERSION_CONFLICT", "message": str(exc)},
+            ) from exc
+        except OperationPlanError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "OPERATION_PLAN_NOT_FOUND", "message": str(exc)},
+            ) from exc
 
     @router.put("/questions/{question_id}/knowledge-points/{rank}", response_model=QuestionKnowledgePointLink)
     def upsert_question_knowledge_point(question_id: str, rank: int, payload: QuestionKnowledgePointUpsert) -> QuestionKnowledgePointLink:

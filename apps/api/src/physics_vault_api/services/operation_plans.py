@@ -245,3 +245,32 @@ def build_tag_maintenance_plan(
         version_snapshot=version_snapshot,
         reversible=True,
     )
+
+
+def build_question_knowledge_point_replace_plan(
+    *,
+    question_id: str,
+    before_links: list[dict[str, Any]],
+    replacement_items: list[dict[str, Any]],
+    reason: str,
+) -> OperationPlan:
+    """Persist one question's exact knowledge-point replacement for confirmation."""
+    replacement = {
+        "question_id": question_id,
+        "items": replacement_items,
+        "reason": reason,
+    }
+    version_snapshot = {
+        "question_id": question_id,
+        "before_links": before_links,
+        "knowledge_point_replacement": replacement,
+    }
+    return build_operation_plan(
+        action="questions.knowledge_points.replace",
+        targets=[{"type": "question", "id": question_id, "label": question_id}],
+        summary=f"Replace knowledge-point links for question {question_id}.",
+        warnings=["The replacement is rejected if this question’s knowledge-point links change before confirmation."],
+        expected_version=snapshot_version(version_snapshot),
+        version_snapshot=version_snapshot,
+        reversible=True,
+    )

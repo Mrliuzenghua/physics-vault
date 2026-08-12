@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from pathlib import Path
 
 from ..database import connect_db
 from ..paths import default_db_path
@@ -11,8 +12,13 @@ from ..schemas.knowledge_points import KnowledgePointItem, QuestionKnowledgePoin
 class KnowledgePointRepository:
     """Read-only knowledge-point aggregates from the canonical question bank."""
 
-    def __init__(self, db_path: str | None = None) -> None:
-        self._db_path = db_path
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        self._db_path = str(db_path) if db_path else None
+
+    @property
+    def database_path(self) -> str | None:
+        """Return the explicit database path when one was supplied."""
+        return self._db_path
 
     def question_counts_by_topic3(self) -> dict[str, int]:
         db_path = self._db_path or str(default_db_path())
@@ -113,6 +119,17 @@ class KnowledgePointRepository:
             except sqlite3.IntegrityError as exc:
                 connection.rollback()
                 raise ValueError("Knowledge point replacement failed") from exc
+        return self.list_for_question(question_id)
+
+    def validate_replacement_for_question(
+        self, question_id: str, items: list[QuestionKnowledgePointBatchItem]
+    ) -> list[QuestionKnowledgePointLink] | None:
+        """Confirm that a planned replacement still targets active knowledge points."""
+        db_path = self._db_path or str(default_db_path())
+        with closing(connect_db(db_path, writable=False)) as connection:
+            if not self._question_exists(connection, question_id):
+                return None
+            self._ensure_active_topics(connection, [item.topic3_id for item in items])
         return self.list_for_question(question_id)
 
     def upsert_for_question(
