@@ -12,14 +12,17 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 API_SRC = ROOT / "apps" / "api" / "src"
+PACKAGES_ROOT = ROOT / "packages"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if str(API_SRC) not in sys.path:
     sys.path.insert(0, str(API_SRC))
+if str(PACKAGES_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGES_ROOT))
 PYDEPS = ROOT / ".codex-run" / "pydeps"
 PYWIN32 = PYDEPS / "win32"
 PYWIN32_LIB = PYDEPS / "win32" / "lib"
@@ -40,7 +43,7 @@ from packages.mcp_contracts.src.runtime import (  # noqa: E402
     clean_args,
     tool_error,
 )
-from packages.mcp_contracts.src.operation_plan import build_operation_plan  # noqa: E402
+from packages.mcp_contracts.src.operation_plan import build_operation_plan, snapshot_version  # noqa: E402
 from packages.mcp_contracts.src.domains import (  # noqa: E402
     AuthoringDomain,
     ImportReviewDomain,
@@ -53,8 +56,13 @@ from packages.mcp_contracts.src.domains import (  # noqa: E402
     register_operations_tools,
     register_search_knowledge_tools,
 )
-from packages.mcp_contracts.src.tool_registry import default_tool_registry, profile_tool_names  # noqa: E402
+from packages.mcp_contracts.src.tool_registry import (  # noqa: E402
+    default_tool_registry,
+    profile_tool_names,
+    tool_policy_manifest,
+)
 from physics_vault_api.paths import default_db_path, default_review_db_path, project_root  # noqa: E402
+from physics_vault_api.repositories.operation_plans import OperationPlanRepository  # noqa: E402
 from physics_vault_api.schemas.paper_drafts import PaperDraftItem, PaperDraftUpsertRequest  # noqa: E402
 from physics_vault_api.schemas.question_search import BatchQuestionFetchRequest, QuestionSearchParams  # noqa: E402
 from physics_vault_api.services.lesson_documents import (  # noqa: E402
@@ -64,6 +72,11 @@ from physics_vault_api.services.lesson_documents import (  # noqa: E402
     rename_saved_handout as _rename_saved_handout_store,
     restore_saved_handout_version as _restore_saved_handout_version_store,
     update_saved_handout_format as _update_saved_handout_format_store,
+)
+from physics_vault_api.services.operation_plans import (  # noqa: E402
+    OperationPlanError,
+    OperationPlanService,
+    OperationPlanVersionConflict,
 )
 from physics_vault_api.services.word_export_formats import (  # noqa: E402
     format_spec_for_template,
@@ -129,78 +142,46 @@ def _write_classroom_sessions(items: list[dict[str, Any]]) -> None:
     temporary.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, _CLASSROOM_SESSION_STORE)
 
+
+# Profiles remain supported for compatibility; both configured desktop agents
+# use ``all`` and therefore receive the complete registered tool surface.
+_MCP_PROFILE = os.getenv("PHYSICS_MCP_PROFILE", "all").strip().lower() or "all"
+_PROFILE_BOUNDARY_INSTRUCTION = (
+    "This is an external profile. Do not access, inspect, or modify the composition workbench. "
+    "Search and curate questions without writing a workbench; use only the explicitly exposed external tools. "
+    "If a user explicitly asks for workbench actions, provide a copyable instruction for the in-product AI assistant instead of requesting workbench MCP access. "
+    if _MCP_PROFILE in {"external_study_sheet", "external_catalog_maintenance"}
+    else "This is the in-product AI-assistant workbench profile. For requests to select questions and compose a paper, use the composition workbench by default. "
+    if _MCP_PROFILE == "ai_assistant_workbench"
+    else ""
+)
+
 server = MCPServer(
     name="physics_vault",
     title="Physics Vault Database",
     version="0.2.0",
     instructions=(
-        "Use these tools to inspect the local high-school physics question bank. "
-        "Canonical question content is read-only; searchable metadata may be maintained directly. Review-center tools write only "
-        "to the Review DB. submit_ai_generated_review writes review drafts only. "
-        "If the user says review center, submitted-for-review, sent for review, draft task, "
-        "or asks to clean LaTeX/formulas in reviewed/submitted items, do NOT start with "
-        "canonical search_questions/get_questions_by_ids. First call list_review_tasks or "
-        "get_review_task on the Review DB, then clean_review_task_latex if needed. "
-        "Use list_review_queue/list_review_tasks/get_review_task for fast review-center discovery. "
-        "When a task needs to inspect, OCR, reuse, or verify a canonical question figure, do not rely on figure metadata alone: "
-        "first call download_question_images with the question_id. It copies only managed image assets into data/mcp-downloads "
-        "and returns local absolute paths that can be read or attached. Do not download images for text-only work. "
-        "For Typst handouts, use export_questions_to_typst with dry_run=true first. It reads canonical questions and images only, "
-        "then writes template-neutral questions-data.typ and image-map.typ under data/exports/typst only after dry_run=false; it never copies, moves, renames, or deletes gallery files. "
-        "When the user asks to import every Word file from a folder into the review center, use "
-        "import_word_folder_to_review: first dry_run=true to show the file plan, then dry_run=false "
-        "only after the user confirms the folder and count. This workflow writes only the Review DB. "
-        "Use get_review_task_full when the complete draft is needed. "
-        "Review task detail, validation, cleaning, splitting, and draft update tools accept an exact task_id or a unique UUID prefix; always use the full task_id returned by the tool in subsequent calls. "
-        "Before explaining, cleaning, or submitting review drafts, call validate_review_task to get structured risks. "
-        "Use risks_only=true when only problematic questions are needed. "
-        "When options were merged during OCR/import, use split_merged_options with dry_run=true first, then dry_run=false after an explicit repair request. "
-        "When a review task contains repeated imported questions, use deduplicate_review_task_questions with dry_run=true first. It removes only exact content duplicates from the Review DB, preserves the first occurrence in each group, and never changes the Canonical DB. "
-        "Use its question_id, code, severity, field, message, and suggestion in the response to the teacher. "
-        "When the user explicitly asks to eliminate or fix risks, modify the existing review draft with update_review_task_draft or clean_review_task_latex, then call validate_review_task again; do not stop at a recommendation. If cleaning returns manual_action_required=true or remaining_risks, do not ask the teacher to edit it: read the full affected questions and use update_review_task_draft to manually patch each affected field into the standard format, then validate again. For LaTeX, use $...$ for inline math, $$...$$ only for standalone display math, and keep every opening delimiter paired with the same closing delimiter. Report any risk that cannot be safely inferred instead of claiming the task is fully fixed. "
-        "Use database_boundary_report when unsure which database/tool family to use. "
-        "Use clean_review_task_latex/update_review_task_draft to modify the current draft in place; "
-        "do not create a duplicate task with submit_ai_generated_review. "
-        "Composition-workbench tools manage only paper_drafts and paper_draft_items: they may add "
-        "canonical question references, standard knowledge-point cards, teaching text/title blocks, or "
-        "change their order. They never alter a canonical question or knowledge point. This is a free-form "
-        "workspace: execute directly when the teacher explicitly requests an edit; use dry_run=true only when a preview is requested. "
-        "When asked to generate explanations for selected questions, use one rich knowledge operation per concept with a concise title, "
-        "question-specific content and related_question_ids, then place it next to its related question. Write natural teaching prose with "
-        "the decisive reasoning, useful formulas and actual misconceptions from the question; never use generic fixed headings or boilerplate. "
-        "Do not add a generic knowledge card plus a separate text block. Use topic3_id only for an exact semantic match; otherwise create a "
-        "workbench-only explanation with title. add_knowledge_to_composition_workbench only references taxonomy and must not be used to generate explanations. "
-        "Use diagnose_tag_maintenance, suggest_question_tags, maintain_question_tags, create_knowledge_points and batch_update_question_metadata directly to normalize tags, "
-        "knowledge bindings, difficulty, question type, and normalized source without asking for approval. "
-        "A formal question may have one primary and up to two secondary level-3 knowledge points. "
-        "When retrieved question content conflicts with its labels, call maintain_question_knowledge_points. "
-        "It may automatically apply only high-confidence repairs and records a rollback-capable audit batch; "
-        "ambiguous cases must remain marked for review rather than being force-filled to three labels. "
-        "When the user searches by a named solution method, teaching nickname, formula pattern, or says a classic problem was missed, use search_method_questions first (or search_questions with search_mode=comprehensive when combining additional topic filters). Start with its default compact response and a small limit; request summary_only=false and include_evidence=true only when the user needs full question text or proof. Method retrieval must inspect stems and analyses, expand the nickname into physical structures, and never treat a knowledge-point label as a hard filter. Separate explicit-name matches, structural method matches, and merely related candidates; when evidence is requested, quote it and verify result counts, years, and sources from tool fields before claiming completeness. If the user supplies year or region, pass those structured filters instead of putting them only into query text. "
-        "When the teacher explicitly confirms a method match, identifies a false positive, or supplies a missed question, call record_method_retrieval_feedback so the correction persists and refreshes searchable metadata and derived indexes. Use method_retrieval_learning_report to audit accumulated feedback, benchmark constraints, and high-confidence metadata maintenance candidates. "
-        "When tag names are close in meaning or spelling, first call diagnose_tag_maintenance, then use maintain_question_tags with dry_run=true before applying a merge. High-confidence new teaching tags may be created through maintain_question_tags; ambiguous tags should remain suggestions. These metadata tools cannot change stems, options, answers, analysis, images, or publication status. "
-        "return_question_to_review remains a controlled canonical content workflow and requires preview plus confirmation. "
-        "If its delivery_status is pending, call reconcile_review_queue_outbox to retry only the review-queue delivery; do not repeat the canonical update. "
-        "Legacy batch_replace_question_tags and batch_replace_question_knowledge_points remain available for compatibility. "
-        "Use list_change_batches/get_change_batch/rollback_change_batch to inspect or roll back audited changes. "
-        "For canonical duplicate questions, use scan_canonical_duplicate_questions, then call merge_canonical_duplicate_questions with dry_run=true before applying. "
-        "It archives duplicates instead of deleting them; use restore_canonical_duplicate_merge to reverse a merge batch. "
-        "Task status tools are read-only. retry_job and cancel_job require confirmed=true after explicit human confirmation. "
-        "Task write tools call the application task service and record source, session, operator, and an audit id. "
-        "Document routing is strict: composition-workbench tools operate only on document_kind=workbench_draft "
-        "stored in paper_drafts; saved-handout tools operate only on document_kind=saved_handout stored in the saved handout library. "
-        "Never infer that a saved handout is the current workbench. If the user does not identify the document kind or id, "
-        "use the workbench tools only for an active draft and ask for the saved handout id before changing a saved handout. "
-        "Word format templates are reusable configuration only; apply them to a workbench or saved handout explicitly before exporting."
+        _PROFILE_BOUNDARY_INSTRUCTION
+        + "This server manages a local high-school physics question bank, review workspace, composition workbench, saved handouts, teaching projects, and background jobs. "
+        "When the route or tool sequence is unclear, call get_workflow_guide; call mcp_system_health for readiness and integrity checks. "
+        "Database boundaries are strict: canonical retrieval uses search tools; review/submitted/draft-task requests start with list_review_tasks or get_review_task; use database_boundary_report if uncertain. "
+        "Canonical question bodies are not edited by metadata tools. Review tools write only review drafts unless a tool explicitly presents a canonical operation plan. "
+        "For ordinary retrieval start with search_questions_compact, use search_questions_curated for a balanced shortlist, and fetch full records only for selected IDs. Named solution methods start with search_method_questions. "
+        "Download managed question images only when figures must be inspected or reused. "
+        "Keep workbench_draft, saved_handout, and teaching_project IDs distinct; never infer one document kind from another. "
+        "All tools are visible, but visibility is not authorization to mutate. Respect dry_run defaults, confirmation flags, and plan_token requirements. A plan token binds execution to the previewed version; if the target changes, re-preview. Reusing a completed token is idempotent. "
+        "For imports, merges, restores, publishing, replacement sync, canonical status changes, rollback, deletion, retry, cancel, and overwrite: preview first and execute only after explicit user confirmation. "
+        "After review-draft repairs, validate again. After audited canonical metadata changes, report the audit batch and available rollback tool. "
+        "Use the full stable IDs returned by tools in subsequent calls and report unresolved risks instead of claiming completion."
     ),
 )
 
 # A single service remains convenient for local development, while clients
 # that support separate MCP entries can expose a narrower tool profile by
-# setting PHYSICS_MCP_PROFILE.  "all" preserves today's complete surface.
-_MCP_PROFILE = os.getenv("PHYSICS_MCP_PROFILE", "all").strip().lower() or "all"
+# setting PHYSICS_MCP_PROFILE. "all" preserves today's complete surface.
 _TOOL_REGISTRY = default_tool_registry()
 _mcp_server_tool = server.tool
+_EXPOSED_TOOL_NAMES: set[str] = set()
 
 
 def _profiled_mcp_tool(*args: Any, **kwargs: Any):
@@ -210,7 +191,9 @@ def _profiled_mcp_tool(*args: Any, **kwargs: Any):
         tool_name = str(kwargs.get("name") or func.__name__)
         _TOOL_REGISTRY.bind(tool_name, func)
         if _MCP_PROFILE == "all" or tool_name in profile_tool_names(_MCP_PROFILE):
-            return decorator(func)
+            registered = decorator(func)
+            _EXPOSED_TOOL_NAMES.add(tool_name)
+            return registered
         return func
 
     return register
@@ -225,7 +208,7 @@ def _validate_tool_registry() -> None:
     expected = _TOOL_REGISTRY.names()
     if _MCP_PROFILE != "all":
         expected = profile_tool_names(_MCP_PROFILE)
-    exposed = {tool.name for tool in server._tool_manager.list_tools()}
+    exposed = set(_EXPOSED_TOOL_NAMES)
     if exposed != expected:
         missing = sorted(expected - exposed)
         unexpected = sorted(exposed - expected)
@@ -772,6 +755,86 @@ def _operation_plan_payload(
     ).model_dump(mode="json")
 
 
+def _mcp_operation_plan_service() -> OperationPlanService:
+    """Persist MCP confirmation plans beside, but not inside, the canonical DB."""
+    plan_db = _formal_db_path().parent / "mcp_operation_plans.sqlite3"
+    return OperationPlanService(OperationPlanRepository(plan_db))
+
+
+def _persisted_operation_plan_payload(
+    *,
+    action: str,
+    targets: list[dict[str, Any]],
+    summary: str,
+    warnings: list[str] | None = None,
+    version_snapshot: Any = None,
+    reversible: bool,
+) -> dict[str, Any]:
+    plan = build_operation_plan(
+        action=action,
+        targets=targets,
+        summary=summary,
+        warnings=warnings,
+        version_snapshot=version_snapshot,
+        reversible=reversible,
+    )
+    _mcp_operation_plan_service().save_preview(plan)
+    return plan.model_dump(mode="json")
+
+
+def _execute_persisted_operation(
+    plan_token: str | None,
+    *,
+    action: str,
+    version_snapshot_reader: Callable[[], Any],
+    executor: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    token = str(plan_token or "").strip()
+    if not token:
+        return _tool_error(
+            "PLAN_TOKEN_REQUIRED",
+            "该操作需要先预览并取得 plan_token，再由用户确认后执行。",
+            field="plan_token",
+        )
+
+    def _version_reader(plan: Any) -> str:
+        if str(plan.action) != action:
+            raise OperationPlanVersionConflict(
+                f"plan token action mismatch: expected {action}, got {plan.action}"
+            )
+        return snapshot_version(version_snapshot_reader())
+
+    try:
+        execution = _mcp_operation_plan_service().execute(
+            token,
+            version_reader=_version_reader,
+            executor=lambda _plan: executor(),
+        )
+    except OperationPlanVersionConflict as exc:
+        return _tool_error(
+            "OPERATION_PLAN_VERSION_CONFLICT",
+            f"预览后目标内容已变化，请重新预览：{exc}",
+            field="plan_token",
+        )
+    except OperationPlanError as exc:
+        return _tool_error("OPERATION_PLAN_NOT_FOUND", str(exc), field="plan_token")
+    if execution.status != "completed":
+        return _tool_error(
+            "OPERATION_PLAN_NOT_EXECUTED",
+            execution.error or f"操作计划状态为 {execution.status}。",
+            field="plan_token",
+            operation_id=execution.operation_id,
+            status=execution.status,
+        )
+    payload = dict(execution.result) if isinstance(execution.result, dict) else {"result": execution.result}
+    if "operation_id" in payload:
+        payload["plan_operation_id"] = execution.operation_id
+    else:
+        payload["operation_id"] = execution.operation_id
+    payload["idempotent"] = execution.idempotent
+    return payload
+
+
 def _question_operation_targets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert preview rows to stable operation-plan target descriptors."""
     return [
@@ -885,8 +948,9 @@ def _legacy_publish_teaching_artifact(
     project_id: str,
     artifact: Literal["handout", "slides"] = "slides",
     confirmed: bool = False,
+    plan_token: str | None = None,
 ) -> dict[str, Any]:
-    """发布教学产物。默认先返回计划，confirmed=true 才会写入不可变发布快照。"""
+    """发布教学产物；执行必须使用预览返回的、带版本约束的 plan_token。"""
     project = _get_teaching_project(project_id)
     if not project:
         return _tool_error("TEACHING_PROJECT_NOT_FOUND", f"教学项目不存在：{project_id}。", field="project_id")
@@ -901,26 +965,62 @@ def _legacy_publish_teaching_artifact(
         "requires_confirmation": True,
         "message": "将创建新的不可变发布快照，课堂将只读取课件发布快照。",
     }
+    def version_snapshot() -> dict[str, Any]:
+        latest = _get_teaching_project(project_id) or {}
+        latest_artifact = latest.get(artifact) if isinstance(latest.get(artifact), dict) else {}
+        published = latest_artifact.get("publishedSnapshot") if isinstance(latest_artifact.get("publishedSnapshot"), dict) else {}
+        return {
+            "project_id": project_id,
+            "project_updated_at": latest.get("updatedAt"),
+            "content_revision": latest.get("contentRevision"),
+            "artifact": artifact,
+            "artifact_status": latest_artifact.get("status"),
+            "source_revision": latest_artifact.get("sourceRevision"),
+            "published_version": published.get("version"),
+        }
     if not confirmed:
-        return {"ok": True, "dry_run": True, "plan": plan}
-    now = datetime.now(timezone.utc).isoformat()
-    version = int((current.get("publishedSnapshot") or {}).get("version") or 0) + 1
-    snapshot = json.loads(json.dumps({key: value for key, value in current.items() if key not in {"publishedSnapshot", "updatedAt", "status"}}))
-    snapshot["publishedAt"] = now
-    snapshot["version"] = version
-    if artifact == "slides":
-        lesson_package = (current.get("publishedSnapshot") or {}).get("lessonPackage")
-        if not isinstance(lesson_package, dict):
-            return _tool_error("PUBLISHED_SOURCE_REQUIRED", "课件发布需要完整的教学包快照，请先在课件页面发布一次。", field="artifact")
-        snapshot["lessonPackage"] = lesson_package
-    current["publishedSnapshot"] = snapshot
-    current["status"] = "published"
-    current["updatedAt"] = now
-    try:
-        saved = _save_teaching_project(project, base_updated_at=project.get("updatedAt"))
-    except TeachingProjectConflictError as exc:
-        return _tool_error("PROJECT_REVISION_CONFLICT", str(exc), field="project_id")
-    return {"ok": True, "dry_run": False, "project": saved, "published_version": version}
+        operation_plan = _persisted_operation_plan_payload(
+            action="teaching_project.publish_artifact",
+            targets=[{"type": "teaching_project_artifact", "id": f"{project_id}:{artifact}", "label": artifact}],
+            summary=f"发布教学项目 {project_id} 的 {artifact} 产物并创建不可变快照。",
+            warnings=["执行前会校验项目与产物版本；预览后发生变化时必须重新预览。"],
+            version_snapshot=version_snapshot(),
+            reversible=True,
+        )
+        return {"ok": True, "dry_run": True, "plan": plan, "operation_plan": operation_plan, "plan_token": operation_plan["operation_id"]}
+
+    def execute_publish() -> dict[str, Any]:
+        latest = _get_teaching_project(project_id)
+        if not latest:
+            return _tool_error("TEACHING_PROJECT_NOT_FOUND", f"教学项目不存在：{project_id}。", field="project_id")
+        latest_artifact = latest.get(artifact) if isinstance(latest.get(artifact), dict) else None
+        if not latest_artifact:
+            return _tool_error("ARTIFACT_NOT_FOUND", f"项目没有{artifact}产物。", field="artifact")
+        now = datetime.now(timezone.utc).isoformat()
+        version = int((latest_artifact.get("publishedSnapshot") or {}).get("version") or 0) + 1
+        snapshot = json.loads(json.dumps({key: value for key, value in latest_artifact.items() if key not in {"publishedSnapshot", "updatedAt", "status"}}))
+        snapshot["publishedAt"] = now
+        snapshot["version"] = version
+        if artifact == "slides":
+            lesson_package = (latest_artifact.get("publishedSnapshot") or {}).get("lessonPackage")
+            if not isinstance(lesson_package, dict):
+                return _tool_error("PUBLISHED_SOURCE_REQUIRED", "课件发布需要完整的教学包快照，请先在课件页面发布一次。", field="artifact")
+            snapshot["lessonPackage"] = lesson_package
+        latest_artifact["publishedSnapshot"] = snapshot
+        latest_artifact["status"] = "published"
+        latest_artifact["updatedAt"] = now
+        try:
+            saved = _save_teaching_project(latest, base_updated_at=latest.get("updatedAt"))
+        except TeachingProjectConflictError as exc:
+            return _tool_error("PROJECT_REVISION_CONFLICT", str(exc), field="project_id")
+        return {"ok": True, "dry_run": False, "project": saved, "published_version": version}
+
+    return _execute_persisted_operation(
+        plan_token,
+        action="teaching_project.publish_artifact",
+        version_snapshot_reader=version_snapshot,
+        executor=execute_publish,
+    )
 
 
 def _legacy_preflight_teaching_handout(project_id: str, use_published: bool = False) -> dict[str, Any]:
@@ -958,6 +1058,7 @@ def _legacy_sync_teaching_slides(
     project_id: str,
     strategy: Literal["preserve_manual", "replace"] = "preserve_manual",
     confirmed: bool = False,
+    plan_token: str | None = None,
 ) -> dict[str, Any]:
     """同步课件与项目内容版本；默认只返回差异计划，避免误覆盖手工页面。"""
     project = _get_teaching_project(project_id)
@@ -980,22 +1081,58 @@ def _legacy_sync_teaching_slides(
         "manual_pages_preserved": strategy == "preserve_manual",
         "requires_confirmation": True,
     }
+    def version_snapshot() -> dict[str, Any]:
+        latest = _get_teaching_project(project_id) or {}
+        latest_artifact = latest.get("slides") if isinstance(latest.get("slides"), dict) else {}
+        latest_deck = latest_artifact.get("deck") if isinstance(latest_artifact.get("deck"), dict) else {}
+        latest_generated = latest_artifact.get("generatedDeck") if isinstance(latest_artifact.get("generatedDeck"), dict) else {}
+        return {
+            "project_id": project_id,
+            "project_updated_at": latest.get("updatedAt"),
+            "content_revision": latest.get("contentRevision"),
+            "artifact_source_revision": latest_artifact.get("sourceRevision"),
+            "strategy": strategy,
+            "current_page_ids": [str(item.get("id")) for item in latest_deck.get("pages", []) if isinstance(item, dict)],
+            "generated_page_ids": [str(item.get("id")) for item in latest_generated.get("pages", []) if isinstance(item, dict)],
+        }
     if not confirmed:
-        return {"ok": True, "dry_run": True, "plan": plan}
-    if strategy == "preserve_manual":
-        return {"ok": True, "dry_run": False, "applied": False, "plan": plan, "message": "保留手工页面策略需要在网页端执行差异合并，本次仅记录同步意图。"}
-    if not generated_deck:
-        return _tool_error("GENERATED_DECK_NOT_FOUND", "项目没有可用于替换的生成课件快照，请先在课件页同步内容。", field="project_id")
-    now = datetime.now(timezone.utc).isoformat()
-    artifact["deck"] = generated_deck
-    artifact["sourceRevision"] = project.get("contentRevision")
-    artifact["status"] = "ready"
-    artifact["updatedAt"] = now
-    try:
-        saved = _save_teaching_project(project, base_updated_at=project.get("updatedAt"))
-    except TeachingProjectConflictError as exc:
-        return _tool_error("PROJECT_REVISION_CONFLICT", str(exc), field="project_id")
-    return {"ok": True, "dry_run": False, "applied": True, "project": saved, "plan": plan}
+        operation_plan = _persisted_operation_plan_payload(
+            action="teaching_project.sync_slides",
+            targets=[{"type": "teaching_project_slides", "id": project_id, "label": strategy}],
+            summary=f"按 {strategy} 策略同步教学项目 {project_id} 的课件。",
+            warnings=["replace 会覆盖当前生成页；执行前会再次校验页面与项目版本。"],
+            version_snapshot=version_snapshot(),
+            reversible=True,
+        )
+        return {"ok": True, "dry_run": True, "plan": plan, "operation_plan": operation_plan, "plan_token": operation_plan["operation_id"]}
+
+    def execute_sync() -> dict[str, Any]:
+        latest = _get_teaching_project(project_id)
+        if not latest:
+            return _tool_error("TEACHING_PROJECT_NOT_FOUND", f"教学项目不存在：{project_id}。", field="project_id")
+        latest_artifact = latest.get("slides") if isinstance(latest.get("slides"), dict) else {}
+        latest_generated = latest_artifact.get("generatedDeck") if isinstance(latest_artifact.get("generatedDeck"), dict) else None
+        if strategy == "preserve_manual":
+            return {"ok": True, "dry_run": False, "applied": False, "plan": plan, "message": "保留手工页面策略需要在网页端执行差异合并，本次仅记录同步意图。"}
+        if not latest_generated:
+            return _tool_error("GENERATED_DECK_NOT_FOUND", "项目没有可用于替换的生成课件快照，请先在课件页同步内容。", field="project_id")
+        now = datetime.now(timezone.utc).isoformat()
+        latest_artifact["deck"] = latest_generated
+        latest_artifact["sourceRevision"] = latest.get("contentRevision")
+        latest_artifact["status"] = "ready"
+        latest_artifact["updatedAt"] = now
+        try:
+            saved = _save_teaching_project(latest, base_updated_at=latest.get("updatedAt"))
+        except TeachingProjectConflictError as exc:
+            return _tool_error("PROJECT_REVISION_CONFLICT", str(exc), field="project_id")
+        return {"ok": True, "dry_run": False, "applied": True, "project": saved, "plan": plan}
+
+    return _execute_persisted_operation(
+        plan_token,
+        action="teaching_project.sync_slides",
+        version_snapshot_reader=version_snapshot,
+        executor=execute_sync,
+    )
 
 
 def _legacy_start_classroom_session(project_id: str) -> dict[str, Any]:
@@ -1185,6 +1322,106 @@ def _legacy_search_questions(
     result["expanded_from"] = clean["query"]
     result["tried_terms"] = tried_terms
     return result
+
+
+def _compact_question_card(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the smallest useful search card without changing local ranking."""
+    title = _truncate_search_text(item.get("title") or item.get("canonical_title"), 140)
+    knowledge_point = _truncate_search_text(item.get("knowledge_point"), 100)
+    source = _truncate_search_text(item.get("source"), 100)
+    return {
+        "question_id": item.get("question_id"),
+        "title": title,
+        "question_type": item.get("question_type"),
+        "difficulty": item.get("difficulty"),
+        "knowledge_point": knowledge_point,
+        "source": source,
+        "year": item.get("year"),
+        "score": item.get("score"),
+        "has_media": bool(item.get("has_media")),
+        "image_count": int(item.get("image_count") or 0),
+    }
+
+
+def _compact_search_response(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a full search result into cards; search, recall and rerank stay intact."""
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    return {
+        "items": [_compact_question_card(item) for item in items if isinstance(item, Mapping)],
+        "total": int(result.get("total") or 0),
+        "limit": int(result.get("limit") or len(items)),
+        "offset": int(result.get("offset") or 0),
+        "search_mode": result.get("search_mode"),
+        "database_scope": result.get("database_scope", "canonical_read_only"),
+        "next_tool": "get_questions_by_ids",
+        "message": "已完成完整本地检索和排序；此响应只省略未选题目的题干、答案、解析、选项与图片详情。",
+    }
+
+
+def _legacy_search_questions_compact(
+    query: str | None = None,
+    search_mode: Literal["browse", "strict", "hybrid", "similar", "comprehensive"] = "hybrid",
+    question_type: str | None = None,
+    difficulty: str | None = None,
+    year: int | None = None,
+    topic3_id: str | None = None,
+    limit: int = 12,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """完整检索和精排后，仅返回紧凑题目卡；用 get_questions_by_ids 按需取全文。"""
+    result = _legacy_search_questions(
+        query=query,
+        search_mode=search_mode,
+        question_type=question_type,
+        difficulty=difficulty,
+        year=year,
+        topic3_id=topic3_id,
+        limit=min(max(int(limit or 12), 1), 50),
+        offset=max(int(offset or 0), 0),
+    )
+    if result.get("misrouted") or result.get("ok") is False:
+        return result
+    return _compact_search_response(result)
+
+
+def _legacy_search_questions_curated(
+    query: str,
+    target_count: int = 10,
+    candidate_limit: int = 50,
+    search_mode: Literal["strict", "hybrid", "comprehensive"] = "hybrid",
+    question_type: str | None = None,
+    difficulty: str | None = None,
+    year: int | None = None,
+    topic3_id: str | None = None,
+) -> dict[str, Any]:
+    """在服务端完成检索、精排与题型/难度/来源均衡精选；不写入任何工作台。"""
+    clean_query = str(query or "").strip()
+    if not clean_query:
+        return _tool_error("INVALID_ARGUMENT", "query 不能为空。", field="query")
+    searched = _legacy_search_questions(
+        query=clean_query,
+        search_mode=search_mode,
+        question_type=question_type,
+        difficulty=difficulty,
+        year=year,
+        topic3_id=topic3_id,
+        limit=min(max(int(candidate_limit or 50), 1), 50),
+        offset=0,
+    )
+    if searched.get("misrouted") or searched.get("ok") is False:
+        return searched
+    candidates = [item for item in searched.get("items") or [] if isinstance(item, Mapping)]
+    count = min(max(int(target_count or 10), 1), 30)
+    selected = _select_balanced_composition_candidates(candidates, count, clean_query)
+    return {
+        "items": [_compact_question_card(item) for item in selected],
+        "selected_question_ids": [str(item.get("question_id")) for item in selected],
+        "candidate_count": len(candidates),
+        "total_matches": int(searched.get("total") or 0),
+        "selection_policy": "在完整本地检索和精排结果内，优先平衡来源、题型与难度；不写入组卷工作台。",
+        "next_tool": "get_questions_by_ids",
+        "database_scope": "canonical_read_only",
+    }
 
 
 def _legacy_download_question_images(
@@ -2795,28 +3032,61 @@ def _legacy_list_saved_handout_versions(document_id: str) -> dict[str, Any]:
     return {"ok": True, "document_kind": "saved_handout", "document_id": document_id, "items": versions}
 
 
-def _legacy_restore_saved_handout_version(document_id: str, version: int, confirmed: bool = False) -> dict[str, Any]:
-    """恢复已保存讲义的指定版本；必须 confirmed=true，恢复会生成新的当前版本。"""
+def _legacy_restore_saved_handout_version(
+    document_id: str,
+    version: int,
+    confirmed: bool = False,
+    plan_token: str | None = None,
+) -> dict[str, Any]:
+    """恢复已保存讲义的指定版本；必须使用预览返回的 plan_token。"""
     versions = _list_saved_handout_versions_store(document_id)
     if versions is None:
         return _tool_error("SAVED_HANDOUT_NOT_FOUND", f"已保存讲义不存在：{document_id}。", field="document_id")
     selected = next((item for item in versions if int(item.get("version") or 0) == int(version)), None)
     if selected is None:
         return _tool_error("VERSION_NOT_FOUND", f"讲义版本不存在：{version}。", field="version", available_versions=versions)
-    if not confirmed:
+    def version_snapshot() -> dict[str, Any]:
+        latest = _get_saved_handout_store(document_id) or {}
         return {
-            "ok": False,
+            "document_id": document_id,
+            "current_version": latest.get("currentVersion"),
+            "updated_at": latest.get("updatedAt"),
+            "restore_version": int(version),
+        }
+    if not confirmed:
+        operation_plan = _persisted_operation_plan_payload(
+            action="saved_handout.restore_version",
+            targets=[{"type": "saved_handout", "id": document_id, "label": f"restore version {version}"}],
+            summary=f"把已保存讲义 {document_id} 恢复为版本 {version}，并生成新的当前版本。",
+            warnings=["不会删除历史版本；预览后当前版本发生变化时必须重新预览。"],
+            version_snapshot=version_snapshot(),
+            reversible=True,
+        )
+        return {
+            "ok": True,
+            "dry_run": True,
             "confirmation_required": True,
             "document_kind": "saved_handout",
             "document_id": document_id,
             "version": version,
+            "operation_plan": operation_plan,
+            "plan_token": operation_plan["operation_id"],
             "message": "恢复不会删除历史版本，但会把当前内容替换为指定版本并生成新版本；请确认后再次以 confirmed=true 调用。",
         }
-    try:
-        document = _restore_saved_handout_version_store(document_id, version)
-    except ValueError as exc:
-        return _tool_error("VERSION_NOT_FOUND", str(exc), field="version")
-    return {"ok": True, "document_kind": "saved_handout", "restored_from_version": version, "document": document}
+
+    def execute_restore() -> dict[str, Any]:
+        try:
+            restored = _restore_saved_handout_version_store(document_id, version)
+        except ValueError as exc:
+            return _tool_error("VERSION_NOT_FOUND", str(exc), field="version")
+        return {"ok": True, "dry_run": False, "document_kind": "saved_handout", "restored_from_version": version, "document": restored}
+
+    return _execute_persisted_operation(
+        plan_token,
+        action="saved_handout.restore_version",
+        version_snapshot_reader=version_snapshot,
+        executor=execute_restore,
+    )
 
 
 def _legacy_rename_saved_handout(document_id: str, title: str) -> dict[str, Any]:
@@ -2834,8 +3104,10 @@ def _legacy_apply_word_format_to_saved_handout(
     document_id: str,
     template_id: str | None = None,
     format_spec: dict[str, Any] | None = None,
+    dry_run: bool = True,
+    plan_token: str | None = None,
 ) -> dict[str, Any]:
-    """把 Word 排版规格应用到已保存讲义；不会修改工作台草稿。"""
+    """把 Word 排版规格应用到已保存讲义；默认预览，执行需 plan_token。"""
     document = _get_saved_handout_store(document_id)
     if not document:
         return _tool_error("SAVED_HANDOUT_NOT_FOUND", f"已保存讲义不存在：{document_id}。", field="document_id")
@@ -2847,19 +3119,58 @@ def _legacy_apply_word_format_to_saved_handout(
     checked = validate_format_spec(spec)
     if not checked["ok"]:
         return checked
-    updated = _update_saved_handout_format_store(document_id, checked["formatSpec"], template_id=template_id)
-    return {
-        "ok": True,
-        "document_kind": "saved_handout",
-        "document": updated,
-        "formatSpec": checked["formatSpec"],
-        "changes": _format_spec_diff(
-            before_spec,
-            checked["formatSpec"],
-            before_template_id=before_template_id,
-            after_template_id=template_id,
-        ),
-    }
+    changes = _format_spec_diff(
+        before_spec,
+        checked["formatSpec"],
+        before_template_id=before_template_id,
+        after_template_id=template_id,
+    )
+    def version_snapshot() -> dict[str, Any]:
+        latest = _get_saved_handout_store(document_id) or {}
+        return {
+            "document_id": document_id,
+            "current_version": latest.get("currentVersion"),
+            "updated_at": latest.get("updatedAt"),
+            "target_template_id": template_id,
+            "target_format_spec": checked["formatSpec"],
+        }
+    if dry_run:
+        operation_plan = _persisted_operation_plan_payload(
+            action="saved_handout.apply_word_format",
+            targets=[{"type": "saved_handout", "id": document_id, "label": str(document.get("title") or document_id)}],
+            summary=f"把新的 Word 排版规格应用到已保存讲义 {document_id}。",
+            warnings=["应用会生成新的讲义版本；预览后讲义发生变化时必须重新预览。"],
+            version_snapshot=version_snapshot(),
+            reversible=True,
+        )
+        return {
+            "ok": True,
+            "dry_run": True,
+            "document_kind": "saved_handout",
+            "document_id": document_id,
+            "formatSpec": checked["formatSpec"],
+            "changes": changes,
+            "operation_plan": operation_plan,
+            "plan_token": operation_plan["operation_id"],
+        }
+
+    def execute_format() -> dict[str, Any]:
+        updated = _update_saved_handout_format_store(document_id, checked["formatSpec"], template_id=template_id)
+        return {
+            "ok": True,
+            "dry_run": False,
+            "document_kind": "saved_handout",
+            "document": updated,
+            "formatSpec": checked["formatSpec"],
+            "changes": changes,
+        }
+
+    return _execute_persisted_operation(
+        plan_token,
+        action="saved_handout.apply_word_format",
+        version_snapshot_reader=version_snapshot,
+        executor=execute_format,
+    )
 
 
 def _legacy_apply_word_format_to_workbench(
@@ -3428,6 +3739,208 @@ def _legacy_database_boundary_report() -> dict[str, Any]:
         "issues": issues,
         "next_tool_when_user_says_submitted_or_review": "list_review_tasks",
     }
+
+
+_WORKFLOW_GUIDES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "question_search",
+        "title": "查题与筛选",
+        "intents": ["查题", "检索", "搜索", "筛选"],
+        "tools": ["list_filter_facets", "search_questions_compact", "get_questions_by_ids", "download_question_images"],
+        "boundary": "先返回紧凑题卡，只为最终选中的题读取完整正文或下载图片。",
+    },
+    {
+        "id": "method_search",
+        "title": "按方法、模型或相似结构找题",
+        "intents": ["方法", "模型", "相似", "母题", "经典题"],
+        "tools": ["search_method_questions", "find_similar_questions", "get_questions_by_ids", "record_method_retrieval_feedback"],
+        "boundary": "区分明确命中、结构命中和仅相关候选；教师确认后才记录检索反馈。",
+    },
+    {
+        "id": "composition",
+        "title": "组卷工作台",
+        "intents": ["组卷", "选题", "试卷", "工作台", "编排"],
+        "tools": ["search_questions_curated", "create_composition_workbench", "apply_composition_workbench_plan", "preview_composition_workbench", "export_composition_workbench"],
+        "boundary": "只修改组卷草稿，不修改正式题目；批量方案可先 dry_run。",
+    },
+    {
+        "id": "saved_handout",
+        "title": "已保存讲义与 Word 排版",
+        "intents": ["讲义", "Word", "排版", "已保存讲义", "版本"],
+        "tools": ["list_saved_handouts", "get_saved_handout", "list_saved_handout_versions", "apply_word_format_to_saved_handout", "export_saved_handout", "restore_saved_handout_version"],
+        "boundary": "已保存讲义与工作台草稿是不同文档；恢复和覆盖排版需要预览或确认。",
+    },
+    {
+        "id": "teaching_project",
+        "title": "教学项目、课件与课堂",
+        "intents": ["课件", "幻灯片", "课堂", "发布", "教学项目"],
+        "tools": ["get_teaching_project_status", "preflight_teaching_handout", "sync_teaching_slides", "publish_teaching_artifact", "start_classroom_session"],
+        "boundary": "同步、发布前先检查差异；课堂只从已发布课件启动。",
+    },
+    {
+        "id": "review_center",
+        "title": "导入与审核中心",
+        "intents": ["导入", "审核", "校对", "草稿", "送审", "公式修复"],
+        "tools": ["list_review_tasks", "get_review_task_full", "validate_review_task", "clean_review_task_latex", "split_merged_options", "update_review_task_draft"],
+        "boundary": "审核草稿只写审核库；修复后再次校验，不直接修改正式题目正文。",
+    },
+    {
+        "id": "catalog_maintenance",
+        "title": "正式题库元数据维护",
+        "intents": ["标签", "知识点", "元数据", "题库维护", "重复题", "回滚"],
+        "tools": ["database_health_report", "diagnose_tag_maintenance", "maintain_question_tags", "maintain_question_knowledge_points", "scan_canonical_duplicate_questions", "list_change_batches"],
+        "boundary": "正式库维护必须保留审计批次；正文问题走送回审核流程。",
+    },
+    {
+        "id": "background_jobs",
+        "title": "后台任务",
+        "intents": ["任务", "导出任务", "后台", "重试", "取消"],
+        "tools": ["list_jobs", "get_job_status", "submit_import_job", "submit_word_export_job", "retry_job", "cancel_job"],
+        "boundary": "提交任务返回审计编号；重试和取消必须明确确认目标任务。",
+    },
+)
+
+
+def _legacy_get_workflow_guide(intent: str | None = None) -> dict[str, Any]:
+    """按用户意图返回推荐 MCP 调用链；只读，不执行任何业务操作。"""
+    query = str(intent or "").strip().casefold()
+    exposed = _TOOL_REGISTRY.names() if _MCP_PROFILE == "all" else profile_tool_names(_MCP_PROFILE)
+    matched: list[dict[str, Any]] = []
+    for guide in _WORKFLOW_GUIDES:
+        terms = [str(term).casefold() for term in guide["intents"]]
+        if query and not any(term in query or query in term for term in terms):
+            continue
+        available_tools = [name for name in guide["tools"] if name in exposed]
+        matched.append({
+            **guide,
+            "tools": available_tools,
+            "unavailable_tools": [name for name in guide["tools"] if name not in exposed],
+            "start_tool": available_tools[0] if available_tools else None,
+        })
+    if query and not matched:
+        matched = [
+            {
+                **guide,
+                "tools": [name for name in guide["tools"] if name in exposed],
+                "unavailable_tools": [name for name in guide["tools"] if name not in exposed],
+                "start_tool": next((name for name in guide["tools"] if name in exposed), None),
+            }
+            for guide in _WORKFLOW_GUIDES
+        ]
+    return {
+        "ok": True,
+        "profile": _MCP_PROFILE,
+        "intent": intent,
+        "matched_count": len(matched),
+        "workflows": matched,
+        "global_rules": [
+            "正式题库、审核库、组卷草稿和已保存讲义是不同边界。",
+            "先使用紧凑读取；只为最终目标读取完整正文、图片或大体量结果。",
+            "带 dry_run、confirmed 或 plan_token 的操作必须遵守其确认协议。",
+        ],
+    }
+
+
+def _study_sheet_template_health() -> dict[str, Any]:
+    raw_root = str(os.getenv("PHYSICS_STUDY_SHEET_ROOT") or "").strip()
+    if not raw_root:
+        return {"status": "not_configured", "passed": None, "checks": []}
+    root = Path(raw_root).expanduser().resolve()
+    registry_path = root / "01-模板" / "templates.json"
+    if not registry_path.is_file():
+        return {"status": "registry_missing", "passed": False, "registry_path": str(registry_path), "checks": []}
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"status": "registry_invalid", "passed": False, "registry_path": str(registry_path), "error": str(exc), "checks": []}
+    checks = []
+    for item in registry.get("templates", []):
+        file_path = (registry_path.parent / str(item.get("template_file") or "")).resolve()
+        inside = file_path.parent == registry_path.parent
+        actual = hashlib.sha256(file_path.read_bytes()).hexdigest() if inside and file_path.is_file() else None
+        checks.append({
+            "id": item.get("id"),
+            "file": item.get("template_file"),
+            "passed": bool(actual and actual == item.get("template_sha256")),
+        })
+    return {
+        "status": "ok" if checks and all(item["passed"] for item in checks) else "attention",
+        "passed": bool(checks) and all(item["passed"] for item in checks),
+        "registry_path": str(registry_path),
+        "checks": checks,
+    }
+
+
+def _embedding_health() -> dict[str, Any]:
+    with _connect_formal_read_db() as conn:
+        if not _table_exists(conn, "embeddings"):
+            return {"status": "table_missing", "ready_questions": 0, "coverage": 0.0}
+        active_questions = int(conn.execute(
+            "SELECT COUNT(*) FROM questions WHERE COALESCE(status, '') != 'archived_duplicate'"
+        ).fetchone()[0])
+        ready_questions = int(conn.execute(
+            """
+            SELECT COUNT(DISTINCT owner_id)
+            FROM embeddings
+            WHERE owner_type = 'question' AND status = 'ready'
+            """
+        ).fetchone()[0])
+    coverage = ready_questions / active_questions if active_questions else 1.0
+    return {
+        "status": "ok" if coverage >= 0.98 else "attention",
+        "active_questions": active_questions,
+        "ready_questions": ready_questions,
+        "coverage": round(coverage, 4),
+    }
+
+
+def _legacy_mcp_system_health(include_details: bool = False) -> dict[str, Any]:
+    """统一检查工具面、数据库边界、检索向量和学案模板；全程只读。"""
+    database = _legacy_database_health_report()
+    templates = _study_sheet_template_health()
+    embeddings = _embedding_health()
+    exposed = _TOOL_REGISTRY.names() if _MCP_PROFILE == "all" else profile_tool_names(_MCP_PROFILE)
+    policies = [item for item in tool_policy_manifest() if item["name"] in exposed]
+
+    def _counts(field: str) -> dict[str, int]:
+        result: dict[str, int] = {}
+        for item in policies:
+            key = str(item[field])
+            result[key] = result.get(key, 0) + 1
+        return result
+
+    issues = list(database.get("issues") or [])
+    if templates.get("passed") is False:
+        issues.append({"code": "study_sheet_template_integrity", "severity": "high"})
+    if embeddings.get("status") != "ok":
+        issues.append({"code": "semantic_embedding_coverage", "severity": "medium", "coverage": embeddings.get("coverage")})
+    response = {
+        "ok": True,
+        "status": "attention" if issues else "ok",
+        "server": {"name": "physics_vault", "version": "0.2.0", "profile": _MCP_PROFILE},
+        "tool_surface": {
+            "total": len(policies),
+            "read_only": sum(1 for item in policies if item["read_only"]),
+            "writable": sum(1 for item in policies if not item["read_only"]),
+            "by_domain": _counts("domain"),
+            "by_risk": _counts("risk"),
+            "by_impact_scope": _counts("impact_scope"),
+        },
+        "database": {
+            "canonical_path": database.get("canonical_database_path"),
+            "review_path": database.get("review_database_path"),
+            "counts": database.get("counts"),
+            "review_workspace": database.get("review_workspace"),
+        },
+        "embeddings": embeddings,
+        "study_sheet_templates": templates,
+        "issues": issues,
+        "next_tools": ["get_workflow_guide", "database_boundary_report", "database_health_report"],
+    }
+    if include_details:
+        response["tool_policies"] = policies
+        response["database_details"] = database
+    return response
 
 
 def _legacy_database_health_report() -> dict[str, Any]:
@@ -5114,7 +5627,7 @@ def _legacy_get_change_batch(batch_id: str) -> dict[str, Any]:
     return _change_audit_service().get_batch(batch_id)
 
 
-def _legacy_rollback_change_batch(
+def _execute_rollback_change_batch(
     batch_id: str,
     dry_run: bool = True,
     reason: str | None = None,
@@ -5142,6 +5655,48 @@ def _legacy_rollback_change_batch(
         conn.commit()
     result["cancelled_outbox_count"] = cursor.rowcount
     return result
+
+
+def _legacy_rollback_change_batch(
+    batch_id: str,
+    dry_run: bool = True,
+    reason: str | None = None,
+    allow_conflicts: bool = False,
+    plan_token: str | None = None,
+) -> dict[str, Any]:
+    """预览并以版本绑定令牌回滚审计批次。"""
+    def preview_snapshot() -> tuple[dict[str, Any], dict[str, Any]]:
+        preview = _execute_rollback_change_batch(batch_id, True, reason, allow_conflicts)
+        snapshot = {
+            "batch_id": batch_id,
+            "change_type": preview.get("change_type"),
+            "status": preview.get("status"),
+            "changed_count": preview.get("changed_count"),
+            "conflict_count": preview.get("conflict_count"),
+            "items": preview.get("items", []),
+            "allow_conflicts": bool(allow_conflicts),
+        }
+        return preview, snapshot
+
+    preview, snapshot = preview_snapshot()
+    if not preview.get("ok"):
+        return preview
+    if dry_run:
+        operation_plan = _persisted_operation_plan_payload(
+            action="canonical.rollback_change_batch",
+            targets=[{"type": "change_batch", "id": batch_id, "label": str(preview.get("change_type") or "rollback")}],
+            summary=f"回滚正式库变更批次 {batch_id}。",
+            warnings=["执行前会重新检查逐项当前值；有冲突时默认拒绝回滚。"],
+            version_snapshot=snapshot,
+            reversible=False,
+        )
+        return {**preview, "operation_plan": operation_plan, "plan_token": operation_plan["operation_id"], "requires_confirmation": True}
+    return _execute_persisted_operation(
+        plan_token,
+        action="canonical.rollback_change_batch",
+        version_snapshot_reader=lambda: preview_snapshot()[1],
+        executor=lambda: _execute_rollback_change_batch(batch_id, False, reason, allow_conflicts),
+    )
 
 
 def _legacy_batch_replace_question_tags(
@@ -5266,7 +5821,7 @@ def _legacy_batch_replace_question_tags(
     }
 
 
-def _legacy_return_question_to_review(
+def _execute_return_question_to_review(
     question_id: str,
     reason: str = "题目需要回炉重造",
     dry_run: bool = True,
@@ -5385,6 +5940,48 @@ def _legacy_return_question_to_review(
             else "已更新正式题库状态；审核队列将由对账工具重试投递。"
         ),
     }
+
+
+def _legacy_return_question_to_review(
+    question_id: str,
+    reason: str = "题目需要回炉重造",
+    dry_run: bool = True,
+    operation_id: str | None = None,
+    plan_token: str | None = None,
+) -> dict[str, Any]:
+    """预览并以版本绑定令牌把正式题退回审核库。"""
+    def preview_snapshot() -> tuple[dict[str, Any], dict[str, Any]]:
+        preview = _execute_return_question_to_review(question_id, reason, True, operation_id)
+        item = preview.get("item") if isinstance(preview.get("item"), dict) else {}
+        snapshot = {
+            "question_id": str(question_id),
+            "reason": reason,
+            "before_status": item.get("before_status"),
+            "before_review_status": item.get("before_review_status"),
+            "before_value": item.get("before_value"),
+        }
+        return preview, snapshot
+
+    preview, snapshot = preview_snapshot()
+    if not preview.get("ok"):
+        return preview
+    if dry_run:
+        operation_plan = _persisted_operation_plan_payload(
+            action="canonical.return_question_to_review",
+            targets=[{"type": "canonical_question", "id": str(question_id), "label": str(preview.get("item", {}).get("title") or question_id)}],
+            summary=f"把正式题 {question_id} 退回审核库。",
+            warnings=["执行会更新正式题状态并通过持久化 outbox 投递审核队列。"],
+            version_snapshot=snapshot,
+            reversible=True,
+        )
+        return {**preview, "operation_plan": operation_plan, "plan_token": operation_plan["operation_id"], "requires_confirmation": True}
+    resolved_operation_id = str(operation_id or "").strip() or f"RTREV-{str(plan_token or '')[-12:]}"
+    return _execute_persisted_operation(
+        plan_token,
+        action="canonical.return_question_to_review",
+        version_snapshot_reader=lambda: preview_snapshot()[1],
+        executor=lambda: _execute_return_question_to_review(question_id, reason, False, resolved_operation_id),
+    )
 
 
 def _legacy_reconcile_review_queue_outbox(limit: int = 20) -> dict[str, Any]:
@@ -5926,7 +6523,7 @@ def _legacy_backfill_canonical_question_hashes(
     return {**preview, "audit_batch_id": batch_id}
 
 
-def _legacy_merge_canonical_duplicate_questions(
+def _execute_merge_canonical_duplicate_questions(
     primary_question_id: str,
     duplicate_question_ids: list[str],
     dry_run: bool = True,
@@ -6111,7 +6708,47 @@ def _legacy_merge_canonical_duplicate_questions(
     return {**result, "audit_batch_id": batch_id, "archived_count": len(duplicate_ids)}
 
 
-def _legacy_restore_canonical_duplicate_merge(
+def _legacy_merge_canonical_duplicate_questions(
+    primary_question_id: str,
+    duplicate_question_ids: list[str],
+    dry_run: bool = True,
+    reason: str = "合并正式题库完全重复题",
+    plan_token: str | None = None,
+) -> dict[str, Any]:
+    """预览并以版本绑定令牌合并正式题库重复题。"""
+    def preview_snapshot() -> tuple[dict[str, Any], dict[str, Any]]:
+        preview = _execute_merge_canonical_duplicate_questions(primary_question_id, duplicate_question_ids, True, reason)
+        return preview, dict(preview.get("merge_plan") or {})
+
+    preview, snapshot = preview_snapshot()
+    if not preview.get("ok"):
+        return preview
+    if dry_run:
+        merge_plan = preview["merge_plan"]
+        operation_plan = _persisted_operation_plan_payload(
+            action="canonical.merge_duplicate_questions",
+            targets=[
+                {"type": "canonical_question", "id": str(merge_plan["primary_question_id"]), "label": "保留题"},
+                *[
+                    {"type": "canonical_question", "id": str(question_id), "label": "待归档重复题"}
+                    for question_id in merge_plan["duplicate_question_ids"]
+                ],
+            ],
+            summary=f"保留题 {merge_plan['primary_question_id']}，合并并软归档 {len(merge_plan['duplicate_question_ids'])} 道重复题。",
+            warnings=[str(item) for item in merge_plan.get("warnings", [])],
+            version_snapshot=snapshot,
+            reversible=True,
+        )
+        return {**preview, "operation_plan": operation_plan, "plan_token": operation_plan["operation_id"], "requires_confirmation": True}
+    return _execute_persisted_operation(
+        plan_token,
+        action="canonical.merge_duplicate_questions",
+        version_snapshot_reader=lambda: preview_snapshot()[1],
+        executor=lambda: _execute_merge_canonical_duplicate_questions(primary_question_id, duplicate_question_ids, False, reason),
+    )
+
+
+def _execute_restore_canonical_duplicate_merge(
     merge_batch_id: str,
     dry_run: bool = True,
     reason: str = "恢复重复题合并",
@@ -6193,6 +6830,42 @@ def _legacy_restore_canonical_duplicate_merge(
         )
         conn.commit()
     return result
+
+
+def _legacy_restore_canonical_duplicate_merge(
+    merge_batch_id: str,
+    dry_run: bool = True,
+    reason: str = "恢复重复题合并",
+    plan_token: str | None = None,
+) -> dict[str, Any]:
+    """预览并以版本绑定令牌恢复重复题合并。"""
+    def preview_snapshot() -> tuple[dict[str, Any], dict[str, Any]]:
+        preview = _execute_restore_canonical_duplicate_merge(merge_batch_id, True, reason)
+        snapshot = {
+            "merge_batch_id": str(merge_batch_id),
+            "items": preview.get("items", []),
+        }
+        return preview, snapshot
+
+    preview, snapshot = preview_snapshot()
+    if not preview.get("ok"):
+        return preview
+    if dry_run:
+        operation_plan = _persisted_operation_plan_payload(
+            action="canonical.restore_duplicate_merge",
+            targets=[{"type": "duplicate_merge_batch", "id": str(merge_batch_id), "label": "restore"}],
+            summary=f"恢复正式题库重复题合并批次 {merge_batch_id}。",
+            warnings=["恢复会撤销软归档，并还原该批次移动的关联信息。"],
+            version_snapshot=snapshot,
+            reversible=True,
+        )
+        return {**preview, "operation_plan": operation_plan, "plan_token": operation_plan["operation_id"], "requires_confirmation": True}
+    return _execute_persisted_operation(
+        plan_token,
+        action="canonical.restore_duplicate_merge",
+        version_snapshot_reader=lambda: preview_snapshot()[1],
+        executor=lambda: _execute_restore_canonical_duplicate_merge(merge_batch_id, False, reason),
+    )
 
 
 def _legacy_list_canonical_duplicate_merges(

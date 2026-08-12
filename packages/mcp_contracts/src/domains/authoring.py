@@ -37,14 +37,14 @@ class AuthoringDomain:
     def duplicate_teaching_project(self, project_id: str, title: str | None=None) -> dict[str, Any]:
         return self._call("duplicate_teaching_project", project_id, title)
 
-    def publish_teaching_artifact(self, project_id: str, artifact: Literal['handout', 'slides']='slides', confirmed: bool=False) -> dict[str, Any]:
-        return self._call("publish_teaching_artifact", project_id, artifact, confirmed)
+    def publish_teaching_artifact(self, project_id: str, artifact: Literal['handout', 'slides']='slides', confirmed: bool=False, plan_token: str | None=None) -> dict[str, Any]:
+        return self._call("publish_teaching_artifact", project_id, artifact, confirmed, plan_token)
 
     def preflight_teaching_handout(self, project_id: str, use_published: bool=False) -> dict[str, Any]:
         return self._call("preflight_teaching_handout", project_id, use_published)
 
-    def sync_teaching_slides(self, project_id: str, strategy: Literal['preserve_manual', 'replace']='preserve_manual', confirmed: bool=False) -> dict[str, Any]:
-        return self._call("sync_teaching_slides", project_id, strategy, confirmed)
+    def sync_teaching_slides(self, project_id: str, strategy: Literal['preserve_manual', 'replace']='preserve_manual', confirmed: bool=False, plan_token: str | None=None) -> dict[str, Any]:
+        return self._call("sync_teaching_slides", project_id, strategy, confirmed, plan_token)
 
     def start_classroom_session(self, project_id: str) -> dict[str, Any]:
         return self._call("start_classroom_session", project_id)
@@ -127,14 +127,14 @@ class AuthoringDomain:
     def list_saved_handout_versions(self, document_id: str) -> dict[str, Any]:
         return self._call("list_saved_handout_versions", document_id)
 
-    def restore_saved_handout_version(self, document_id: str, version: int, confirmed: bool=False) -> dict[str, Any]:
-        return self._call("restore_saved_handout_version", document_id, version, confirmed)
+    def restore_saved_handout_version(self, document_id: str, version: int, confirmed: bool=False, plan_token: str | None=None) -> dict[str, Any]:
+        return self._call("restore_saved_handout_version", document_id, version, confirmed, plan_token)
 
     def rename_saved_handout(self, document_id: str, title: str) -> dict[str, Any]:
         return self._call("rename_saved_handout", document_id, title)
 
-    def apply_word_format_to_saved_handout(self, document_id: str, template_id: str | None=None, format_spec: dict[str, Any] | None=None) -> dict[str, Any]:
-        return self._call("apply_word_format_to_saved_handout", document_id, template_id, format_spec)
+    def apply_word_format_to_saved_handout(self, document_id: str, template_id: str | None=None, format_spec: dict[str, Any] | None=None, dry_run: bool=True, plan_token: str | None=None) -> dict[str, Any]:
+        return self._call("apply_word_format_to_saved_handout", document_id, template_id, format_spec, dry_run, plan_token)
 
     def apply_word_format_to_workbench(self, draft_id: str | None=None, template_id: str | None=None, format_spec: dict[str, Any] | None=None, dry_run: bool=True) -> dict[str, Any]:
         return self._call("apply_word_format_to_workbench", draft_id, template_id, format_spec, dry_run)

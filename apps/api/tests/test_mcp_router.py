@@ -262,6 +262,57 @@ def test_format_refinement_uses_deepseek_flash_for_fast_formatting(monkeypatch) 
     assert captured["thinking"] == "disabled"
 
 
+def test_analysis_generation_uses_fast_text_only_deepseek_call(monkeypatch) -> None:
+    client = AiHttpClient("https://api.deepseek.com", "secret", "deepseek-v4-pro")
+    captured: dict[str, object] = {}
+
+    def fake_call(messages, **kwargs):  # type: ignore[no-untyped-def]
+        captured["messages"] = messages
+        captured.update(kwargs)
+        return {"answer": "A", "analysis": "由牛顿第二定律可得。"}
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    result = client.generate_analysis(
+        {
+            "question_id": "fast-analysis",
+            "title": "物体受到恒力作用，判断其运动。",
+            "options": [{"opt": "A", "content": "做匀加速直线运动"}],
+            "figures": [
+                {"fig_uuid": "private-figure-id", "local_path": "C:/private/figure.png"}
+            ],
+        },
+        style="exam_standard",
+    )
+
+    prompt = str(captured["messages"])
+    assert result == {"answer": "A", "analysis": "由牛顿第二定律可得。"}
+    assert captured["model_name"] == "deepseek-v4-flash"
+    assert captured["max_tokens"] == 1600
+    assert captured["timeout_seconds"] == 60
+    assert captured["thinking"] == "disabled"
+    assert captured["response_format"] == {"type": "json_object"}
+    assert "question_type" not in prompt
+    assert "difficulty" not in prompt
+    assert "private-figure-id" not in prompt
+    assert "C:/private/figure.png" not in prompt
+
+
+def test_analysis_generation_keeps_custom_provider_model(monkeypatch) -> None:
+    client = AiHttpClient("https://example.com/v1", "secret", "custom-model")
+    captured: dict[str, object] = {}
+
+    def fake_call(_messages, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return {"answer": "2 m/s", "analysis": "计算可得。"}
+
+    monkeypatch.setattr(client, "_call", fake_call)
+    client.generate_analysis({"title": "求速度。"}, style="classroom_brief")
+
+    assert captured["model_name"] == "custom-model"
+    assert captured["max_tokens"] == 1200
+    assert captured["thinking"] is None
+
+
 def test_format_refinement_accepts_empty_options_for_experiment_steps(monkeypatch) -> None:
     client = AiHttpClient("https://example.com/v1", "secret", "deepseek-chat")
     captured: dict[str, object] = {}

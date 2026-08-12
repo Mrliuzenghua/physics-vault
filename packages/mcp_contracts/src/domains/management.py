@@ -51,11 +51,13 @@ class ManagementDomain:
     def backfill_canonical_question_hashes(self, dry_run: bool=True, reason: str='为正式题库建立重复题内容指纹', overwrite_existing: bool=False) -> dict[str, Any]:
         return self._call("backfill_canonical_question_hashes", dry_run, reason, overwrite_existing)
 
-    def merge_canonical_duplicate_questions(self, primary_question_id: str, duplicate_question_ids: list[str], dry_run: bool=True, reason: str='合并正式题库完全重复题') -> dict[str, Any]:
-        return self._call("merge_canonical_duplicate_questions", primary_question_id, duplicate_question_ids, dry_run, reason)
+    def merge_canonical_duplicate_questions(self, primary_question_id: str, duplicate_question_ids: list[str], dry_run: bool=True, reason: str='合并正式题库完全重复题', plan_token: str | None=None) -> dict[str, Any]:
+        args = (primary_question_id, duplicate_question_ids, dry_run, reason)
+        return self._call("merge_canonical_duplicate_questions", *args, plan_token) if plan_token is not None else self._call("merge_canonical_duplicate_questions", *args)
 
-    def restore_canonical_duplicate_merge(self, merge_batch_id: str, dry_run: bool=True, reason: str='恢复重复题合并') -> dict[str, Any]:
-        return self._call("restore_canonical_duplicate_merge", merge_batch_id, dry_run, reason)
+    def restore_canonical_duplicate_merge(self, merge_batch_id: str, dry_run: bool=True, reason: str='恢复重复题合并', plan_token: str | None=None) -> dict[str, Any]:
+        args = (merge_batch_id, dry_run, reason)
+        return self._call("restore_canonical_duplicate_merge", *args, plan_token) if plan_token is not None else self._call("restore_canonical_duplicate_merge", *args)
 
     def batch_replace_question_tags(self, updates: list[dict[str, Any]], dry_run: bool=True, reason: str | None=None) -> dict[str, Any]:
         return self._call("batch_replace_question_tags", updates, dry_run, reason)
@@ -63,8 +65,9 @@ class ManagementDomain:
     def batch_replace_question_knowledge_points(self, updates: list[dict[str, Any]], dry_run: bool=True, reason: str | None=None) -> dict[str, Any]:
         return self._call("batch_replace_question_knowledge_points", updates, dry_run, reason)
 
-    def return_question_to_review(self, question_id: str, reason: str='题目需要回炉重造', dry_run: bool=True, operation_id: str | None=None) -> dict[str, Any]:
-        return self._call("return_question_to_review", question_id, reason, dry_run, operation_id)
+    def return_question_to_review(self, question_id: str, reason: str='题目需要回炉重造', dry_run: bool=True, operation_id: str | None=None, plan_token: str | None=None) -> dict[str, Any]:
+        args = (question_id, reason, dry_run, operation_id)
+        return self._call("return_question_to_review", *args, plan_token) if plan_token is not None else self._call("return_question_to_review", *args)
 
     def reconcile_review_queue_outbox(self, limit: int=20) -> dict[str, Any]:
         return self._call("reconcile_review_queue_outbox", limit)
@@ -75,8 +78,9 @@ class ManagementDomain:
     def get_change_batch(self, batch_id: str) -> dict[str, Any]:
         return self._call("get_change_batch", batch_id)
 
-    def rollback_change_batch(self, batch_id: str, dry_run: bool=True, reason: str | None=None, allow_conflicts: bool=False) -> dict[str, Any]:
-        return self._call("rollback_change_batch", batch_id, dry_run, reason, allow_conflicts)
+    def rollback_change_batch(self, batch_id: str, dry_run: bool=True, reason: str | None=None, allow_conflicts: bool=False, plan_token: str | None=None) -> dict[str, Any]:
+        args = (batch_id, dry_run, reason, allow_conflicts)
+        return self._call("rollback_change_batch", *args, plan_token) if plan_token is not None else self._call("rollback_change_batch", *args)
 
 
 def management_tool_names(registry: ToolRegistry) -> tuple[str, ...]:

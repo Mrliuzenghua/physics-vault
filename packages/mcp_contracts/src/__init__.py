@@ -22,13 +22,17 @@ from .models import (
 )
 from .tool_registry import (
     DuplicateToolNameError,
+    ToolConfirmation,
     ToolDomain,
+    ToolImpactScope,
     ToolRegistry,
+    ToolReversibility,
     ToolRisk,
     ToolSpec,
     default_tool_registry,
     discover_tools,
     profile_tool_names,
+    tool_policy_manifest,
 )
 from .operation_plan import OperationPlan, OperationTarget, build_operation_plan, snapshot_version
 
@@ -61,7 +65,10 @@ __all__ = [
     "StandardQuestion",
     "SubQuestion",
     "ToolDomain",
+    "ToolConfirmation",
+    "ToolImpactScope",
     "ToolRegistry",
+    "ToolReversibility",
     "ToolRisk",
     "ToolSpec",
     "VariantQuestion",
@@ -72,5 +79,6 @@ __all__ = [
     "default_tool_registry",
     "discover_tools",
     "profile_tool_names",
+    "tool_policy_manifest",
     "snapshot_version",
 ]

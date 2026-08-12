@@ -35,6 +35,12 @@ class SearchKnowledgeDomain:
     def search_questions(self, query: str | None = None, search_mode: Literal["browse", "strict", "hybrid", "similar", "comprehensive"] = "hybrid", question_type: str | None = None, difficulty: str | None = None, status: str | None = None, year: int | None = None, module: str | None = None, topic1_id: str | None = None, topic2_id: str | None = None, topic3_id: str | None = None, topic2: str | None = None, topic3: str | None = None, region: str | None = None, exam_type: str | None = None, has_media: bool | None = None, image_count_min: int = 0, is_mistake: bool | None = None, limit: int = 12, offset: int = 0) -> dict[str, Any]:
         return self._call("search_questions", query, search_mode, question_type, difficulty, status, year, module, topic1_id, topic2_id, topic3_id, topic2, topic3, region, exam_type, has_media, image_count_min, is_mistake, limit, offset)
 
+    def search_questions_compact(self, query: str | None = None, search_mode: Literal["browse", "strict", "hybrid", "similar", "comprehensive"] = "hybrid", question_type: str | None = None, difficulty: str | None = None, year: int | None = None, topic3_id: str | None = None, limit: int = 12, offset: int = 0) -> dict[str, Any]:
+        return self._call("search_questions_compact", query, search_mode, question_type, difficulty, year, topic3_id, limit, offset)
+
+    def search_questions_curated(self, query: str, target_count: int = 10, candidate_limit: int = 50, search_mode: Literal["strict", "hybrid", "comprehensive"] = "hybrid", question_type: str | None = None, difficulty: str | None = None, year: int | None = None, topic3_id: str | None = None) -> dict[str, Any]:
+        return self._call("search_questions_curated", query, target_count, candidate_limit, search_mode, question_type, difficulty, year, topic3_id)
+
     def download_question_images(self, question_id: str, destination_subdir: str | None = None, overwrite: bool = False) -> dict[str, Any]: return self._call("download_question_images", question_id, destination_subdir, overwrite)
     def search_topic_questions(self, query: str, question_type: str | None = None, difficulty: str | None = None, limit: int = 20, offset: int = 0) -> dict[str, Any]: return self._call("search_topic_questions", query, question_type, difficulty, limit, offset)
     def search_method_questions(self, query: str, year: int | None = None, region: str | None = None, question_type: str | None = None, difficulty: str | None = None, limit: int = 20, offset: int = 0, summary_only: bool = True, include_evidence: bool = False, confirmed_only: bool = True) -> dict[str, Any]: return self._call("search_method_questions", query, year, region, question_type, difficulty, limit, offset, summary_only, include_evidence, confirmed_only)
@@ -50,6 +56,8 @@ class SearchKnowledgeDomain:
     def find_similar_questions(self, question_id: str, limit: int = 10, same_question_type: bool = False, same_knowledge_point: bool = False, difficulty_tolerance: int = 99) -> dict[str, Any]: return self._call("find_similar_questions", question_id, limit, same_question_type, same_knowledge_point, difficulty_tolerance)
     def scan_canonical_duplicate_questions(self, limit: int = 100) -> dict[str, Any]: return self._call("scan_canonical_duplicate_questions", limit)
     def list_canonical_duplicate_merges(self, state: Literal["archived", "restored", "all"] = "archived", limit: int = 50) -> dict[str, Any]: return self._call("list_canonical_duplicate_merges", state, limit)
+    def get_workflow_guide(self, intent: str | None = None) -> dict[str, Any]: return self._call("get_workflow_guide", intent)
+    def mcp_system_health(self, include_details: bool = False) -> dict[str, Any]: return self._call("mcp_system_health", include_details)
 
 
 def search_knowledge_tool_names(registry: ToolRegistry) -> tuple[str, ...]:

@@ -47,6 +47,31 @@ _CONFIG_FILE = Path(
 _SESSION_LOCKS: dict[str, asyncio.Lock] = {}
 _KNOWN_SESSION_IDS: set[str] = set()
 
+# The browser launches Claude Code in print mode, where no interactive
+# permission dialog is available. Keep this list intentionally scoped to the
+# question-selection and composition-workbench workflow.
+_AGENT_ALLOWED_MCP_TOOLS = (
+    "mcp__physics_vault__list_filter_facets",
+    "mcp__physics_vault__search_questions",
+    "mcp__physics_vault__search_questions_compact",
+    "mcp__physics_vault__search_questions_curated",
+    "mcp__physics_vault__get_questions_by_ids",
+    "mcp__physics_vault__list_composition_workbenches",
+    "mcp__physics_vault__get_composition_workbench",
+    "mcp__physics_vault__create_composition_workbench",
+    "mcp__physics_vault__add_questions_to_composition_workbench",
+    "mcp__physics_vault__add_knowledge_to_composition_workbench",
+    "mcp__physics_vault__insert_teaching_block_to_composition_workbench",
+    "mcp__physics_vault__reorder_composition_workbench",
+    "mcp__physics_vault__move_composition_item",
+    "mcp__physics_vault__remove_items_from_composition_workbench",
+    "mcp__physics_vault__update_composition_item",
+    "mcp__physics_vault__apply_composition_workbench_plan",
+    "mcp__physics_vault__preview_composition_workbench",
+    "mcp__physics_vault__curate_questions_to_composition_workbench",
+    "mcp__physics_vault__export_composition_workbench",
+)
+
 
 class ClaudeCodeAgentService:
     def __init__(self, repository: QuestionSearchRepository | None = None) -> None:
@@ -1192,6 +1217,7 @@ def _run_claude_print(
     mcp_config = _mcp_config_path()
     if mcp_config.exists():
         args.extend(["--mcp-config", str(mcp_config)])
+        args.extend(["--allowedTools", *_AGENT_ALLOWED_MCP_TOOLS])
     if session_id:
         args.extend(["--resume" if resume_session else "--session-id", session_id])
     completed = subprocess.run(
@@ -1330,7 +1356,12 @@ def _session_lock(session_id: str) -> asyncio.Lock:
 
 def _mcp_config_path() -> Path:
     dedicated = project_root() / ".claude" / "physics-vault-agent-mcp.json"
-    return dedicated if dedicated.exists() else project_root() / ".claude" / "physics-vault-mcp.json"
+    legacy = project_root() / ".claude" / "physics-vault-mcp.json"
+    if dedicated.exists():
+        return dedicated
+    if legacy.exists():
+        return legacy
+    return project_root() / ".mcp.json"
 
 
 def _fallback_resume_mode(output: str, attempted_resume: bool) -> bool | None:

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 from uuid import uuid4
 
@@ -116,6 +117,31 @@ def test_session_fallback_modes():
     assert _fallback_resume_mode("Error: No conversation found with session ID: abc", True) is False
     assert _fallback_resume_mode("Error: Session ID abc is already in use.", False) is True
     assert _fallback_resume_mode("Other error", True) is None
+
+
+def test_print_mode_passes_scoped_mcp_permissions(monkeypatch, tmp_path):
+    captured = {}
+
+    monkeypatch.setattr(agent_module, "_resolve_executable", lambda _path: "claude")
+    monkeypatch.setattr(agent_module, "_mcp_config_path", lambda: tmp_path / ".mcp.json")
+    (tmp_path / ".mcp.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        agent_module.subprocess,
+        "run",
+        lambda args, **_kwargs: captured.setdefault("result", subprocess.CompletedProcess(args, 0, "OK", "")),
+    )
+
+    result = agent_module._run_claude_print(
+        AgentConfig(claude_code_path="claude", enabled=True, timeout_seconds=30),
+        "清空组卷工作台",
+    )
+
+    args = captured["result"].args
+    assert result == "OK"
+    assert "--mcp-config" in args
+    assert "--allowedTools" in args
+    assert "mcp__physics_vault__get_composition_workbench" in args
+    assert "mcp__physics_vault__remove_items_from_composition_workbench" in args
 
 
 def test_question_picker_falls_back_when_claude_disabled(monkeypatch):

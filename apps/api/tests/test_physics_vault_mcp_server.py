@@ -4,6 +4,7 @@ import json
 import sqlite3
 import sys
 import types
+from copy import deepcopy
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -44,6 +45,8 @@ def _load_mcp_server():
 
 
 EXPECTED_MCP_TOOLS = {
+    "get_workflow_guide",
+    "mcp_system_health",
     "list_teaching_projects",
     "get_teaching_project",
     "get_teaching_project_status",
@@ -149,12 +152,74 @@ EXPECTED_MCP_TOOLS = {
 }
 
 
+def test_workflow_guide_routes_common_intents() -> None:
+    module = _load_mcp_server()
+
+    result = module.get_workflow_guide("我要组卷并调整题目顺序")
+
+    assert result["matched_count"] == 1
+    assert result["workflows"][0]["id"] == "composition"
+    assert result["workflows"][0]["start_tool"] == "search_questions_curated"
+    assert "apply_composition_workbench_plan" in result["workflows"][0]["tools"]
+
+
 def test_mcp_tool_inventory_is_explicit_and_unique() -> None:
     module = _load_mcp_server()
     names = [tool.__name__ for tool in module.server.tools]
 
     assert len(names) == len(set(names))
     assert set(names) == EXPECTED_MCP_TOOLS
+
+
+def test_publish_plan_token_is_version_bound_and_idempotent(tmp_path, monkeypatch) -> None:
+    module = _load_mcp_server()
+    service = module.OperationPlanService(module.OperationPlanRepository(tmp_path / "plans.sqlite3"))
+    monkeypatch.setattr(module, "_mcp_operation_plan_service", lambda: service)
+    state = {
+        "id": "project-1",
+        "updatedAt": "2026-08-12T00:00:00+00:00",
+        "contentRevision": 3,
+        "slides": {
+            "status": "ready",
+            "sourceRevision": 3,
+            "publishedSnapshot": {"version": 1, "lessonPackage": {"id": "lesson-1"}},
+        },
+    }
+    saves = []
+
+    monkeypatch.setattr(module, "_get_teaching_project", lambda project_id: deepcopy(state) if project_id == "project-1" else None)
+
+    def save(project, *, base_updated_at=None):
+        assert base_updated_at == state["updatedAt"]
+        saves.append(deepcopy(project))
+        state.clear()
+        state.update(deepcopy(project))
+        state["updatedAt"] = f"saved-{len(saves)}"
+        return deepcopy(state)
+
+    monkeypatch.setattr(module, "_save_teaching_project", save)
+
+    preview = module.publish_teaching_artifact("project-1")
+    assert preview["dry_run"] is True
+    assert preview["plan_token"] == preview["operation_plan"]["operation_id"]
+
+    missing = module.publish_teaching_artifact("project-1", confirmed=True)
+    assert missing["error_info"]["code"] == "PLAN_TOKEN_REQUIRED"
+
+    executed = module.publish_teaching_artifact("project-1", confirmed=True, plan_token=preview["plan_token"])
+    assert executed["ok"] is True
+    assert executed["published_version"] == 2
+    assert executed["idempotent"] is False
+
+    replay = module.publish_teaching_artifact("project-1", confirmed=True, plan_token=preview["plan_token"])
+    assert replay["idempotent"] is True
+    assert len(saves) == 1
+
+    stale_preview = module.publish_teaching_artifact("project-1")
+    state["updatedAt"] = "changed-after-preview"
+    conflict = module.publish_teaching_artifact("project-1", confirmed=True, plan_token=stale_preview["plan_token"])
+    assert conflict["error_info"]["code"] == "OPERATION_PLAN_VERSION_CONFLICT"
+    assert len(saves) == 1
 
 
 def test_catalog_profile_exposes_only_catalog_tools(monkeypatch) -> None:
@@ -894,7 +959,9 @@ def test_canonical_duplicate_merge_archives_and_restores_without_deletion(tmp_pa
     preview = module.merge_canonical_duplicate_questions("q-001", ["q-002"])
     assert preview["dry_run"] is True
     assert preview["merge_plan"]["knowledge_topic3_ids_to_add"] == ["KP-MECH-DYN-NEWTON2"]
-    applied = module.merge_canonical_duplicate_questions("q-001", ["q-002"], dry_run=False)
+    applied = module.merge_canonical_duplicate_questions(
+        "q-001", ["q-002"], dry_run=False, plan_token=preview["plan_token"]
+    )
     assert applied["archived_count"] == 1
     listed = module.list_canonical_duplicate_merges()
     assert listed["items"][0]["merge_batch_id"] == applied["audit_batch_id"]
@@ -904,7 +971,10 @@ def test_canonical_duplicate_merge_archives_and_restores_without_deletion(tmp_pa
         assert conn.execute("SELECT question_id FROM question_sources WHERE source_id = 'source-q2'").fetchone()[0] == "q-001"
         assert conn.execute("SELECT COUNT(*) FROM question_knowledge_points WHERE question_id = 'q-001'").fetchone()[0] == 1
 
-    restored = module.restore_canonical_duplicate_merge(applied["audit_batch_id"], dry_run=False)
+    restore_preview = module.restore_canonical_duplicate_merge(applied["audit_batch_id"])
+    restored = module.restore_canonical_duplicate_merge(
+        applied["audit_batch_id"], dry_run=False, plan_token=restore_preview["plan_token"]
+    )
     assert restored["ok"] is True
     with sqlite3.connect(standard_db) as conn:
         assert conn.execute("SELECT status FROM questions WHERE question_id = 'q-002'").fetchone()[0] == "approved"
@@ -1002,6 +1072,7 @@ def test_tag_normalization_is_dry_run_first_and_audited(tmp_path, monkeypatch):
         applied["audit_batch_id"],
         dry_run=False,
         reason="undo tag normalization",
+        plan_token=rollback_preview["plan_token"],
     )
     assert rollback["ok"] is True
     with sqlite3.connect(standard_db) as conn:
@@ -1017,7 +1088,9 @@ def test_return_to_review_updates_canonical_status_but_writes_queue_to_review_db
     assert preview["dry_run"] is True
     assert preview["item"]["after_status"] == "待校对"
 
-    applied = module.return_question_to_review("q-001", reason="needs rework", dry_run=False)
+    applied = module.return_question_to_review(
+        "q-001", reason="needs rework", dry_run=False, plan_token=preview["plan_token"]
+    )
     assert applied["dry_run"] is False
     assert applied["audit_batch_id"]
     assert applied["operation_id"]
@@ -1034,10 +1107,12 @@ def test_return_to_review_updates_canonical_status_but_writes_queue_to_review_db
     with sqlite3.connect(review_db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 1
 
+    rollback_preview = module.rollback_change_batch(applied["audit_batch_id"], reason="undo return to review")
     rollback = module.rollback_change_batch(
         applied["audit_batch_id"],
         dry_run=False,
         reason="undo return to review",
+        plan_token=rollback_preview["plan_token"],
     )
     assert rollback["ok"] is True
     with sqlite3.connect(standard_db) as conn:
@@ -1050,7 +1125,10 @@ def test_review_queue_outbox_reconciles_pending_delivery(tmp_path, monkeypatch):
     module = _load_mcp_server()
     standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
 
-    applied = module.return_question_to_review("q-001", reason="needs rework", dry_run=False)
+    preview = module.return_question_to_review("q-001", reason="needs rework")
+    applied = module.return_question_to_review(
+        "q-001", reason="needs rework", dry_run=False, plan_token=preview["plan_token"]
+    )
     with sqlite3.connect(standard_db) as conn:
         conn.execute(
             "UPDATE review_queue_outbox SET delivery_status = 'pending' WHERE operation_id = ?",
@@ -1070,17 +1148,22 @@ def test_rollback_cancels_pending_review_queue_outbox(tmp_path, monkeypatch):
     module = _load_mcp_server()
     standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
 
-    applied = module.return_question_to_review("q-001", reason="needs rework", dry_run=False)
+    preview = module.return_question_to_review("q-001", reason="needs rework")
+    applied = module.return_question_to_review(
+        "q-001", reason="needs rework", dry_run=False, plan_token=preview["plan_token"]
+    )
     with sqlite3.connect(standard_db) as conn:
         conn.execute(
             "UPDATE review_queue_outbox SET delivery_status = 'pending' WHERE operation_id = ?",
             (applied["operation_id"],),
         )
 
+    rollback_preview = module.rollback_change_batch(applied["audit_batch_id"], reason="undo pending return to review")
     rollback = module.rollback_change_batch(
         applied["audit_batch_id"],
         dry_run=False,
         reason="undo pending return to review",
+        plan_token=rollback_preview["plan_token"],
     )
     assert rollback["ok"] is True
     assert rollback["cancelled_outbox_count"] == 1
@@ -1122,10 +1205,12 @@ def test_knowledge_binding_normalization_is_audited(tmp_path, monkeypatch):
             (applied["audit_batch_id"],),
         ).fetchone()[0] == "knowledge_binding_normalization"
 
+    rollback_preview = module.rollback_change_batch(applied["audit_batch_id"], reason="undo knowledge binding")
     rollback = module.rollback_change_batch(
         applied["audit_batch_id"],
         dry_run=False,
         reason="undo knowledge binding",
+        plan_token=rollback_preview["plan_token"],
     )
     assert rollback["ok"] is True
     with sqlite3.connect(standard_db) as conn:
@@ -1154,6 +1239,7 @@ def test_rollback_blocks_current_value_conflicts(tmp_path, monkeypatch):
         applied["audit_batch_id"],
         dry_run=False,
         reason="try rollback",
+        plan_token=preview["plan_token"],
     )
     assert blocked["ok"] is False
 
