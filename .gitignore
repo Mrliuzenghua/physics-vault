@@ -10,6 +10,7 @@ output/
 .server-logs/
 .claude/
 .mcp.json
+config/mcp_client_baseline.json
 
 # Python
 __pycache__/
@@ -49,12 +50,17 @@ data/assets/questions/*
 data/assets/extracted/*
 data/cache/knowledge/*
 data/cache/ai-tasks/*
+data/cache/question-images/*
 data/.cache/
+data/config/*
 data/exports/*
 data/logs/*
 data/import-batches/*
+data/mcp-downloads/*
 data/backups/
 data/*.txt
+tmp/
+原始存档清洗/
 *_encoding_check.txt
 encoding_test.txt
 old_encoding_test.txt

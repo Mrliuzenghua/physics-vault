@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "required_servers": [
+    "physics_vault",
+    "study_sheet_workflow",
+    "playwright"
+  ],
+  "physics_mcp_profile": "all",
+  "study_sheet_root": null,
+  "playwright_package": "@playwright/mcp@0.0.78",
+  "playwright_required_args": [],
+  "policy": {
+    "expose_all_tools": true,
+    "allow_tool_filters": false
+  }
+}
