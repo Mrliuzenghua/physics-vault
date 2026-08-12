@@ -1,5 +1,10 @@
 # apps/api
 
+## 测试数据库
+
+- Pytest 默认按进程创建独立的正式库与审核库临时文件，支持 Windows 上并行运行多个测试任务。
+- 如需固定测试路径，使用 `PHYSICS_TEST_DB_PATH` 和 `PHYSICS_TEST_REVIEW_DB_PATH`；测试不会采用生产运行时的数据库路径。
+
 ## 服务端 Word / PPTX 后台导出
 
 - `POST /api/exports/word` 与 `POST /api/exports/pptx` 接收组卷页面的完整快照。
