@@ -1,4 +1,5 @@
 import type { JSONContent } from '@tiptap/core';
+import { readJsonStorage, writeJsonStorage } from '../../services/safeStorage';
 import Placeholder from '@tiptap/extension-placeholder';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
@@ -199,23 +200,13 @@ function editorText(document: JSONContent): string {
 
 function loadStoredDocument(storageKey?: string): JSONContent | null {
   if (!storageKey) return null;
-  try {
-    const raw = localStorage.getItem(storageKey);
-    if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed as JSONContent : null;
-  } catch {
-    return null;
-  }
+  const parsed = readJsonStorage<unknown>(storageKey, null);
+  return parsed && typeof parsed === 'object' ? parsed as JSONContent : null;
 }
 
 function saveStoredDocument(storageKey: string | undefined, document: JSONContent) {
   if (!storageKey) return;
-  try {
-    localStorage.setItem(storageKey, JSON.stringify(document));
-  } catch {
-    // Local persistence is an enhancement; server saving remains authoritative.
-  }
+  writeJsonStorage(storageKey, document);
 }
 
 function hydrateFigureNodes(document: JSONContent, figures: FigureAsset[]): JSONContent {

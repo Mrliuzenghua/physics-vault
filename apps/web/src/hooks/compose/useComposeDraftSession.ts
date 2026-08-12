@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { fetchLatestPaperDraft, fetchPaperDraft } from '../../services/paperDraftApi';
 import { fetchQuestion, fetchQuestionsByIds } from '../../services/questionApi';
 import type { DraftSaveState } from '../../services/composeSaveState';
+import { readStorageValue, removeStorageValue, writeStorageValue } from '../../services/safeStorage';
 import { buildComposeItemsFromPaperDraft, getQuestionSnapshot } from '../../utils/composeDraft';
 import type { BasketItem, ComposeItem, ComposeQuestionItem, PaperDraft, Question, TemplateMaterialPackage } from '../../types';
 
@@ -47,7 +48,7 @@ export function useComposeDraftSession({
   const queryClient = useQueryClient();
   const initialBasketItemsRef = useRef<BasketItem[]>(basketItems);
   const [draftId, setDraftId] = useState(() => (
-    (!startNewDraft && typeof window !== 'undefined' ? window.localStorage.getItem(CURRENT_COMPOSE_DRAFT_STORAGE_KEY) : null)
+    (!startNewDraft ? readStorageValue(CURRENT_COMPOSE_DRAFT_STORAGE_KEY) : null)
       || `lesson-current-${Date.now()}`
   ));
   const draftIdRef = useRef(draftId);
@@ -60,7 +61,7 @@ export function useComposeDraftSession({
   const recordSavedDraft = useCallback((draft: PaperDraft) => {
     draftIdRef.current = draft.id;
     setDraftId(draft.id);
-    window.localStorage.setItem(CURRENT_COMPOSE_DRAFT_STORAGE_KEY, draft.id);
+    writeStorageValue(CURRENT_COMPOSE_DRAFT_STORAGE_KEY, draft.id);
     setServerDraftUpdatedAt(draft.updated_at);
     setLastSavedAt(draft.updated_at || new Date().toISOString());
     setDraftSaveError(null);
@@ -118,9 +119,9 @@ export function useComposeDraftSession({
     async function load() {
       const initialBasketItems = initialBasketItemsRef.current;
       if (startNewDraft) {
-        window.localStorage.removeItem(CURRENT_COMPOSE_DRAFT_STORAGE_KEY);
+        removeStorageValue(CURRENT_COMPOSE_DRAFT_STORAGE_KEY);
       }
-      const storedDraftId = window.localStorage.getItem(CURRENT_COMPOSE_DRAFT_STORAGE_KEY);
+      const storedDraftId = readStorageValue(CURRENT_COMPOSE_DRAFT_STORAGE_KEY);
       if (!startNewDraft && storedDraftId) {
         try {
           const storedDraft = await fetchPaperDraft(storedDraftId);

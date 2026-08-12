@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SyntheticEvent } from 'react';
 import type { Figure } from '../../types';
 import { updateQuestionImage } from '../../services/assetsApi';
+import { readStorageValue, writeStorageValue } from '../../services/safeStorage';
 import { imageFileUrl, imageThumbnailUrl } from '../../utils/imageUrl';
 import LatexRenderer from '../render/LatexRenderer';
 
@@ -32,22 +33,14 @@ function loadScale(figure: Figure) {
   if (typeof figure.display_scale === 'number' && figure.display_scale >= 25 && figure.display_scale <= 100) {
     return figure.display_scale;
   }
-  try {
-    const raw = localStorage.getItem(`${STEM_IMAGE_SCALE_KEY}.${getFigureKey(figure)}`);
-    const scale = Number(raw);
-    if (scale >= 25 && scale <= 100) return scale;
-  } catch {
-    // localStorage may be unavailable in embedded previews.
-  }
+  const raw = readStorageValue(`${STEM_IMAGE_SCALE_KEY}.${getFigureKey(figure)}`);
+  const scale = Number(raw);
+  if (scale >= 25 && scale <= 100) return scale;
   return 60;
 }
 
 function saveScale(figure: Figure, scale: number) {
-  try {
-    localStorage.setItem(`${STEM_IMAGE_SCALE_KEY}.${getFigureKey(figure)}`, String(scale));
-  } catch {
-    // Ignore storage failures; the live resize still works for this session.
-  }
+  writeStorageValue(`${STEM_IMAGE_SCALE_KEY}.${getFigureKey(figure)}`, String(scale));
 }
 
 /**

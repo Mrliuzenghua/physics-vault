@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { writeStorageValue } from '../services/safeStorage';
 
 type Theme = 'light';
 
@@ -14,13 +15,13 @@ export function useTheme() {
 
   const setTheme = useCallback(() => {
     setThemeState('light');
-    localStorage.setItem('physics_vault_theme', 'light');
+    writeStorageValue('physics_vault_theme', 'light');
     applyTheme();
   }, [applyTheme]);
 
   useEffect(() => {
     applyTheme();
-    localStorage.setItem('physics_vault_theme', 'light');
+    writeStorageValue('physics_vault_theme', 'light');
   }, [theme, applyTheme]);
 
   return { theme, setTheme, isDark: false };

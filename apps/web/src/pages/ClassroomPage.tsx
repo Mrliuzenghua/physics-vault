@@ -4,6 +4,7 @@ import { EmptyState } from '../components/ui/EmptyState';
 import { loadCurrentLessonPackage } from '../services/lessonPackage';
 import { getOrCreateTeachingProject, hydrateTeachingProject } from '../services/teachingProject';
 import { generateClassroomReflectionAdvice, hydrateClassroomReflections, loadLatestClassroomReflection, saveClassroomReflection, syncClassroomReflection, type ClassroomReflection, type ClassroomReflectionAdvice } from '../services/classroomReflection';
+import { readJsonStorage, writeJsonStorage } from '../services/safeStorage';
 import type { LessonPackage, Question, SlidesDisplayMode } from '../types';
 import type { SlideDeck, SlidePage } from '../types/slides';
 
@@ -39,26 +40,20 @@ function formatSessionTime(seconds: number): string {
 }
 
 function loadClassroomSession(projectId: string | null): ClassroomSession | null {
-  if (!projectId || typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(classroomSessionKey(projectId));
-    if (!raw) return null;
-    const value = JSON.parse(raw) as Partial<ClassroomSession>;
-    if (!value || typeof value !== 'object') return null;
-    return {
-      currentIndex: Number.isFinite(value.currentIndex) ? Math.max(0, Number(value.currentIndex)) : 0,
-      displayMode: value.displayMode === 'stem_answer' || value.displayMode === 'full' ? value.displayMode : 'stem_only',
-      revealStep: Number.isFinite(value.revealStep) ? Math.max(0, Number(value.revealStep)) : 0,
-      zoomLevel: Number.isFinite(value.zoomLevel) ? Math.min(2, Math.max(0.6, Number(value.zoomLevel))) : 1,
-      timerSeconds: Number.isFinite(value.timerSeconds) ? Math.max(0, Number(value.timerSeconds)) : 0,
-      timerRunning: value.timerRunning === true,
-      teacherNotes: typeof value.teacherNotes === 'string' ? value.teacherNotes : '',
-      annotations: value.annotations && typeof value.annotations === 'object' ? value.annotations as Record<string, string> : {},
-      updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
-    };
-  } catch {
-    return null;
-  }
+  if (!projectId) return null;
+  const value = readJsonStorage<Partial<ClassroomSession> | null>(classroomSessionKey(projectId), null);
+  if (!value || typeof value !== 'object') return null;
+  return {
+    currentIndex: Number.isFinite(value.currentIndex) ? Math.max(0, Number(value.currentIndex)) : 0,
+    displayMode: value.displayMode === 'stem_answer' || value.displayMode === 'full' ? value.displayMode : 'stem_only',
+    revealStep: Number.isFinite(value.revealStep) ? Math.max(0, Number(value.revealStep)) : 0,
+    zoomLevel: Number.isFinite(value.zoomLevel) ? Math.min(2, Math.max(0.6, Number(value.zoomLevel))) : 1,
+    timerSeconds: Number.isFinite(value.timerSeconds) ? Math.max(0, Number(value.timerSeconds)) : 0,
+    timerRunning: value.timerRunning === true,
+    teacherNotes: typeof value.teacherNotes === 'string' ? value.teacherNotes : '',
+    annotations: value.annotations && typeof value.annotations === 'object' ? value.annotations as Record<string, string> : {},
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
+  };
 }
 
 function buildMixedPages(lessonPackage: LessonPackage, deck: SlideDeck): MixedPage[] {
@@ -165,8 +160,8 @@ export default function ClassroomPage() {
   }, []);
 
   useEffect(() => {
-    if (!project || typeof window === 'undefined') return;
-    window.localStorage.setItem(classroomSessionKey(project.id), JSON.stringify({
+    if (!project) return;
+    writeJsonStorage(classroomSessionKey(project.id), {
       currentIndex,
       displayMode,
       revealStep,
@@ -176,7 +171,7 @@ export default function ClassroomPage() {
       teacherNotes,
       annotations,
       updatedAt: new Date().toISOString(),
-    } satisfies ClassroomSession));
+    } satisfies ClassroomSession);
   }, [annotations, currentIndex, displayMode, project, revealStep, teacherNotes, timerRunning, timerSeconds, zoomLevel]);
 
   const openReflection = useCallback(() => {

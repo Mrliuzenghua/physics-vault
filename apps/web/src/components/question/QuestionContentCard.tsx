@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { Question, QuestionImageDetail } from '../../types';
+import { readStorageValue, writeStorageValue } from '../../services/safeStorage';
 import { imageFileUrl } from '../../utils/imageUrl';
 import ImportStemRenderer from '../import/ImportStemRenderer';
 import LatexRenderer from '../render/LatexRenderer';
@@ -14,24 +15,16 @@ const SIZE_PRESETS = [
 const IMG_SCALE_KEY_PREFIX = 'physics-vault.img-scale';
 
 function loadImgScale(questionId: string, index: number): number {
-  try {
-    const v = localStorage.getItem(`${IMG_SCALE_KEY_PREFIX}.${questionId}.${index}`);
-    if (v != null) {
-      const n = Number(v);
-      if (n >= 20 && n <= 100) return n;
-    }
-  } catch {
-    // ignore
+  const value = readStorageValue(`${IMG_SCALE_KEY_PREFIX}.${questionId}.${index}`);
+  if (value != null) {
+    const scale = Number(value);
+    if (scale >= 20 && scale <= 100) return scale;
   }
   return 90;
 }
 
 function saveImgScale(questionId: string, index: number, scale: number): void {
-  try {
-    localStorage.setItem(`${IMG_SCALE_KEY_PREFIX}.${questionId}.${index}`, String(scale));
-  } catch {
-    // ignore
-  }
+  writeStorageValue(`${IMG_SCALE_KEY_PREFIX}.${questionId}.${index}`, String(scale));
 }
 
 interface Props {
