@@ -3,21 +3,38 @@ import { request } from './apiClient.ts';
 import {
   isRecord,
   readJsonStorage,
+  readSessionJsonStorage,
   readStorageValue,
   writeJsonStorage,
+  writeSessionJsonStorage,
   writeStorageValue,
 } from './safeStorage.ts';
 
 const BASKET_KEY = 'physics_vault_basket';
 const SETTINGS_KEY = 'physics_vault_settings';
 const MCP_KEY = 'physics_vault_mcp';
+const MCP_SESSION_SECRETS_KEY = 'physics_vault_mcp_session_secrets';
 const BASKET_EVENT = 'physics-vault-basket-changed';
 const LEGACY_DASHSCOPE_VL_MODELS = new Set(['qwen-vl-max']);
 
 let basketCache: BasketItem[] | null = null;
+let mcpSecretMemory = { vl_api_key: '', llm_api_key: '' };
 
 function asRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
+}
+
+function persistMcpConfig(config: McpConfig): void {
+  mcpSecretMemory = {
+    vl_api_key: config.vl.api_key,
+    llm_api_key: config.llm.api_key,
+  };
+  writeSessionJsonStorage(MCP_SESSION_SECRETS_KEY, mcpSecretMemory);
+  writeJsonStorage(MCP_KEY, {
+    ...config,
+    vl: { ...config.vl, api_key: '' },
+    llm: { ...config.llm, api_key: '' },
+  });
 }
 
 export const DEFAULT_AI_CONFIG = {
@@ -200,6 +217,18 @@ export function getMcpConfig(): McpConfig {
     const stored = readJsonStorage<Record<string, unknown>>(MCP_KEY, {}, isRecord);
     const storedVl = asRecord(stored.vl) as Partial<McpConfig['vl']>;
     const storedLlm = asRecord(stored.llm) as Partial<McpConfig['llm']>;
+    const sessionSecrets = readSessionJsonStorage<Record<string, unknown>>(
+      MCP_SESSION_SECRETS_KEY,
+      mcpSecretMemory,
+      isRecord,
+    );
+    const legacyVlKey = typeof storedVl.api_key === 'string' ? storedVl.api_key : '';
+    const legacyLlmKey = typeof storedLlm.api_key === 'string' ? storedLlm.api_key : '';
+    const sessionVlKey = typeof sessionSecrets.vl_api_key === 'string' ? sessionSecrets.vl_api_key : '';
+    const sessionLlmKey = typeof sessionSecrets.llm_api_key === 'string' ? sessionSecrets.llm_api_key : '';
+    const vlApiKey = legacyVlKey || sessionVlKey;
+    const llmApiKey = legacyLlmKey || sessionLlmKey;
+    mcpSecretMemory = { vl_api_key: vlApiKey, llm_api_key: llmApiKey };
     const vlModel = LEGACY_DASHSCOPE_VL_MODELS.has(String(storedVl.model_name || '').toLowerCase())
       ? DEFAULT_AI_CONFIG.vl.model_name
       : storedVl.model_name;
@@ -208,20 +237,23 @@ export function getMcpConfig(): McpConfig {
       String(storedVl.base_url || '').toLowerCase().includes('dashscope.aliyuncs.com/api/v1')
         ? DEFAULT_AI_CONFIG.vl.base_url
         : storedVl.base_url;
-    return {
+    const result = {
       ...defaults,
       vl: {
         ...DEFAULT_AI_CONFIG.vl,
         ...storedVl,
+        api_key: vlApiKey,
         base_url: vlBaseUrl || DEFAULT_AI_CONFIG.vl.base_url,
         model_name: vlModel || DEFAULT_AI_CONFIG.vl.model_name,
       },
-      llm: { ...DEFAULT_AI_CONFIG.llm, ...storedLlm },
+      llm: { ...DEFAULT_AI_CONFIG.llm, ...storedLlm, api_key: llmApiKey },
       scheduling: { ...defaults.scheduling, ...asRecord(stored.scheduling) },
       cleaning: { ...defaults.cleaning, ...asRecord(stored.cleaning) },
       logging: { ...defaults.logging, ...asRecord(stored.logging) },
       capability_mapping: { ...defaults.capability_mapping, ...asRecord(stored.capability_mapping) },
-    };
+    } satisfies McpConfig;
+    if (legacyVlKey || legacyLlmKey) persistMcpConfig(result);
+    return result;
   } catch {
     return defaults;
   }
@@ -236,7 +268,7 @@ export function saveMcpConfig(config: McpConfig): void {
     String(config.vl.base_url || '').toLowerCase().includes('dashscope.aliyuncs.com/api/v1')
       ? DEFAULT_AI_CONFIG.vl.base_url
       : config.vl.base_url;
-  writeJsonStorage(MCP_KEY, {
+  persistMcpConfig({
     ...config,
     vl: { ...DEFAULT_AI_CONFIG.vl, ...config.vl, base_url: vlBaseUrl, model_name: vlModel },
     llm: { ...DEFAULT_AI_CONFIG.llm, ...config.llm },

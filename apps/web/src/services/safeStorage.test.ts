@@ -4,9 +4,11 @@ import test from 'node:test';
 import {
   isRecord,
   readJsonStorage,
+  readSessionJsonStorage,
   readStorageValue,
   removeStorageValue,
   writeJsonStorage,
+  writeSessionJsonStorage,
   writeStorageValue,
 } from './safeStorage.ts';
 
@@ -18,15 +20,25 @@ class MemoryStorage {
   removeItem(key: string): void { this.values.delete(key); }
 }
 
-function withStorage(storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>, run: () => void): void {
+function withStorage(
+  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>,
+  run: () => void,
+  session: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> = new MemoryStorage(),
+): void {
   const originalWindow = globalThis.window;
   const originalStorage = globalThis.localStorage;
+  const originalSessionStorage = globalThis.sessionStorage;
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
-  Object.defineProperty(globalThis, 'window', { configurable: true, value: { localStorage: storage } });
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: session });
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { localStorage: storage, sessionStorage: session },
+  });
   try {
     run();
   } finally {
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: originalStorage });
+    Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: originalSessionStorage });
     Object.defineProperty(globalThis, 'window', { configurable: true, value: originalWindow });
   }
 }
@@ -58,5 +70,17 @@ test('returns fallbacks and false writes when storage is unavailable', () => {
     assert.equal(writeStorageValue('key', 'value'), false);
     assert.equal(writeJsonStorage('key', { value: true }), false);
     assert.equal(removeStorageValue('key'), false);
-  });
+    assert.deepEqual(readSessionJsonStorage('key', {}), {});
+    assert.equal(writeSessionJsonStorage('key', { value: true }), false);
+  }, blocked);
+});
+
+test('keeps session JSON separate from persistent storage', () => {
+  const storage = new MemoryStorage();
+  const session = new MemoryStorage();
+  withStorage(storage, () => {
+    assert.equal(writeSessionJsonStorage('secret', { token: 'session-only' }), true);
+    assert.deepEqual(readSessionJsonStorage('secret', {}, isRecord), { token: 'session-only' });
+    assert.equal(storage.getItem('secret'), null);
+  }, session);
 });

@@ -20,16 +20,22 @@ class MemoryStorage {
   removeItem(key: string): void { this.values.delete(key); }
 }
 
-function installStorage(storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>): () => void {
+function installStorage(
+  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>,
+  session: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> = new MemoryStorage(),
+): () => void {
   const originalWindow = globalThis.window;
   const originalStorage = globalThis.localStorage;
+  const originalSessionStorage = globalThis.sessionStorage;
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: session });
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
-    value: { localStorage: storage },
+    value: { localStorage: storage, sessionStorage: session },
   });
   return () => {
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: originalStorage });
+    Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: originalSessionStorage });
     Object.defineProperty(globalThis, 'window', { configurable: true, value: originalWindow });
   };
 }
@@ -70,12 +76,53 @@ test('keeps core state usable when browser storage is blocked', () => {
     setItem(): void { throw new Error('blocked'); },
     removeItem(): void { throw new Error('blocked'); },
   };
-  const restore = installStorage(blocked);
+  const restore = installStorage(blocked, blocked);
   try {
     assert.doesNotThrow(() => saveSettings(getSettings()));
     assert.doesNotThrow(() => saveMcpConfig(getMcpConfig()));
     assert.doesNotThrow(() => saveTheme('dark'));
     assert.equal(getTheme(), 'system');
+  } finally {
+    restore();
+  }
+});
+
+test('stores MCP keys in the current session without persisting them', () => {
+  const storage = new MemoryStorage();
+  const session = new MemoryStorage();
+  const restore = installStorage(storage, session);
+  try {
+    const config = getMcpConfig();
+    config.vl.api_key = 'vl-secret';
+    config.llm.api_key = 'llm-secret';
+    saveMcpConfig(config);
+
+    const persisted = JSON.parse(storage.getItem('physics_vault_mcp') || '{}');
+    assert.equal(persisted.vl.api_key, '');
+    assert.equal(persisted.llm.api_key, '');
+    assert.equal(getMcpConfig().vl.api_key, 'vl-secret');
+    assert.equal(getMcpConfig().llm.api_key, 'llm-secret');
+  } finally {
+    restore();
+  }
+});
+
+test('migrates legacy persistent MCP keys into session storage', () => {
+  const storage = new MemoryStorage();
+  const session = new MemoryStorage();
+  storage.setItem('physics_vault_mcp', JSON.stringify({
+    vl: { api_key: 'legacy-vl' },
+    llm: { api_key: 'legacy-llm' },
+  }));
+  const restore = installStorage(storage, session);
+  try {
+    const config = getMcpConfig();
+    const persisted = JSON.parse(storage.getItem('physics_vault_mcp') || '{}');
+    assert.equal(config.vl.api_key, 'legacy-vl');
+    assert.equal(config.llm.api_key, 'legacy-llm');
+    assert.equal(persisted.vl.api_key, '');
+    assert.equal(persisted.llm.api_key, '');
+    assert.match(session.getItem('physics_vault_mcp_session_secrets') || '', /legacy-vl/);
   } finally {
     restore();
   }

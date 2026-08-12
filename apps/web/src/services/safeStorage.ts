@@ -14,6 +14,16 @@ export function browserStorage(): Storage | null {
   return null;
 }
 
+export function browserSessionStorage(): Storage | null {
+  try {
+    if (typeof window !== 'undefined') return window.sessionStorage;
+    if (typeof sessionStorage !== 'undefined') return sessionStorage;
+  } catch {
+    // Session storage can be blocked independently from local storage.
+  }
+  return null;
+}
+
 export function readStorageValue(key: string): string | null {
   try {
     return browserStorage()?.getItem(key) ?? null;
@@ -58,6 +68,28 @@ export function readJsonStorage<T>(key: string, fallback: T, guard?: JsonGuard<T
 export function writeJsonStorage(key: string, value: unknown): boolean {
   try {
     return writeStorageValue(key, JSON.stringify(value));
+  } catch {
+    return false;
+  }
+}
+
+export function readSessionJsonStorage<T>(key: string, fallback: T, guard?: JsonGuard<T>): T {
+  try {
+    const raw = browserSessionStorage()?.getItem(key);
+    if (!raw) return fallback;
+    const parsed: unknown = JSON.parse(raw);
+    return guard && !guard(parsed) ? fallback : parsed as T;
+  } catch {
+    return fallback;
+  }
+}
+
+export function writeSessionJsonStorage(key: string, value: unknown): boolean {
+  try {
+    const storage = browserSessionStorage();
+    if (!storage) return false;
+    storage.setItem(key, JSON.stringify(value));
+    return true;
   } catch {
     return false;
   }

@@ -473,6 +473,9 @@ function ProviderCard({
           placeholder={placeholder}
           className="h-10 w-full rounded-md border border-[#d7e2f0] bg-white px-3 text-sm outline-none transition focus:border-[#2d72d9] focus:ring-2 focus:ring-[#2d72d9]/10"
         />
+        <span className="mt-2 block text-xs leading-5 text-[#718199]">
+          密钥仅保留在当前浏览器会话中，关闭浏览器后需要重新填写。
+        </span>
       </label>
 
       <button
