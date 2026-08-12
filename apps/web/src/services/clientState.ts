@@ -1,5 +1,5 @@
 import type { BasketItem, McpConfig, SystemSettings } from '../types';
-import { request } from './apiClient';
+import { request } from './apiClient.ts';
 
 const BASKET_KEY = 'physics_vault_basket';
 const SETTINGS_KEY = 'physics_vault_settings';
@@ -8,6 +8,39 @@ const BASKET_EVENT = 'physics-vault-basket-changed';
 const LEGACY_DASHSCOPE_VL_MODELS = new Set(['qwen-vl-max']);
 
 let basketCache: BasketItem[] | null = null;
+
+function browserStorage(): Storage | null {
+  try {
+    if (typeof window !== 'undefined') return window.localStorage;
+    if (typeof localStorage !== 'undefined') return localStorage;
+  } catch {
+    // Storage can be blocked in embedded or privacy-restricted contexts.
+  }
+  return null;
+}
+
+function readStoredJson(key: string, fallback: unknown): unknown {
+  try {
+    const raw = browserStorage()?.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredValue(key: string, value: string): void {
+  try {
+    browserStorage()?.setItem(key, value);
+  } catch {
+    // In-memory state remains usable when persistence is unavailable.
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
 
 export const DEFAULT_AI_CONFIG = {
   vl: {
@@ -31,7 +64,12 @@ export const DEFAULT_AI_CONFIG = {
 } satisfies Pick<McpConfig, 'vl' | 'llm'>;
 
 function emitBasketChanged(): void {
-  window.dispatchEvent(new CustomEvent(BASKET_EVENT));
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+  try {
+    window.dispatchEvent(new CustomEvent(BASKET_EVENT));
+  } catch {
+    // Some embedded runtimes expose window without DOM event constructors.
+  }
 }
 
 export function getBasket(): BasketItem[] {
@@ -39,11 +77,13 @@ export function getBasket(): BasketItem[] {
     return basketCache;
   }
 
-  try {
-    basketCache = JSON.parse(localStorage.getItem(BASKET_KEY) || '[]');
-  } catch {
-    basketCache = [];
-  }
+  const stored = readStoredJson(BASKET_KEY, []);
+  basketCache = Array.isArray(stored)
+    ? stored.filter((item): item is BasketItem => {
+        const candidate = asRecord(item);
+        return typeof candidate.question_id === 'string' && typeof candidate.added_at === 'string';
+      })
+    : [];
 
   return basketCache ?? [];
 }
@@ -56,7 +96,7 @@ export function addToBasket(questionId: string): BasketItem[] {
 
   const updated = [...basket, { question_id: questionId, added_at: new Date().toISOString() }];
   basketCache = updated;
-  localStorage.setItem(BASKET_KEY, JSON.stringify(updated));
+  writeStoredValue(BASKET_KEY, JSON.stringify(updated));
   emitBasketChanged();
   return updated;
 }
@@ -64,7 +104,7 @@ export function addToBasket(questionId: string): BasketItem[] {
 export function removeFromBasket(questionId: string): BasketItem[] {
   const updated = getBasket().filter((item) => item.question_id !== questionId);
   basketCache = updated;
-  localStorage.setItem(BASKET_KEY, JSON.stringify(updated));
+  writeStoredValue(BASKET_KEY, JSON.stringify(updated));
   emitBasketChanged();
   return updated;
 }
@@ -76,18 +116,21 @@ export function moveBasketItem(questionId: string, direction: 'up' | 'down'): Ba
   if (index < 0 || target < 0 || target >= basket.length) return basket;
   [basket[index], basket[target]] = [basket[target], basket[index]];
   basketCache = basket;
-  localStorage.setItem(BASKET_KEY, JSON.stringify(basket));
+  writeStoredValue(BASKET_KEY, JSON.stringify(basket));
   emitBasketChanged();
   return basket;
 }
 
 export function clearBasket(): void {
   basketCache = [];
-  localStorage.setItem(BASKET_KEY, '[]');
+  writeStoredValue(BASKET_KEY, '[]');
   emitBasketChanged();
 }
 
 export function subscribeBasket(listener: () => void): () => void {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+    return () => undefined;
+  }
   const handleStorage = (event: StorageEvent) => {
     if (event.key === BASKET_KEY) {
       basketCache = null;
@@ -120,15 +163,31 @@ export function getSettings(): SystemSettings {
     page_size: 20,
   };
 
-  try {
-    return { ...defaults, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') };
-  } catch {
-    return defaults;
-  }
+  const stored = asRecord(readStoredJson(SETTINGS_KEY, {}));
+  const theme = ['light', 'dark', 'system'].includes(String(stored.theme))
+    ? stored.theme as SystemSettings['theme']
+    : defaults.theme;
+  const logLevel = ['DEBUG', 'INFO', 'WARNING', 'ERROR'].includes(String(stored.log_level))
+    ? stored.log_level as SystemSettings['log_level']
+    : defaults.log_level;
+  const pageSize = Number(stored.page_size);
+  return {
+    db_path: typeof stored.db_path === 'string' ? stored.db_path : defaults.db_path,
+    assets_path: typeof stored.assets_path === 'string' ? stored.assets_path : defaults.assets_path,
+    import_batches_path: typeof stored.import_batches_path === 'string' ? stored.import_batches_path : defaults.import_batches_path,
+    cache_path: typeof stored.cache_path === 'string' ? stored.cache_path : defaults.cache_path,
+    exports_path: typeof stored.exports_path === 'string' ? stored.exports_path : defaults.exports_path,
+    logs_path: typeof stored.logs_path === 'string' ? stored.logs_path : defaults.logs_path,
+    ai_enabled: typeof stored.ai_enabled === 'boolean' ? stored.ai_enabled : defaults.ai_enabled,
+    offline_mode: typeof stored.offline_mode === 'boolean' ? stored.offline_mode : defaults.offline_mode,
+    theme,
+    log_level: logLevel,
+    page_size: Number.isInteger(pageSize) && pageSize >= 1 && pageSize <= 100 ? pageSize : defaults.page_size,
+  };
 }
 
 export function saveSettings(settings: SystemSettings): void {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  writeStoredValue(SETTINGS_KEY, JSON.stringify(settings));
 }
 
 export function getMcpConfig(): McpConfig {
@@ -160,8 +219,9 @@ export function getMcpConfig(): McpConfig {
   };
 
   try {
-    const stored = JSON.parse(localStorage.getItem(MCP_KEY) || '{}') as Partial<McpConfig>;
-    const storedVl: Partial<McpConfig['vl']> = stored.vl || {};
+    const stored = asRecord(readStoredJson(MCP_KEY, {}));
+    const storedVl = asRecord(stored.vl) as Partial<McpConfig['vl']>;
+    const storedLlm = asRecord(stored.llm) as Partial<McpConfig['llm']>;
     const vlModel = LEGACY_DASHSCOPE_VL_MODELS.has(String(storedVl.model_name || '').toLowerCase())
       ? DEFAULT_AI_CONFIG.vl.model_name
       : storedVl.model_name;
@@ -172,14 +232,17 @@ export function getMcpConfig(): McpConfig {
         : storedVl.base_url;
     return {
       ...defaults,
-      ...stored,
       vl: {
         ...DEFAULT_AI_CONFIG.vl,
         ...storedVl,
         base_url: vlBaseUrl || DEFAULT_AI_CONFIG.vl.base_url,
         model_name: vlModel || DEFAULT_AI_CONFIG.vl.model_name,
       },
-      llm: { ...DEFAULT_AI_CONFIG.llm, ...(stored.llm || {}) },
+      llm: { ...DEFAULT_AI_CONFIG.llm, ...storedLlm },
+      scheduling: { ...defaults.scheduling, ...asRecord(stored.scheduling) },
+      cleaning: { ...defaults.cleaning, ...asRecord(stored.cleaning) },
+      logging: { ...defaults.logging, ...asRecord(stored.logging) },
+      capability_mapping: { ...defaults.capability_mapping, ...asRecord(stored.capability_mapping) },
     };
   } catch {
     return defaults;
@@ -195,7 +258,7 @@ export function saveMcpConfig(config: McpConfig): void {
     String(config.vl.base_url || '').toLowerCase().includes('dashscope.aliyuncs.com/api/v1')
       ? DEFAULT_AI_CONFIG.vl.base_url
       : config.vl.base_url;
-  localStorage.setItem(MCP_KEY, JSON.stringify({
+  writeStoredValue(MCP_KEY, JSON.stringify({
     ...config,
     vl: { ...DEFAULT_AI_CONFIG.vl, ...config.vl, base_url: vlBaseUrl, model_name: vlModel },
     llm: { ...DEFAULT_AI_CONFIG.llm, ...config.llm },
@@ -228,9 +291,14 @@ export async function pushMcpConfigToBackend(
 }
 
 export function getTheme(): 'light' | 'dark' | 'system' {
-  return (localStorage.getItem('physics_vault_theme') as 'light' | 'dark' | 'system') || 'system';
+  try {
+    const theme = browserStorage()?.getItem('physics_vault_theme');
+    return theme === 'light' || theme === 'dark' || theme === 'system' ? theme : 'system';
+  } catch {
+    return 'system';
+  }
 }
 
 export function saveTheme(theme: 'light' | 'dark' | 'system'): void {
-  localStorage.setItem('physics_vault_theme', theme);
+  writeStoredValue('physics_vault_theme', theme);
 }
