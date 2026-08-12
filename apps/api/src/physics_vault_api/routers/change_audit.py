@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ..schemas.contracts import ObjectMapResponse
 from pydantic import BaseModel
@@ -23,7 +23,7 @@ def build_change_audit_router(service: ChangeAuditService) -> APIRouter:
     async def list_batches(
         change_type: str | None = None,
         status: str | None = None,
-        limit: int = 50,
+        limit: int = Query(default=50, ge=1, le=200),
     ) -> dict[str, Any]:
         return service.list_batches(change_type=change_type, status=status, limit=limit)
 

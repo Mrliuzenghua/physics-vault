@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ..schemas.contracts import BooleanMapResponse, IntegerMapResponse
 from ..schemas.favorites import (
@@ -86,9 +86,9 @@ def build_favorites_router(
     @router.get("/items", response_model=list[FavoriteItemView], summary="列出收藏题目")
     async def list_items(
         group_id: str | None = None,
-        min_star: int = 0,
-        limit: int = 50,
-        offset: int = 0,
+        min_star: int = Query(default=0, ge=0, le=5),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
     ) -> list[FavoriteItemView]:
         items, _ = service.list_favorites(
             group_id=group_id, min_star=min_star, limit=limit, offset=offset

@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from ..paths import default_import_batches_dir
 from ..schemas.contracts import ObjectMapResponse
@@ -155,7 +155,7 @@ def build_import_pipeline_router(
         return ImportBatchStatusResponse.model_validate(service.get_batch_status(batch_id))
 
     @router.get("/batches", response_model=ImportBatchOverviewResponse)
-    def list_import_batches(limit: int = 80) -> ImportBatchOverviewResponse:
+    def list_import_batches(limit: int = Query(default=80, ge=1, le=200)) -> ImportBatchOverviewResponse:
         """Persisted batch overview for recovery after browser refresh."""
         return ImportBatchOverviewResponse(items=service.list_batch_overview(limit=limit))
 
@@ -201,7 +201,7 @@ def build_import_pipeline_router(
         )
 
     @router.get("/review-tasks", response_model=ReviewTaskListResponse)
-    def list_review_tasks(limit: int = 80) -> ReviewTaskListResponse:
+    def list_review_tasks(limit: int = Query(default=80, ge=1, le=200)) -> ReviewTaskListResponse:
         """List persisted tasks that can be opened in the review workbench."""
         tasks = service.list_review_tasks(limit=limit)
         items: list[ReviewTaskListItem] = []

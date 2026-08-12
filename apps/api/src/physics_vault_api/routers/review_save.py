@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ..schemas.contracts import ObjectMapResponse
 from ..repositories.review_drafts import ReviewDraftConflictError, ReviewDraftSnapshot, SQLiteReviewDraftRepository
@@ -73,7 +73,10 @@ def build_review_save_router(
         return draft_response(snapshot)
 
     @router.get("/drafts/{task_id}/versions", response_model=ReviewDraftVersionListResponse)
-    async def list_review_draft_versions(task_id: str, limit: int = 20) -> ReviewDraftVersionListResponse:
+    async def list_review_draft_versions(
+        task_id: str,
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> ReviewDraftVersionListResponse:
         return ReviewDraftVersionListResponse(
             items=[draft_response(item) for item in draft_repository.list_versions(task_id, limit=limit)]
         )

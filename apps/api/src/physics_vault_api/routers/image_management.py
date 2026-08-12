@@ -28,7 +28,10 @@ def build_image_management_router(
     router = APIRouter(prefix="/api/questions", tags=["image-management"])
 
     @router.get("/images/cache", response_model=list[CachedImageAsset], summary="列出临时图片缓存")
-    async def list_cache_images(keyword: str = "", limit: int = 200) -> list[CachedImageAsset]:
+    async def list_cache_images(
+        keyword: str = Query(default="", max_length=200),
+        limit: int = Query(default=200, ge=1, le=500),
+    ) -> list[CachedImageAsset]:
         return service.list_cache_images(keyword=keyword, limit=limit)
 
     @router.post("/images/cache-upload", response_model=CacheUploadResponse, summary="上传图片或从 Word 提取图片")
@@ -92,7 +95,10 @@ def build_image_management_router(
         return service.validate(question_id)
 
     @router.get("/images/available", response_model=list[AvailableImageAsset], summary="列出可用素材")
-    async def available_images(keyword: str = "", limit: int = 50) -> list[AvailableImageAsset]:
+    async def available_images(
+        keyword: str = Query(default="", max_length=200),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> list[AvailableImageAsset]:
         return service.available_images(keyword=keyword, limit=limit)
 
     return router
