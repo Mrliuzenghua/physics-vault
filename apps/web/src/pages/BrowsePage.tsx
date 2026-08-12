@@ -18,9 +18,14 @@ import type { FilterFacets, KnowledgePointFlatItem, MetadataField, Question, Sea
 import { addQuestionsToAiContext, readAiContextCache } from '../utils/aiContextCache';
 import LatexRenderer from '../components/render/LatexRenderer';
 import { loadCurrentLessonPackage } from '../services/lessonPackage';
+import {
+  persistSearchPresets,
+  readSearchPresets,
+  readShareHistory,
+  saveShareHistory,
+  type SearchPreset,
+} from '../services/browsePersistence';
 
-const SHARE_HISTORY_KEY = 'physics_vault.question_share_history';
-const SEARCH_PRESET_KEY = 'physics_vault.question_search_presets';
 type BrowseMode = 'questions' | 'knowledge';
 
 type QuickActionGroup = '浏览' | '选题' | '输出' | '整理';
@@ -100,46 +105,6 @@ function parseExcludedIds(text: string) {
       .map((item) => item.trim())
       .filter(Boolean),
   );
-}
-
-interface ShareHistoryItem {
-  createdAt: string;
-  questionIds: string[];
-  text: string;
-}
-
-interface SearchPreset {
-  id: string;
-  name: string;
-  filters: SearchFilters;
-}
-
-function readSearchPresets(): SearchPreset[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SEARCH_PRESET_KEY) || '[]');
-    return Array.isArray(parsed) ? parsed.filter((item): item is SearchPreset => Boolean(item?.id && item?.name && item?.filters)).slice(0, 8) : [];
-  } catch {
-    return [];
-  }
-}
-
-function persistSearchPresets(items: SearchPreset[]) {
-  localStorage.setItem(SEARCH_PRESET_KEY, JSON.stringify(items.slice(0, 8)));
-}
-
-function readShareHistory(): ShareHistoryItem[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SHARE_HISTORY_KEY) || '[]');
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveShareHistory(item: ShareHistoryItem): ShareHistoryItem[] {
-  const next = [item, ...readShareHistory()].slice(0, 20);
-  localStorage.setItem(SHARE_HISTORY_KEY, JSON.stringify(next));
-  return next;
 }
 
 function parseMetadataTags(text: string): string[] {

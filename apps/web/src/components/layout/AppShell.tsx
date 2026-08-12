@@ -10,6 +10,7 @@ import { useBasket } from '../../hooks/useBasket';
 import { getSettings, saveSettings, fetchTasks, getMcpConfig, pushMcpConfigToBackend } from '../../services/api';
 import { fetchMcpRuntimeConfig, fetchMcpStatus } from '../../services/aiApi';
 import { fetchDatabaseStatus } from '../../services/catalogApi';
+import { readJsonStorage, writeJsonStorage } from '../../services/safeStorage';
 import type { McpRuntimeStatus } from '../../types';
 
 const PersistentAiChatPage = lazy(() => import('../../pages/AiChatPage'));
@@ -44,13 +45,9 @@ function defaultAiPosition(): AiWindowPosition {
 
 function readAiPosition(): AiWindowPosition {
   if (typeof window === 'undefined') return defaultAiPosition();
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(AI_WINDOW_POSITION_KEY) || 'null');
-    if (parsed && typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-      return clampAiPosition(parsed);
-    }
-  } catch {
-    // Ignore invalid local storage.
+  const parsed = readJsonStorage<Partial<AiWindowPosition> | null>(AI_WINDOW_POSITION_KEY, null);
+  if (parsed && typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+    return clampAiPosition({ x: parsed.x, y: parsed.y });
   }
   return defaultAiPosition();
 }
@@ -199,11 +196,7 @@ export default function AppShell() {
     const handleResize = () => {
       setAiWindowPosition((prev) => {
         const next = clampAiPosition(prev);
-        try {
-          window.localStorage.setItem(AI_WINDOW_POSITION_KEY, JSON.stringify(next));
-        } catch {
-          // Storage is optional.
-        }
+        writeJsonStorage(AI_WINDOW_POSITION_KEY, next);
         return next;
       });
     };
@@ -230,11 +223,7 @@ export default function AppShell() {
       aiDragRef.current = null;
       setAiWindowPosition((prev) => {
         const next = clampAiPosition(prev);
-        try {
-          window.localStorage.setItem(AI_WINDOW_POSITION_KEY, JSON.stringify(next));
-        } catch {
-          // Storage is optional.
-        }
+        writeJsonStorage(AI_WINDOW_POSITION_KEY, next);
         return next;
       });
     };
