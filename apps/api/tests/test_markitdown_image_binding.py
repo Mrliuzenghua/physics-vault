@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from physics_vault_api.services import document_converter
 from physics_vault_api.services.document_pipeline import PandocAdapter
 from physics_vault_api.services.question_splitter import ExamQuestionSplitter
 
@@ -52,3 +53,48 @@ C. 6.2Ω
     parsed = ExamQuestionSplitter().split(markdown, batch_id="batch-experiment", source="fixture", media_assets=[])
 
     assert parsed["questions"][0]["question_type"] == "experiment"
+
+
+def test_docx_metafiles_are_converted_to_png_and_markdown_is_rewritten(tmp_path: Path, monkeypatch) -> None:
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    metafile = media_dir / "image11.emf"
+    metafile.write_bytes(b"metafile fixture")
+    loaded_dpi: list[int] = []
+
+    class FakeMetafile:
+        width = 200
+        height = 100
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def load(self, *, dpi: int):
+            loaded_dpi.append(dpi)
+
+        def getbands(self):
+            return ("R", "G", "B")
+
+        def convert(self, _mode: str):
+            return self
+
+        def save(self, target: Path, _format: str, **_kwargs):
+            Path(target).write_bytes(b"png fixture")
+
+    monkeypatch.setattr(document_converter.Image, "open", lambda _path: FakeMetafile())
+    markdown = f"![diagram]({metafile})"
+
+    rewritten, converted, warnings = PandocAdapter._convert_office_metafiles(markdown, media_dir)
+
+    png_path = media_dir / "image11.png"
+    assert converted == 1
+    assert warnings == []
+    assert loaded_dpi[0] == 72
+    assert max(loaded_dpi) > 72
+    assert png_path.read_bytes() == b"png fixture"
+    assert not metafile.exists()
+    assert str(png_path) in rewritten
+    assert ".emf" not in rewritten

@@ -14,7 +14,8 @@ from .db_schema import initialize_database
 from .observability import TRACE_ID_HEADER, correlation_context, resolve_trace_id
 from .paths import project_root
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".wmf", ".emf"}
+OFFICE_METAFILE_EXTENSIONS = {".wmf", ".emf"}
 
 
 class HealthResponse(BaseModel):
@@ -44,7 +45,16 @@ def _thumbnail_cache_path(target: Path, width: int) -> Path:
 def _build_thumbnail(target: Path, cache_path: Path, width: int) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with Image.open(target) as raw_image:
-        image = ImageOps.exif_transpose(raw_image)
+        if target.suffix.lower() in OFFICE_METAFILE_EXTENSIONS:
+            base_width = max(int(raw_image.width or 1), 1)
+            dpi = min(1200, max(72, round(72 * width / base_width)))
+            try:
+                raw_image.load(dpi=dpi)
+            except TypeError:
+                raw_image.load()
+            image = raw_image.copy()
+        else:
+            image = ImageOps.exif_transpose(raw_image)
         image.thumbnail((width, width * 4), Image.Resampling.LANCZOS)
         if image.mode in {"RGBA", "LA"}:
             background = Image.new("RGB", image.size, "white")

@@ -8,6 +8,12 @@ from pathlib import Path
 from shutil import which
 from typing import Any
 
+from PIL import Image
+
+
+RASTER_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
+OFFICE_METAFILE_EXTENSIONS = {".wmf", ".emf"}
+
 
 class PandocAdapter:
     """Converts documents to Markdown and extracts media without task knowledge."""
@@ -61,10 +67,14 @@ class PandocAdapter:
             capture_output=True,
             text=True,
         )
+        text = self._read_output_text(target)
+        text, converted_metafiles, conversion_warnings = self._convert_office_metafiles(text, media)
+        if converted_metafiles:
+            target.write_text(text, encoding="utf-8")
         images = [
             path
             for path in sorted(media.rglob("*"))
-            if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
+            if path.is_file() and path.suffix.lower() in RASTER_IMAGE_EXTENSIONS
         ]
         return {
             "source_path": str(source),
@@ -72,7 +82,9 @@ class PandocAdapter:
             "media_dir": str(media),
             "image_count": len(images),
             "images": [str(path) for path in images],
-            "text": self._read_output_text(target),
+            "text": text,
+            "converted_metafile_count": converted_metafiles,
+            "warnings": conversion_warnings,
         }
 
     def _markitdown_convert(self, source_path: str, target_format: str, output_path: str | None) -> dict[str, str]:
@@ -108,8 +120,17 @@ class PandocAdapter:
                     target.write_bytes(archive.read(member))
                     images.append(target)
             rewritten = self._rewrite_markitdown_docx_images(source, str(result.get("text") or ""))
+            rewritten, converted_metafiles, conversion_warnings = self._convert_office_metafiles(rewritten, media)
             Path(markdown_path).write_text(rewritten, encoding="utf-8")
             result["text"] = rewritten
+        else:
+            converted_metafiles = 0
+            conversion_warnings = []
+        images = [
+            path
+            for path in sorted(media.rglob("*"))
+            if path.is_file() and path.suffix.lower() in RASTER_IMAGE_EXTENSIONS
+        ]
         return {
             **result,
             "media_dir": str(media),
@@ -117,7 +138,74 @@ class PandocAdapter:
             "images": [str(path) for path in images],
             "conversion_engine": "markitdown_fallback",
             "warning": "Pandoc is unavailable. Images were preserved for review but require confirmation before question binding.",
+            "converted_metafile_count": converted_metafiles,
+            "warnings": conversion_warnings,
         }
+
+    @classmethod
+    def _convert_office_metafiles(cls, markdown: str, media_dir: Path) -> tuple[str, int, list[str]]:
+        """Rasterize browser-incompatible Word metafiles and rewrite Markdown paths."""
+        converted = 0
+        warnings: list[str] = []
+        for source in sorted(media_dir.rglob("*")):
+            if not source.is_file() or source.suffix.lower() not in OFFICE_METAFILE_EXTENSIONS:
+                continue
+            target = cls._available_png_path(source)
+            try:
+                cls._render_metafile_png(source, target)
+            except Exception as exc:  # noqa: BLE001
+                target.unlink(missing_ok=True)
+                warnings.append(f"{source.name} 转 PNG 失败：{exc}")
+                continue
+
+            markdown = cls._rewrite_media_reference(markdown, source, target)
+            source.unlink(missing_ok=True)
+            converted += 1
+        return markdown, converted, warnings
+
+    @staticmethod
+    def _available_png_path(source: Path) -> Path:
+        target = source.with_suffix(".png")
+        if not target.exists():
+            return target
+        target = source.with_name(f"{source.stem}-metafile.png")
+        index = 2
+        while target.exists():
+            target = source.with_name(f"{source.stem}-metafile-{index}.png")
+            index += 1
+        return target
+
+    @staticmethod
+    def _render_metafile_png(source: Path, target: Path, target_size: int = 1600) -> None:
+        # Pillow reports the metafile's logical canvas before rendering, which is
+        # not the pixel size produced at a given DPI. Probe at 72 DPI first so
+        # small Word drawings are not accidentally rasterized as tiny previews.
+        with Image.open(source) as probe:
+            try:
+                probe.load(dpi=72)
+            except TypeError:
+                probe.load()
+            base_size = max(int(probe.width or 1), int(probe.height or 1), 1)
+
+        dpi = min(1200, max(72, round(72 * target_size / base_size)))
+        with Image.open(source) as raw_image:
+            try:
+                raw_image.load(dpi=dpi)
+            except TypeError:
+                raw_image.load()
+            image = raw_image.convert("RGBA" if "A" in raw_image.getbands() else "RGB")
+            image.save(target, "PNG", optimize=True)
+
+    @staticmethod
+    def _rewrite_media_reference(markdown: str, source: Path, target: Path) -> str:
+        replacements = {
+            str(source): str(target),
+            source.as_posix(): target.as_posix(),
+            source.name: target.name,
+        }
+        for old, new in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
+            markdown = markdown.replace(old, new)
+        return markdown
 
     @staticmethod
     def _rewrite_markitdown_docx_images(source: Path, markdown: str) -> str:

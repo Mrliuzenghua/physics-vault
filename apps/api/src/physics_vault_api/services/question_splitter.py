@@ -58,6 +58,30 @@ _ANALYSIS_START = re.compile(
 # Markdown image:  ![alt](path)  possibly followed by pandoc attrs {width=..}
 _IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)(?:\{[^}]*\})?")
 
+# Pandoc can place a floating Word image before the question number that was
+# visually beside it.  Attributes may wrap onto a second line, for example:
+#
+#   ![](image.png){width="2in"
+#   height="1in"}1. Question text
+#
+# Move only an immediately-adjacent question marker in front of the image so
+# the regular line-start parser can see it.  Deliberately do not cross blank
+# space after the image: an image at the end of one question must stay there.
+_IMAGE_PREFIXED_QUESTION = re.compile(
+    r"(?P<image>!\[[^\]]*\]\([^)]+\)(?:\{[^}]*\})?)"
+    r"(?P<marker>\d{1,3}\s*\\?[\.\u3001\uff0e][ \t]*)"
+)
+
+# Numbered exam instructions frequently look exactly like questions.  A real
+# section heading is a much stronger boundary, so ignore everything before the
+# first recognized exam section when one is present.
+_SECTION_HEADING = re.compile(
+    r"^\s*(?:>\s*)*(?:#{1,6}\s*)*(?:\*\*|__)?\s*"
+    r"(?:第\s*[一二三四五六七八九十\d]+\s*(?:部分|大题)|[一二三四五六七八九十]+)"
+    r"\s*[、\.．:：]\s*"
+    r"(?:单项选择题|单选题|多项选择题|多选题|选择题|非选择题|填空题|实验题|计算题|解答题)",
+)
+
 # Stray pandoc attribute blocks left on their own line
 _PANDOC_ATTR_LINE = re.compile(r"^\s*\{[^{}]*\}\s*$")
 
@@ -82,8 +106,28 @@ def is_clearly_experiment_question(stem: str) -> bool:
     return bool(strong_phrase and (len(steps) >= 2 or re.search(r"实验(?:中|步骤|装置|器材|数据|原理)", text)))
 
 
-def _infer_type(stem: str, options: list[dict], answer: str) -> str:
+def _infer_type(stem: str, options: list[dict], answer: str, section_hint: str | None = None) -> str:
     experiment_text = "\n".join([stem, *(str(option.get("content") or "") for option in options)])
+    if section_hint == "single_choice":
+        return "single_choice"
+    if section_hint == "multi_choice":
+        return "multi_choice"
+    if section_hint == "experiment":
+        return "experiment"
+    if section_hint == "fill":
+        return "fill"
+    if section_hint == "calculation":
+        return "calculation"
+    if section_hint == "non_choice":
+        if is_clearly_experiment_question(experiment_text) or re.search(
+            r"实验小组|实验器材|实验操作|验证.{0,16}(?:定律|规律|关系)|"
+            r"探究.{0,16}(?:特性|规律|关系)",
+            experiment_text,
+        ):
+            return "experiment"
+        if any(h in stem for h in _FILL_HINTS):
+            return "fill"
+        return "calculation"
     if is_clearly_experiment_question(experiment_text):
         return "experiment"
     if options:
@@ -113,6 +157,10 @@ class ExamQuestionSplitter:
         # Normalize non-breaking spaces (common in Chinese exam papers) so
         # option/question markers and stems don't contain invisible \xa0.
         text = text.replace("\xa0", " ")
+        text = _IMAGE_PREFIXED_QUESTION.sub(
+            lambda match: f"{match.group('marker')}{match.group('image')}",
+            text,
+        )
         lines = text.split("\n")
 
         chunks = self._split_chunks(lines)
@@ -125,7 +173,7 @@ class ExamQuestionSplitter:
         }
 
         questions: list[dict] = []
-        for number, chunk_lines in chunks:
+        for number, chunk_lines, section_hint in chunks:
             figures: list[dict] = []
 
             def _replace_image(match: re.Match[str]) -> str:
@@ -147,7 +195,7 @@ class ExamQuestionSplitter:
                 )
                 return f"![fig:{fig_uuid}]"
 
-            parsed = self._parse_chunk(chunk_lines)
+            parsed = self._parse_chunk(chunk_lines, section_hint=section_hint)
             stem = _IMAGE_PATTERN.sub(_replace_image, parsed["stem"])
             # Clean leftover pandoc attr lines / stray separators inside stem
             stem_lines = [
@@ -164,7 +212,7 @@ class ExamQuestionSplitter:
             ]
             answer = _IMAGE_PATTERN.sub(_replace_image, parsed["answer"]).strip()
             analysis = _IMAGE_PATTERN.sub(_replace_image, parsed["analysis"]).strip()
-            q_type = _infer_type(stem, options, answer)
+            q_type = _infer_type(stem, options, answer, section_hint=section_hint)
 
             idx = len(questions) + 1
             questions.append(
@@ -191,14 +239,22 @@ class ExamQuestionSplitter:
 
     # ── Stage 1: split whole text into (number, lines) chunks ──────
 
-    def _split_chunks(self, lines: list[str]) -> list[tuple[int, list[str]]]:
+    def _split_chunks(self, lines: list[str]) -> list[tuple[int, list[str], str | None]]:
+        first_section_index = next(
+            (index for index, line in enumerate(lines) if _SECTION_HEADING.match(line)),
+            None,
+        )
+        scan_lines = lines[first_section_index:] if first_section_index is not None else lines
+
         # ── Pass 1: decide which question-number family this paper uses ──
         # Sub-questions almost always use the (1)(2)(3) bracket style, so
         # bracket-style starts are only trusted when no plain/第N题 style
         # question numbers exist anywhere in the document.
         plain_hits = 0
         bracket_hits = 0
-        for line in lines:
+        for line in scan_lines:
+            if _SECTION_HEADING.match(line):
+                continue
             m = _QUESTION_START.match(line)
             if not m:
                 continue
@@ -208,14 +264,19 @@ class ExamQuestionSplitter:
                 plain_hits += 1
         use_bracket = plain_hits == 0 and bracket_hits > 0
 
-        chunks: list[tuple[int, list[str]]] = []
+        chunks: list[tuple[int, list[str], str | None]] = []
         preamble: list[str] = []
         current: list[str] = []
         current_no = 0
+        current_section_hint: str | None = None
+        active_section_hint: str | None = None
         seen_first = False
         prev_no = 0
 
-        for line in lines:
+        for line in scan_lines:
+            if _SECTION_HEADING.match(line):
+                active_section_hint = self._section_hint(line)
+                continue
             m = _QUESTION_START.match(line)
             if m:
                 is_bracket = m.group(3) is not None
@@ -228,11 +289,12 @@ class ExamQuestionSplitter:
                 is_first = not seen_first
                 if is_first or is_sequence:
                     if current:
-                        chunks.append((current_no, current))
+                        chunks.append((current_no, current, current_section_hint))
                     elif not seen_first:
                         preamble = []
                     current = [line]
                     current_no = no
+                    current_section_hint = active_section_hint
                     prev_no = no
                     seen_first = True
                     continue
@@ -242,16 +304,34 @@ class ExamQuestionSplitter:
                 current.append(line)
 
         if current:
-            chunks.append((current_no, current))
+            chunks.append((current_no, current, current_section_hint))
 
         # If no question numbers were detected at all, treat whole doc as one chunk
         if not seen_first and chunks:
-            return [(1, chunks[0][1])]
+            return [(1, chunks[0][1], chunks[0][2])]
         return chunks
+
+    @staticmethod
+    def _section_hint(line: str) -> str | None:
+        if "单项选择" in line or "单选题" in line:
+            return "single_choice"
+        if "多项选择" in line or "多选题" in line:
+            return "multi_choice"
+        if "非选择题" in line:
+            return "non_choice"
+        if "实验题" in line:
+            return "experiment"
+        if "填空题" in line:
+            return "fill"
+        if "计算题" in line or "解答题" in line:
+            return "calculation"
+        if "选择题" in line:
+            return "single_choice"
+        return None
 
     # ── Stage 2: parse one chunk into stem/options/answer/analysis ─
 
-    def _parse_chunk(self, lines: list[str]) -> dict:
+    def _parse_chunk(self, lines: list[str], section_hint: str | None = None) -> dict:
         # First line still carries the question number — strip it
         first = lines[0] if lines else ""
         m = _QUESTION_START.match(first)
@@ -298,7 +378,7 @@ class ExamQuestionSplitter:
             for letter, content in self._split_options_text(joined):
                 options.append({"opt": letter, "content": content})
 
-        for raw in body_lines:
+        for line_index, raw in enumerate(body_lines):
             line = raw.rstrip()
 
             answer_m = _ANSWER_START.match(line)
@@ -323,7 +403,20 @@ class ExamQuestionSplitter:
 
             if section == "stem":
                 # Enter options only on a clear leading "A."-style marker
-                if _FIRST_OPTION_LINE.match(line):
+                option_match = _OPTION_LINE.match(line)
+                next_nonempty = next(
+                    (candidate.strip() for candidate in body_lines[line_index + 1 :] if candidate.strip()),
+                    "",
+                )
+                starts_image_options = bool(
+                    option_match
+                    and option_match.group(1) == "A"
+                    and not option_match.group(2).strip()
+                    and next_nonempty.startswith("![")
+                )
+                if section_hint != "non_choice" and (
+                    _FIRST_OPTION_LINE.match(line) or starts_image_options
+                ):
                     section = "options"
                     option_buffer.append(line)
                     continue
@@ -341,8 +434,12 @@ class ExamQuestionSplitter:
 
         flush_option_buffer()
 
+        stem = "\n".join(stem_parts).strip()
+        if not options and section_hint in {"single_choice", "multi_choice"}:
+            stem, options = self._extract_trailing_inline_options(stem)
+
         return {
-            "stem": "\n".join(stem_parts).strip(),
+            "stem": stem,
             "options": options,
             "answer": "\n".join(answer_parts),
             "analysis": "\n".join(analysis_parts),
@@ -373,3 +470,27 @@ class ExamQuestionSplitter:
             end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
             result.append((m.group(1), text[m.end():end].strip()))
         return result
+
+    @classmethod
+    def _extract_trailing_inline_options(cls, text: str) -> tuple[str, list[dict[str, str]]]:
+        """Extract a complete A-D run that Pandoc left at the end of the stem.
+
+        Floating images often make the first option start midway through a
+        Markdown line (``![...](figure)A. ...``).  Four consecutive markers
+        are required to avoid mistaking physics point labels for options.
+        """
+        matches = list(_INLINE_OPTION_SPLIT.finditer(text))
+        expected = ["A", "B", "C", "D"]
+        for index in range(max(0, len(matches) - 3)):
+            candidate_matches = matches[index : index + 4]
+            if [match.group(1) for match in candidate_matches] != expected:
+                continue
+            option_text = text[candidate_matches[0].start() :]
+            parsed = cls._split_options_text(option_text)
+            if len(parsed) != 4:
+                continue
+            return (
+                text[: candidate_matches[0].start()].rstrip(),
+                [{"opt": letter, "content": content} for letter, content in parsed],
+            )
+        return text, []
