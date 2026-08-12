@@ -5,8 +5,6 @@ import { downloadResponse } from './fileDownload';
 
 export type ServerLessonExportFormat = 'word' | 'pptx';
 
-const ACTIVE_EXPORT_KEY = 'physics-vault.active-export-task.v1';
-
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
@@ -49,12 +47,7 @@ export async function exportLessonOnServer(
       file_name: exportPackage.title,
     }),
   });
-  localStorage.setItem(ACTIVE_EXPORT_KEY, JSON.stringify({ taskId: submitted.task_id, format, createdAt: new Date().toISOString() }));
-  try {
-    const completed = await waitForExportTask(submitted);
-    await downloadExportTask(completed, format);
-    return completed;
-  } finally {
-    localStorage.removeItem(ACTIVE_EXPORT_KEY);
-  }
+  const completed = await waitForExportTask(submitted);
+  await downloadExportTask(completed, format);
+  return completed;
 }

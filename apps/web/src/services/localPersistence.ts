@@ -1,4 +1,5 @@
 import type { FileTaskState, StoredTaskState, Template } from '../types';
+import { isRecord, readJsonStorage, removeStorageValue, writeJsonStorage } from './safeStorage.ts';
 
 const IMPORT_TASKS_KEY = 'physics-vault.import.tasks';
 const MAX_RESULT_TEXT_LEN = 500;
@@ -60,43 +61,40 @@ function toStoredRef(
 }
 
 export function loadPersistedImportTasks(): StoredTaskState[] {
-  try {
-    const raw = localStorage.getItem(IMPORT_TASKS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed as StoredTaskState[] : [];
-  } catch {
-    return [];
-  }
+  const parsed = readJsonStorage<unknown>(IMPORT_TASKS_KEY, []);
+  return Array.isArray(parsed)
+    ? parsed.filter((item): item is StoredTaskState => (
+        isRecord(item)
+        && typeof item.fileId === 'string'
+        && typeof item.fileName === 'string'
+        && ['pending', 'running', 'completed', 'failed'].includes(String(item.status))
+        && ['convert', 'clean', 'parse', 'ai_parse', 'done'].includes(String(item.currentStep))
+        && typeof item.savedAt === 'string'
+      ))
+    : [];
 }
 
 export function savePersistedImportTasks(tasks: FileTaskState[]): void {
-  try {
-    localStorage.setItem(IMPORT_TASKS_KEY, JSON.stringify(toStoredTasks(tasks)));
-  } catch {
-    // Storage may be unavailable or full.
-  }
+  writeJsonStorage(IMPORT_TASKS_KEY, toStoredTasks(tasks));
 }
 
 export function clearPersistedImportTasks(): void {
-  try {
-    localStorage.removeItem(IMPORT_TASKS_KEY);
-  } catch {
-    // Ignore localStorage failures.
-  }
+  removeStorageValue(IMPORT_TASKS_KEY);
 }
 
 const TEMPLATES_KEY = 'physics-vault.templates';
 
 export function loadTemplates(): Template[] {
-  try {
-    const raw = localStorage.getItem(TEMPLATES_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed as Template[] : [];
-  } catch {
-    return [];
-  }
+  const parsed = readJsonStorage<unknown>(TEMPLATES_KEY, []);
+  return Array.isArray(parsed)
+    ? parsed.filter((item): item is Template => (
+        isRecord(item)
+        && typeof item.id === 'string'
+        && typeof item.name === 'string'
+        && ['style', 'layout', 'handout', 'teaching'].includes(String(item.type))
+        && isRecord(item.config)
+      ))
+    : [];
 }
 
 export function saveTemplate(template: Template): Template[] {
@@ -108,36 +106,31 @@ export function saveTemplate(template: Template): Template[] {
   } else {
     existing.push({ ...template, created_at: template.created_at || now, updated_at: now });
   }
-  try {
-    localStorage.setItem(TEMPLATES_KEY, JSON.stringify(existing));
-  } catch {
-    // Ignore localStorage failures.
-  }
+  writeJsonStorage(TEMPLATES_KEY, existing);
   return existing;
 }
 
 export function deleteTemplate(templateId: string): Template[] {
   const existing = loadTemplates();
   const filtered = existing.filter((item) => item.id !== templateId);
-  try {
-    localStorage.setItem(TEMPLATES_KEY, JSON.stringify(filtered));
-  } catch {
-    // Ignore localStorage failures.
-  }
+  writeJsonStorage(TEMPLATES_KEY, filtered);
   return filtered;
 }
 
 const MATERIAL_PACKAGES_KEY = 'physics-vault.material-packages';
 
 export function loadMaterialPackages(): import('../types').TemplateMaterialPackage[] {
-  try {
-    const raw = localStorage.getItem(MATERIAL_PACKAGES_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed as import('../types').TemplateMaterialPackage[] : [];
-  } catch {
-    return [];
-  }
+  const parsed = readJsonStorage<unknown>(MATERIAL_PACKAGES_KEY, []);
+  return Array.isArray(parsed)
+    ? parsed.filter((item): item is import('../types').TemplateMaterialPackage => (
+        isRecord(item)
+        && typeof item.id === 'string'
+        && typeof item.name === 'string'
+        && Array.isArray(item.questions)
+        && Array.isArray(item.questionIds)
+        && isRecord(item.config)
+      ))
+    : [];
 }
 
 export function saveMaterialPackage(
@@ -151,21 +144,13 @@ export function saveMaterialPackage(
   } else {
     existing.push({ ...pkg, created_at: pkg.created_at || now, updated_at: now });
   }
-  try {
-    localStorage.setItem(MATERIAL_PACKAGES_KEY, JSON.stringify(existing));
-  } catch {
-    // Ignore localStorage failures.
-  }
+  writeJsonStorage(MATERIAL_PACKAGES_KEY, existing);
   return existing;
 }
 
 export function deleteMaterialPackage(packageId: string): import('../types').TemplateMaterialPackage[] {
   const existing = loadMaterialPackages();
   const filtered = existing.filter((item) => item.id !== packageId);
-  try {
-    localStorage.setItem(MATERIAL_PACKAGES_KEY, JSON.stringify(filtered));
-  } catch {
-    // Ignore localStorage failures.
-  }
+  writeJsonStorage(MATERIAL_PACKAGES_KEY, filtered);
   return filtered;
 }

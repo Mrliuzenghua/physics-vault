@@ -7,6 +7,7 @@ import type {
   LessonDocumentV2,
 } from '../types/lessonDocument';
 import { LESSON_DOCUMENT_SCHEMA } from '../types/lessonDocument';
+import { isRecord, readJsonStorage, writeJsonStorage } from './safeStorage.ts';
 
 const CURRENT_DOCUMENT_KEY = 'physics-vault.current-lesson-document.v2';
 
@@ -146,16 +147,19 @@ export function lessonDocumentToLessonPackage(document: LessonDocumentV2): Lesso
 }
 
 export function saveCurrentLessonDocument(document: LessonDocumentV2): void {
-  localStorage.setItem(CURRENT_DOCUMENT_KEY, JSON.stringify(document));
+  writeJsonStorage(CURRENT_DOCUMENT_KEY, document);
 }
 
 export function loadCurrentLessonDocument(): LessonDocumentV2 | null {
-  try {
-    const raw = localStorage.getItem(CURRENT_DOCUMENT_KEY);
-    if (!raw) return null;
-    const value = JSON.parse(raw) as Partial<LessonDocumentV2>;
-    return value.schema === LESSON_DOCUMENT_SCHEMA ? value as LessonDocumentV2 : null;
-  } catch {
-    return null;
-  }
+  const value = readJsonStorage<unknown>(CURRENT_DOCUMENT_KEY, null);
+  return isRecord(value)
+    && value.schema === LESSON_DOCUMENT_SCHEMA
+    && typeof value.id === 'string'
+    && typeof value.revision === 'number'
+    && isRecord(value.meta)
+    && Array.isArray(value.nodes)
+    && isRecord(value.assets)
+    && isRecord(value.pageSetup)
+    ? value as unknown as LessonDocumentV2
+    : null;
 }

@@ -46,8 +46,11 @@ export function parseLessonPackage(value: unknown): LessonPackage | null {
 }
 
 export function parseLessonPackageList(value: unknown): LessonPackage[] {
-  const result = z.array(lessonPackageSchema).safeParse(value);
-  return result.success ? result.data as unknown as LessonPackage[] : [];
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const result = lessonPackageSchema.safeParse(item);
+    return result.success ? [result.data as unknown as LessonPackage] : [];
+  });
 }
 
 export function parseSavedLessonPackageSummaryList(value: unknown): SavedLessonPackageSummary[] {

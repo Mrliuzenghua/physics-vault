@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  isRecord,
-  readJsonStorage,
-  readStorageValue,
-  removeStorageValue,
-  writeJsonStorage,
-  writeStorageValue,
-} from './safeStorage.ts';
+  clearPersistedImportTasks,
+  loadMaterialPackages,
+  loadPersistedImportTasks,
+  loadTemplates,
+  savePersistedImportTasks,
+  saveTemplate,
+} from './localPersistence.ts';
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -31,32 +31,30 @@ function withStorage(storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'
   }
 }
 
-test('reads and writes guarded JSON values', () => {
+test('filters malformed import, template, and material cache entries', () => {
   const storage = new MemoryStorage();
+  storage.setItem('physics-vault.import.tasks', JSON.stringify([{ fileId: 'incomplete' }]));
+  storage.setItem('physics-vault.templates', JSON.stringify([
+    { id: 'bad' },
+    { id: 'template-1', name: 'Template', type: 'style', config: {} },
+  ]));
+  storage.setItem('physics-vault.material-packages', JSON.stringify([{ id: 'incomplete' }]));
   withStorage(storage, () => {
-    assert.equal(writeJsonStorage('settings', { enabled: true }), true);
-    assert.deepEqual(readJsonStorage('settings', {}, isRecord), { enabled: true });
-
-    storage.setItem('settings', '[]');
-    assert.deepEqual(readJsonStorage('settings', { fallback: true }, isRecord), { fallback: true });
-    storage.setItem('settings', '{broken');
-    assert.deepEqual(readJsonStorage('settings', { fallback: true }), { fallback: true });
-    assert.equal(removeStorageValue('settings'), true);
-    assert.equal(readStorageValue('settings'), null);
+    assert.deepEqual(loadPersistedImportTasks(), []);
+    assert.deepEqual(loadTemplates().map((item) => item.id), ['template-1']);
+    assert.deepEqual(loadMaterialPackages(), []);
   });
 });
 
-test('returns fallbacks and false writes when storage is unavailable', () => {
+test('workspace persistence operations tolerate blocked storage', () => {
   const blocked = {
     getItem(): string | null { throw new Error('blocked'); },
     setItem(): void { throw new Error('blocked'); },
     removeItem(): void { throw new Error('blocked'); },
   };
   withStorage(blocked, () => {
-    assert.equal(readStorageValue('key'), null);
-    assert.deepEqual(readJsonStorage('key', []), []);
-    assert.equal(writeStorageValue('key', 'value'), false);
-    assert.equal(writeJsonStorage('key', { value: true }), false);
-    assert.equal(removeStorageValue('key'), false);
+    assert.doesNotThrow(() => savePersistedImportTasks([]));
+    assert.doesNotThrow(() => clearPersistedImportTasks());
+    assert.doesNotThrow(() => saveTemplate({ id: 't1', name: 'Template', type: 'style', config: {} }));
   });
 });

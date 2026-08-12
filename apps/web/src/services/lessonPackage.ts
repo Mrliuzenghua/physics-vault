@@ -10,7 +10,8 @@ import type {
   Question,
 } from '../types';
 import type { SlideDeck, SlideDeckTemplate, SlidePage } from '../types/slides';
-import { parseLessonPackage, parseLessonPackageList } from './lessonPackageSchema';
+import { parseLessonPackage, parseLessonPackageList } from './lessonPackageSchema.ts';
+import { readJsonStorage, writeJsonStorage } from './safeStorage.ts';
 
 const LESSON_PACKAGE_KEY = 'physics-vault.current-lesson-package';
 const LESSON_PACKAGE_LIBRARY_KEY = 'physics-vault.lesson-package-library';
@@ -235,21 +236,15 @@ export function createLessonPackage(params: {
 }
 
 export function saveCurrentLessonPackage(pkg: LessonPackage): void {
-  localStorage.setItem(LESSON_PACKAGE_KEY, JSON.stringify(pkg));
+  writeJsonStorage(LESSON_PACKAGE_KEY, pkg);
 }
 
 export function loadCurrentLessonPackage(): LessonPackage | null {
-  const raw = localStorage.getItem(LESSON_PACKAGE_KEY);
-  if (!raw) return null;
-  try {
-    return parseLessonPackage(JSON.parse(raw));
-  } catch {
-    return null;
-  }
+  return parseLessonPackage(readJsonStorage<unknown>(LESSON_PACKAGE_KEY, null));
 }
 
 function saveLessonPackageLibrary(packages: LessonPackage[]): void {
-  localStorage.setItem(LESSON_PACKAGE_LIBRARY_KEY, JSON.stringify(packages));
+  writeJsonStorage(LESSON_PACKAGE_LIBRARY_KEY, packages);
 }
 
 export function listSavedLessonPackages(): SavedLessonPackageSummary[] {
@@ -288,23 +283,17 @@ export function saveLessonPackageToLibrary(pkg: LessonPackage): void {
 }
 
 export function listLessonFolders(): LessonFolder[] {
-  const raw = localStorage.getItem(LESSON_FOLDER_LIBRARY_KEY);
-  if (!raw) return [];
-  try {
-    const value = JSON.parse(raw) as unknown;
-    if (!Array.isArray(value)) return [];
-    return value.filter((item): item is LessonFolder => Boolean(
-      item && typeof item === 'object'
-      && typeof (item as LessonFolder).id === 'string'
-      && typeof (item as LessonFolder).name === 'string',
-    ));
-  } catch {
-    return [];
-  }
+  const value = readJsonStorage<unknown>(LESSON_FOLDER_LIBRARY_KEY, []);
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is LessonFolder => Boolean(
+    item && typeof item === 'object'
+    && typeof (item as LessonFolder).id === 'string'
+    && typeof (item as LessonFolder).name === 'string',
+  ));
 }
 
 function saveLessonFolders(folders: LessonFolder[]): void {
-  localStorage.setItem(LESSON_FOLDER_LIBRARY_KEY, JSON.stringify(folders));
+  writeJsonStorage(LESSON_FOLDER_LIBRARY_KEY, folders);
 }
 
 export function createLessonFolder(name: string): LessonFolder | null {
@@ -340,13 +329,7 @@ export function deleteSavedLessonPackage(id: string): void {
 }
 
 function parseLessonPackageLibrary(): LessonPackage[] {
-  const raw = localStorage.getItem(LESSON_PACKAGE_LIBRARY_KEY);
-  if (!raw) return [];
-  try {
-    return parseLessonPackageList(JSON.parse(raw));
-  } catch {
-    return [];
-  }
+  return parseLessonPackageList(readJsonStorage<unknown>(LESSON_PACKAGE_LIBRARY_KEY, []));
 }
 
 export function buildHandoutItemsFromLessonPackage(pkg: LessonPackage): HandoutItem[] {

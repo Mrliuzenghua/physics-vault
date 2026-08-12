@@ -33,6 +33,17 @@ export function writeStorageValue(key: string, value: string): boolean {
   }
 }
 
+export function removeStorageValue(key: string): boolean {
+  try {
+    const storage = browserStorage();
+    if (!storage) return false;
+    storage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function readJsonStorage<T>(key: string, fallback: T, guard?: JsonGuard<T>): T {
   const raw = readStorageValue(key);
   if (!raw) return fallback;
