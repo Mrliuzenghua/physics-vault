@@ -52,8 +52,12 @@ def _is_json_response(route: APIRoute) -> bool:
 
 
 def _is_bare_dictionary_response(response_model: object) -> bool:
+    if response_model is dict:
+        return True
     origin = get_origin(response_model)
-    return origin is dict or (origin is list and get_origin(next(iter(get_args(response_model)), None)) is dict)
+    if origin is dict:
+        return True
+    return any(_is_bare_dictionary_response(argument) for argument in get_args(response_model))
 
 
 def check_router_contracts(

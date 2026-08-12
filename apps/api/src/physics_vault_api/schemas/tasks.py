@@ -71,6 +71,25 @@ class TaskCenterListResponse(BaseModel):
     pages: int
 
 
+class TaskQueueRecentError(BaseModel):
+    task_id: str
+    error_type: str
+    message: str | None = None
+    at: str
+
+
+class TaskQueueHealthResponse(BaseModel):
+    queue_mode: str
+    namespace: str
+    redis_status: str
+    redis_reachable: bool
+    worker_status: str
+    worker_heartbeat_at: str | None = None
+    backlog: int | None = 0
+    recent_error: TaskQueueRecentError | None = None
+    redis_error: str | None = None
+
+
 class TaskActionResponse(BaseModel):
     task: TaskCenterItem
     message: str

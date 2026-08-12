@@ -28,6 +28,7 @@ from ..schemas.import_pipeline import (
     AiStructureBatchResponse,
     ExtractBatchImagesResponse,
     ImportBatchResponse,
+    ImportBatchOverviewResponse,
     ImportBatchStatusResponse,
     ImportMediaAsset,
     ImportPipelineTaskResponse,
@@ -35,6 +36,7 @@ from ..schemas.import_pipeline import (
     ParseStructuredQuestionsRequest,
     ParseStructuredQuestionsResponse,
     RecognizeBatchResponse,
+    RetryImportBatchResponse,
     ReviewTaskListItem,
     ReviewTaskListResponse,
     UploadImportFileResponse,
@@ -152,15 +154,17 @@ def build_import_pipeline_router(
     def get_batch_status(batch_id: str) -> ImportBatchStatusResponse:
         return ImportBatchStatusResponse.model_validate(service.get_batch_status(batch_id))
 
-    @router.get("/batches")
-    def list_import_batches(limit: int = 80) -> dict:
+    @router.get("/batches", response_model=ImportBatchOverviewResponse)
+    def list_import_batches(limit: int = 80) -> ImportBatchOverviewResponse:
         """Persisted batch overview for recovery after browser refresh."""
-        return {"items": service.list_batch_overview(limit=limit)}
+        return ImportBatchOverviewResponse(items=service.list_batch_overview(limit=limit))
 
-    @router.post("/batches/{batch_id}/retry")
-    def retry_import_batch(batch_id: str, use_ai_cleanup: bool = True) -> dict:
+    @router.post("/batches/{batch_id}/retry", response_model=RetryImportBatchResponse)
+    def retry_import_batch(batch_id: str, use_ai_cleanup: bool = True) -> RetryImportBatchResponse:
         """Retry a failed Word/text batch from its saved source file."""
-        return service.retry_batch(batch_id, use_ai_cleanup=use_ai_cleanup)
+        return RetryImportBatchResponse.model_validate(
+            service.retry_batch(batch_id, use_ai_cleanup=use_ai_cleanup)
+        )
 
     @router.post("/batches/{batch_id}/confirm", response_model=ConfirmBatchQuestionsResponse)
     def confirm_batch_questions(batch_id: str, payload: ConfirmBatchQuestionsRequest) -> ConfirmBatchQuestionsResponse:

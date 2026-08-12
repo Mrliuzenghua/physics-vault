@@ -224,6 +224,42 @@ class ImportBatchStatusResponse(BaseModel):
     active_operation: str | None = None
 
 
+class ImportBatchOverviewItem(BaseModel):
+    batch_id: str
+    source: str = ""
+    original_filename: str = ""
+    status: str = "unknown"
+    question_count: int = 0
+    image_count: int = 0
+    duplicate_count: int = 0
+    updated_at: str = ""
+    created_at: str = ""
+    error: str | None = None
+    retryable: bool = False
+    active_task_id: str | None = None
+    active_operation: str | None = None
+    content_version: int = 1
+
+
+class ImportBatchOverviewResponse(BaseModel):
+    items: list[ImportBatchOverviewItem] = Field(default_factory=list)
+
+
+class RetryImportBatchResponse(BaseModel):
+    task_id: str | None = None
+    batch_id: str
+    status: str
+    question_count: int = 0
+    source: str = ""
+    questions: list[dict] = Field(default_factory=list)
+    raw_json_path: str = ""
+    normalized_json_path: str = ""
+    structured_by: str = "local_markdown_parser"
+    ai_refined_count: int = 0
+    media_assets: list[ImportMediaAsset] = Field(default_factory=list)
+    duplicate_candidates: list[dict] = Field(default_factory=list)
+
+
 class CleanDocumentRequest(BaseModel):
     source_text: str = Field(..., description="Raw extracted document text")
     normalize_whitespace: bool = True

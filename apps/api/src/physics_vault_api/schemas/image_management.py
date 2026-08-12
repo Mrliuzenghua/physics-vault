@@ -54,6 +54,15 @@ class CachedImageAsset(BaseModel):
     size: int = 0
 
 
+class AvailableImageAsset(BaseModel):
+    """One reusable image from the canonical asset catalog."""
+
+    asset_id: str
+    filename: str
+    file_path: str
+    mime_type: str | None = None
+
+
 class CacheUploadResponse(BaseModel):
     """Images extracted from files dropped into the temporary image cache."""
 

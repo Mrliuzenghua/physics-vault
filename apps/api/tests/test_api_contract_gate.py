@@ -28,6 +28,24 @@ def test_router_contract_gate_detects_duplicate_routes_and_bare_dict_responses()
     assert "bare-dict-response" in codes
 
 
+def test_router_contract_gate_detects_plain_and_nested_bare_dict_models() -> None:
+    router = APIRouter()
+
+    @router.get("/plain", response_model=dict)
+    def plain() -> dict:
+        return {}
+
+    @router.get("/nested", response_model=list[dict])
+    def nested() -> list[dict]:
+        return []
+
+    routes = [("fixture", route) for route in router.routes if isinstance(route, APIRoute)]
+    violations = check_router_contracts(routes, bare_dict_allowlist=frozenset())
+
+    bare_locations = {item.location for item in violations if item.code == "bare-dict-response"}
+    assert bare_locations == {"fixture:GET /plain", "fixture:GET /nested"}
+
+
 def test_contract_gate_cli_reports_fixture_location_suggestion_and_failure_exit_code(tmp_path, capsys) -> None:
     fixture = tmp_path / "apps" / "web" / "src" / "fixtures" / "directFetchFixture.ts"
     fixture.parent.mkdir(parents=True)

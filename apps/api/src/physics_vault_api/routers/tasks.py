@@ -7,7 +7,14 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from fastapi.responses import FileResponse
 
-from ..schemas.tasks import TaskActionResponse, TaskCenterItem, TaskCenterListResponse, TaskContextResponse, TaskStageEventItem
+from ..schemas.tasks import (
+    TaskActionResponse,
+    TaskCenterItem,
+    TaskCenterListResponse,
+    TaskContextResponse,
+    TaskQueueHealthResponse,
+    TaskStageEventItem,
+)
 from ..services.task_center import TaskCenterService
 from ..services.task_queue import TaskQueueHealthService
 
@@ -57,9 +64,9 @@ def build_tasks_router(service: TaskCenterService) -> APIRouter:
             pages=max(1, math.ceil(total / page_size)),
         )
 
-    @router.get("/health")
-    def get_task_queue_health() -> dict:
-        return queue_health.check()
+    @router.get("/health", response_model=TaskQueueHealthResponse, response_model_exclude_unset=True)
+    def get_task_queue_health() -> TaskQueueHealthResponse:
+        return TaskQueueHealthResponse.model_validate(queue_health.check())
 
     @router.get("/{task_id}/events", response_model=list[TaskStageEventItem])
     def list_task_stage_events(task_id: str, limit: int = Query(default=200, ge=1, le=500)) -> list[TaskStageEventItem]:

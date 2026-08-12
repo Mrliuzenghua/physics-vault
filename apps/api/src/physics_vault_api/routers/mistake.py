@@ -25,6 +25,10 @@ class BatchMistakeResponse(BaseModel):
     failed: int = 0
 
 
+class MistakeCountResponse(BaseModel):
+    count: int = 0
+
+
 def build_mistake_router(service: MistakeService) -> APIRouter:
     router = APIRouter(prefix="/api/questions", tags=["mistake"])
 
@@ -67,10 +71,10 @@ def build_mistake_router(service: MistakeService) -> APIRouter:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    @router.get("/mistakes/count", response_model=dict)
-    async def count_mistakes() -> dict[str, int]:
+    @router.get("/mistakes/count", response_model=MistakeCountResponse)
+    async def count_mistakes() -> MistakeCountResponse:
         try:
-            return {"count": service.count_mistakes()}
+            return MistakeCountResponse(count=service.count_mistakes())
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 

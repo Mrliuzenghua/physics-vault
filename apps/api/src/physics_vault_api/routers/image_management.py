@@ -6,6 +6,7 @@ from ..schemas.contracts import BooleanMapResponse
 from ..schemas.image_management import (
     AddImageRequest,
     AddCachedImageRequest,
+    AvailableImageAsset,
     CachedImageAsset,
     CacheUploadResponse,
     ImageListResponse,
@@ -90,8 +91,8 @@ def build_image_management_router(
     async def validate_images(question_id: str) -> ValidationResponse:
         return service.validate(question_id)
 
-    @router.get("/images/available", summary="列出可用素材")
-    async def available_images(keyword: str = "", limit: int = 50) -> list[dict]:
+    @router.get("/images/available", response_model=list[AvailableImageAsset], summary="列出可用素材")
+    async def available_images(keyword: str = "", limit: int = 50) -> list[AvailableImageAsset]:
         return service.available_images(keyword=keyword, limit=limit)
 
     return router
