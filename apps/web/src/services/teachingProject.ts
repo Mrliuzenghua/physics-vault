@@ -43,7 +43,15 @@ function defaultHandoutConfig(pkg: LessonPackage): HandoutConfig {
 function readProjects(): TeachingProject[] {
   const value = readJsonStorage<unknown>(TEACHING_PROJECT_KEY, []);
   return Array.isArray(value)
-    ? value.filter((item): item is TeachingProject => isRecord(item) && typeof item.id === 'string')
+    ? value.filter((item): item is TeachingProject => (
+        isRecord(item)
+        && item.schema === 'teaching-project/v1'
+        && typeof item.id === 'string'
+        && typeof item.title === 'string'
+        && isRecord(item.content)
+        && isRecord(item.handout)
+        && isRecord(item.slides)
+      ))
     : [];
 }
 
