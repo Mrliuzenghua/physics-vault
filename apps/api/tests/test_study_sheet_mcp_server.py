@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+SERVER_PATH = PROJECT_ROOT / "scripts" / "study_sheet_mcp_server.mjs"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _resource_root(tmp_path: Path) -> Path:
+    root = tmp_path / "教学资源库"
+    templates = root / "01-模板"
+    output = root / "02-知识讲义"
+    templates.mkdir(parents=True)
+    output.mkdir()
+    template = templates / "knowledge.typ"
+    template.write_text(
+        '#let topic = "示例"\n#set document(date: none)\n= #topic\n',
+        encoding="utf-8",
+    )
+    registry = {
+        "templates": [
+            {
+                "id": "knowledge-handout",
+                "name": "知识讲义",
+                "template_file": template.name,
+                "template_sha256": _sha256(template),
+                "output_dir": "02-知识讲义",
+                "filename_pattern": "{seq}-{topic}.typ",
+                "required_fields": ["topic"],
+                "editable_sections": ["document-content"],
+            }
+        ]
+    }
+    (templates / "templates.json").write_text(
+        json.dumps(registry, ensure_ascii=False), encoding="utf-8"
+    )
+    return root
+
+
+def _rpc(root: Path, calls: list[dict[str, object]]) -> list[dict[str, object]]:
+    payload = "\n".join(json.dumps(call, ensure_ascii=False) for call in calls) + "\n"
+    env = {**os.environ, "PHYSICS_STUDY_SHEET_ROOT": str(root)}
+    result = subprocess.run(
+        ["node", str(SERVER_PATH)],
+        input=payload,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        env=env,
+        cwd=PROJECT_ROOT,
+        timeout=15,
+        check=True,
+    )
+    return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+
+def _call(tool: str, arguments: dict[str, object], request_id: int = 1) -> dict[str, object]:
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    }
+
+
+def _content(response: dict[str, object]) -> dict[str, object]:
+    result = response["result"]
+    assert isinstance(result, dict)
+    blocks = result["content"]
+    assert isinstance(blocks, list)
+    return json.loads(blocks[0]["text"])
+
+
+def test_lists_expected_tools_and_audits_templates(tmp_path: Path) -> None:
+    root = _resource_root(tmp_path)
+    responses = _rpc(
+        root,
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            _call("audit_study_sheet_templates", {}, 2),
+        ],
+    )
+
+    tools = responses[0]["result"]["tools"]
+    assert {item["name"] for item in tools} == {
+        "get_study_sheet_root_status",
+        "list_study_sheet_templates",
+        "create_study_sheet",
+        "validate_and_compile_study_sheet",
+        "audit_study_sheet_templates",
+    }
+    assert _content(responses[1])["checks"][0]["passed"] is True
+
+
+def test_dry_run_does_not_write_and_real_calls_increment_sequence(tmp_path: Path) -> None:
+    root = _resource_root(tmp_path)
+    arguments = {
+        "template_id": "knowledge-handout",
+        "topic": "匀变速直线运动",
+        "typst_body": "正文",
+        "dry_run": True,
+    }
+    preview = _content(_rpc(root, [_call("create_study_sheet", arguments)])[0])
+    output = root / "02-知识讲义"
+    assert preview["status"] == "preview"
+    assert list(output.iterdir()) == []
+
+    arguments["dry_run"] = False
+    first = _content(_rpc(root, [_call("create_study_sheet", arguments)])[0])
+    second = _content(_rpc(root, [_call("create_study_sheet", arguments)])[0])
+    assert Path(first["source_path"]).name.startswith("001-")
+    assert Path(second["source_path"]).name.startswith("002-")
+    assert len(list(output.glob("*.typ"))) == 2
+
+
+def test_operation_id_makes_creation_idempotent_and_rejects_payload_conflict(tmp_path: Path) -> None:
+    root = _resource_root(tmp_path)
+    arguments = {
+        "template_id": "knowledge-handout",
+        "topic": "动量守恒",
+        "typst_body": "正文",
+        "operation_id": "lesson-momentum-001",
+    }
+    first = _content(_rpc(root, [_call("create_study_sheet", arguments)])[0])
+    replay = _content(_rpc(root, [_call("create_study_sheet", arguments)])[0])
+
+    assert first["status"] == "created"
+    assert replay["status"] == "existing"
+    assert replay["idempotent"] is True
+    assert replay["source_path"] == first["source_path"]
+    assert len(list((root / "02-知识讲义").glob("*.typ"))) == 1
+
+    conflict_arguments = {**arguments, "typst_body": "不同正文"}
+    conflict = _rpc(root, [_call("create_study_sheet", conflict_arguments)])[0]
+    assert "error" in conflict
+    assert "operation_id" in conflict["error"]["message"]
+
+
+def test_rejects_paths_outside_managed_output(tmp_path: Path) -> None:
+    root = _resource_root(tmp_path)
+    outside = tmp_path / "outside.typ"
+    outside.write_text("// Generated by Physics Vault study-sheet-workflow.\n", encoding="utf-8")
+    response = _rpc(
+        root,
+        [_call("validate_and_compile_study_sheet", {
+            "template_id": "knowledge-handout",
+            "source_path": str(outside),
+            "compile": False,
+        })],
+    )[0]
+    assert "error" in response
+    assert "source_path" in response["error"]["message"]
+
+
+def test_existing_pdf_requires_explicit_overwrite(tmp_path: Path) -> None:
+    root = _resource_root(tmp_path)
+    output = root / "02-知识讲义"
+    source = output / "001-test.typ"
+    source.write_text(
+        "// Generated by Physics Vault study-sheet-workflow.\n#set document(date: none)\nTest\n",
+        encoding="utf-8",
+    )
+    pdf = source.with_suffix(".pdf")
+    pdf.write_bytes(b"existing")
+
+    result = _content(_rpc(
+        root,
+        [_call("validate_and_compile_study_sheet", {
+            "template_id": "knowledge-handout",
+            "source_path": str(source),
+        })],
+    )[0])
+    assert result["status"] == "pdf_exists"
+    assert result["overwrite_required"] is True
+    assert pdf.read_bytes() == b"existing"
+
+
+def test_template_hash_mismatch_is_reported(tmp_path: Path) -> None:
+    root = _resource_root(tmp_path)
+    template = root / "01-模板" / "knowledge.typ"
+    template.write_text("changed", encoding="utf-8")
+
+    audit = _content(_rpc(root, [_call("audit_study_sheet_templates", {})])[0])
+    assert audit["checks"][0]["passed"] is False
