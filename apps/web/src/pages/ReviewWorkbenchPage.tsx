@@ -6,6 +6,8 @@ import { CheckCircle2, ChevronLeft, ChevronRight, Cloud, ExternalLink, FileSearc
 import type { FigureInsertRequest } from '../components/editor/StructuredTextEditor';
 import LatexRenderer from '../components/render/LatexRenderer';
 import ReviewQueueSidebar from '../components/review/ReviewQueueSidebar';
+import ImageOptionProcessorDialog from '../components/shared/ImageOptionProcessorDialog';
+import type { ImageProcessResult } from '../components/shared/ImageOptionProcessorDialog';
 import { useReviewQueue } from '../hooks/review/useReviewQueue';
 import {
   analyzeQuestionQuality,
@@ -64,6 +66,7 @@ import type {
   SaveReviewedQuestionsResponse,
 } from '../types';
 import { normalizeShortInlineDisplayMath } from '../utils/mathText';
+import { imageThumbnailUrl } from '../utils/imageUrl';
 import { findNextMatchingIndex } from '../utils/reviewQueueNavigation';
 import { findNextRiskIndex, getRiskItems, type QueueKey } from '../utils/review/reviewQueue';
 import {
@@ -80,6 +83,15 @@ import {
 const QuestionLiveEditor = lazy(() => import('../components/editor/QuestionLiveEditor'));
 
 type ReviewWorkspaceView = 'edit' | 'source';
+
+interface ImageProcessApplyRequest {
+  requestId: number;
+  questionId: string;
+  mode: ImageProcessResult['mode'];
+  sourcePath: string;
+  uploaded: ImportMediaAsset[];
+  createdFigures: Figure[];
+}
 
 const TYPE_OPTIONS = [
   { value: 'single_choice', label: '单选题' },
@@ -117,6 +129,47 @@ function fileUrl(path?: string | null): string | null {
   if (!trimmed) return null;
   if (trimmed.startsWith('/files/')) return trimmed;
   return `/files/${trimmed.replace(/^\.?\//, '')}`;
+}
+
+function applyImageProcessToDraft(draft: ReviewQuestionDraft, request: ImageProcessApplyRequest): ReviewQuestionDraft {
+  const sourceFigure = draft.figures.find((figure) => figure.local_path === request.sourcePath);
+  const sourceMarker = sourceFigure ? `![fig:${sourceFigure.fig_uuid}]` : '';
+  const cleanMarker = (value: string) => sourceMarker
+    ? value.split(sourceMarker).join('').replace(/\n{3,}/g, '\n\n').trim()
+    : value;
+
+  if (request.mode === 'split') {
+    const currentOptions = new Map(draft.options.map((option) => [option.opt.toUpperCase(), option]));
+    const options = ['A', 'B', 'C', 'D'].map((letter, index) => {
+      const current = currentOptions.get(letter) || { opt: letter, content: '' };
+      const content = cleanMarker(current.content);
+      return {
+        ...current,
+        opt: letter,
+        content: `${content}${content ? '\n' : ''}![fig:${request.createdFigures[index].fig_uuid}]`,
+      };
+    });
+    return {
+      ...draft,
+      title: cleanMarker(draft.title),
+      options,
+      figures: [...draft.figures.filter((figure) => figure !== sourceFigure), ...request.createdFigures],
+    };
+  }
+
+  const replacement = request.createdFigures[0];
+  if (!replacement) return draft;
+  if (sourceFigure) {
+    return {
+      ...draft,
+      figures: draft.figures.map((figure) => figure === sourceFigure ? { ...figure, local_path: replacement.local_path } : figure),
+    };
+  }
+  return {
+    ...draft,
+    title: `${draft.title.trim()}\n\n![fig:${replacement.fig_uuid}]`.trim(),
+    figures: [...draft.figures, replacement],
+  };
 }
 
 function getKnowledgeRisks(draft: KnowledgeReviewDraft): string[] {
@@ -174,7 +227,9 @@ export default function ReviewWorkbenchPage() {
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [imageUploading, setImageUploading] = useState(false);
   const [imagePickerOpen, setImagePickerOpen] = useState(false);
-  const [figureInsertRequest, setFigureInsertRequest] = useState<FigureInsertRequest | null>(null);
+  const [figureInsertQueue, setFigureInsertQueue] = useState<FigureInsertRequest[]>([]);
+  const figureInsertRequest = figureInsertQueue[0] ?? null;
+  const [imageProcessRequest, setImageProcessRequest] = useState<ImageProcessApplyRequest | null>(null);
   const [qualityConfig, setQualityConfig] = useState<QuestionQualityRuleConfig>(() => readQualityConfig());
   const {
     counts,
@@ -552,7 +607,9 @@ export default function ReviewWorkbenchPage() {
   }, []);
 
   const copyImage = useCallback(async (asset: ImportMediaAsset) => {
-    const imageUrl = fileUrl(asset.relative_path);
+    const imageUrl = /\.(?:wmf|emf)$/i.test(asset.relative_path)
+      ? imageThumbnailUrl(asset.relative_path, 1600)
+      : fileUrl(asset.relative_path);
     if (!imageUrl || !navigator.clipboard || typeof ClipboardItem === 'undefined') {
       setCopyMessage('当前浏览器不支持直接复制图片');
       window.setTimeout(() => setCopyMessage(null), 1800);
@@ -573,13 +630,10 @@ export default function ReviewWorkbenchPage() {
     if (!currentDraft) return;
     const uuid = `fig_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
     const figure = { fig_uuid: uuid, local_path: asset.relative_path, display_scale: 60, display_align: 'center' as const };
-    const figures = [...currentDraft.figures, figure];
-    updateDraftAt(currentIndex, { figures });
-    setFigureInsertRequest({ requestId: Date.now(), figure });
-    setImagePickerOpen(false);
+    setFigureInsertQueue((queue) => [...queue, { requestId: Date.now() + Math.random(), figure }]);
     setCopyMessage(`已插入图片 ${uuid}`);
     window.setTimeout(() => setCopyMessage(null), 1800);
-  }, [currentDraft, currentIndex, updateDraftAt]);
+  }, [currentDraft]);
 
   const handleUploadImageToCurrent = useCallback(async (file: File) => {
     if (!currentDraft) return;
@@ -596,10 +650,7 @@ export default function ReviewWorkbenchPage() {
       setTaskMeta((prev) => ({ ...prev, mediaAssets: [...prev.mediaAssets, asset] }));
       const uuid = `fig_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
       const figure = { fig_uuid: uuid, local_path: asset.relative_path, display_scale: 60, display_align: 'center' as const };
-      const figures = [...currentDraft.figures, figure];
-      updateDraftAt(currentIndex, { figures });
-      setFigureInsertRequest({ requestId: Date.now(), figure });
-      setImagePickerOpen(false);
+      setFigureInsertQueue((queue) => [...queue, { requestId: Date.now() + Math.random(), figure }]);
       setCopyMessage(`已上传并插入图片 ${uuid}`);
     } catch (err) {
       setCopyMessage(`上传失败：${err instanceof Error ? err.message : '未知错误'}`);
@@ -607,7 +658,41 @@ export default function ReviewWorkbenchPage() {
       setImageUploading(false);
       window.setTimeout(() => setCopyMessage(null), 2200);
     }
-  }, [currentDraft, currentIndex, taskMeta.batchId, updateDraftAt]);
+  }, [currentDraft, taskMeta.batchId]);
+
+  const handleProcessImageForCurrent = useCallback(async (sourceAsset: ImportMediaAsset, result: ImageProcessResult) => {
+    if (!currentDraft) throw new Error('请先选择一道题目');
+    const batchId = taskMeta.batchId?.trim();
+    if (!batchId) throw new Error('当前任务没有可用图片缓存目录');
+    const uploaded: ImportMediaAsset[] = [];
+    for (const file of result.files) uploaded.push(await uploadBatchImage(batchId, file));
+    setTaskMeta((previous) => ({ ...previous, mediaAssets: mergeMediaAssets(previous.mediaAssets, uploaded) }));
+
+    if (uploaded.length !== result.files.length) throw new Error('部分图片未能保存，请重试');
+    const createdFigures: Figure[] = result.mode === 'split'
+      ? uploaded.map((asset, index) => ({
+        fig_uuid: `fig_option_${Date.now().toString(36)}_${index}_${Math.random().toString(36).slice(2, 6)}`,
+        local_path: asset.relative_path,
+        display_scale: 100,
+        display_align: 'center',
+      }))
+      : [{
+          fig_uuid: `fig_enhanced_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+          local_path: uploaded[0].relative_path,
+          display_scale: 60,
+          display_align: 'center',
+        }];
+    setImageProcessRequest({
+      requestId: Date.now() + Math.random(),
+      questionId: currentDraft.question_id,
+      mode: result.mode,
+      sourcePath: sourceAsset.relative_path,
+      uploaded,
+      createdFigures,
+    });
+    setCopyMessage(result.mode === 'split' ? '已切分为 A/B/C/D 四张 PNG 并写入选项' : '清晰化 PNG 已应用到当前题');
+    window.setTimeout(() => setCopyMessage(null), 2200);
+  }, [currentDraft, taskMeta.batchId]);
 
   const handleSingleAiSuggestion = useCallback(async () => {
     if (!currentDraft) return;
@@ -846,7 +931,7 @@ export default function ReviewWorkbenchPage() {
   const risks = currentDraft ? getRiskItems(currentDraft, duplicateQuestionIds, qualityConfig) : [];
 
   return (
-    <main className="flex h-full min-h-0 flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
+    <section aria-label="校对工作台" className="flex h-full min-h-0 flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
       <header className="z-20 shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-card)] px-4 py-2">
         <div className="flex min-w-0 items-center gap-3">
           <button type="button" className={SOFT_BUTTON_CLASS} aria-label="返回任务列表" title="返回任务列表" onClick={() => navigate('/review')}><ChevronLeft size={14} className="sm:mr-1 sm:inline" /><span className="hidden sm:inline">任务列表</span></button>
@@ -950,7 +1035,9 @@ export default function ReviewWorkbenchPage() {
                 draft={currentDraft}
                 updateDraftAt={(patch) => updateDraftAt(currentIndex, patch)}
                 insertFigureRequest={figureInsertRequest}
-                onFigureInsertHandled={(requestId) => setFigureInsertRequest((current) => current?.requestId === requestId ? null : current)}
+                onFigureInsertHandled={(requestId) => setFigureInsertQueue((queue) => queue[0]?.requestId === requestId ? queue.slice(1) : queue)}
+                imageProcessRequest={imageProcessRequest}
+                onImageProcessHandled={(requestId) => setImageProcessRequest((request) => request?.requestId === requestId ? null : request)}
                 openImagePicker={() => setImagePickerOpen(true)}
               />
             )}
@@ -994,10 +1081,8 @@ export default function ReviewWorkbenchPage() {
         )}
       </section>
       {imagePickerOpen && (
-        <div className="fixed inset-0 z-[70] flex justify-end bg-slate-950/20" role="dialog" aria-modal="true" aria-label="图片缓存" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setImagePickerOpen(false);
-        }}>
-          <section className="flex h-full w-full max-w-[420px] flex-col border-l border-[var(--color-border)] bg-[var(--color-bg-card)] shadow-2xl">
+        <div className="pointer-events-none fixed inset-0 z-[70] flex justify-end" role="dialog" aria-label="图片缓存">
+          <section className="pointer-events-auto flex h-full w-full max-w-[420px] flex-col border-l border-[var(--color-border)] bg-[var(--color-bg-card)] shadow-2xl">
             <header className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
               <div>
                 <h2 className="text-sm font-bold">图片缓存</h2>
@@ -1006,12 +1091,12 @@ export default function ReviewWorkbenchPage() {
               <button type="button" className={SOFT_BUTTON_CLASS} aria-label="关闭图片缓存" title="关闭图片缓存" onClick={() => setImagePickerOpen(false)}><X size={15} /></button>
             </header>
             <div className="min-h-0 flex-1 overflow-y-auto p-3">
-              <ImageCachePanel assets={taskMeta.mediaAssets} draft={currentDraft} canUpload={Boolean(taskMeta.batchId)} uploading={imageUploading} copyText={copyText} copyImage={copyImage} attachAsset={attachAssetToCurrent} uploadImage={(file) => void handleUploadImageToCurrent(file)} copyMessage={copyMessage} />
+              <ImageCachePanel assets={taskMeta.mediaAssets} draft={currentDraft} canUpload={Boolean(taskMeta.batchId)} uploading={imageUploading} copyText={copyText} copyImage={copyImage} attachAsset={attachAssetToCurrent} uploadImage={(file) => void handleUploadImageToCurrent(file)} processAsset={handleProcessImageForCurrent} copyMessage={copyMessage} />
             </div>
           </section>
         </div>
       )}
-    </main>
+    </section>
   );
 }
 
@@ -1045,7 +1130,7 @@ function ReviewTaskQueuePage({
   const pendingItemCount = tasks.reduce((total, task) => total + (task.knowledge_count > 0 ? task.knowledge_count : task.question_count), 0);
 
   return (
-    <main className="h-full overflow-y-auto bg-[#f3f6fa] px-3 py-3 text-[var(--color-text)] sm:px-5 sm:py-4">
+    <section aria-label="校对任务概览" className="h-full overflow-y-auto bg-[#f3f6fa] px-3 py-3 text-[var(--color-text)] sm:px-5 sm:py-4">
       <div className="mx-auto max-w-[1280px]">
       <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -1102,7 +1187,7 @@ function ReviewTaskQueuePage({
         </div>
       )}
       </div>
-    </main>
+    </section>
   );
 }
 
@@ -1157,7 +1242,7 @@ function KnowledgeReviewWorkbench({
   const risks = getKnowledgeRisks(currentDraft);
 
   return (
-    <main className="flex h-screen min-h-0 flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
+    <section aria-label="导入校对" className="flex h-screen min-h-0 flex-col bg-[var(--color-bg)] text-[var(--color-text)]">
       <header className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-card)] px-4 py-2.5">
         <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -1240,7 +1325,7 @@ function KnowledgeReviewWorkbench({
           <KnowledgeDraftPreview draft={currentDraft} />
         </aside>
       </section>
-    </main>
+    </section>
   );
 }
 
@@ -1305,11 +1390,13 @@ function TextAreaField({ label, value, onChange }: { label: string; value: strin
   );
 }
 
-function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsertHandled, openImagePicker }: {
+function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsertHandled, imageProcessRequest, onImageProcessHandled, openImagePicker }: {
   draft: ReviewQuestionDraft;
   updateDraftAt: (patch: Partial<ReviewQuestionDraft>) => void;
   insertFigureRequest: FigureInsertRequest | null;
   onFigureInsertHandled: (requestId: number) => void;
+  imageProcessRequest: ImageProcessApplyRequest | null;
+  onImageProcessHandled: (requestId: number) => void;
   openImagePicker: () => void;
 }) {
   const [localDraft, setLocalDraft] = useState(draft);
@@ -1345,6 +1432,18 @@ function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsert
 
   useEffect(() => () => publishLocalDraft(), [draft.question_id, publishLocalDraft]);
 
+  const mergeFigureIntoLocalDraft = useCallback((figure: Figure) => {
+    setLocalDraft((current) => {
+      if (current.figures.some((item) => item.fig_uuid === figure.fig_uuid)) return current;
+      const updated = { ...current, figures: [...current.figures, figure] };
+      updated.figureIssues = computeFigureIssues(updated);
+      if (updated.status === 'pending') updated.status = 'modified';
+      dirtyRef.current = true;
+      localDraftRef.current = updated;
+      return updated;
+    });
+  }, []);
+
   useEffect(() => {
     if (!insertFigureRequest) return;
     const { figure } = insertFigureRequest;
@@ -1354,12 +1453,33 @@ function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsert
       ...(figure.display_scale === null || figure.display_scale === undefined ? {} : { display_scale: figure.display_scale }),
       ...(figure.display_align ? { display_align: figure.display_align } : {}),
     };
+    mergeFigureIntoLocalDraft(reviewFigure);
+  }, [insertFigureRequest, mergeFigureIntoLocalDraft]);
+
+  const completeFigureInsert = useCallback((requestId: number) => {
+    if (insertFigureRequest?.requestId === requestId) {
+      mergeFigureIntoLocalDraft({
+        fig_uuid: insertFigureRequest.figure.fig_uuid,
+        local_path: insertFigureRequest.figure.local_path,
+        ...(insertFigureRequest.figure.display_scale === null || insertFigureRequest.figure.display_scale === undefined ? {} : { display_scale: insertFigureRequest.figure.display_scale }),
+        ...(insertFigureRequest.figure.display_align ? { display_align: insertFigureRequest.figure.display_align } : {}),
+      });
+    }
+    onFigureInsertHandled(requestId);
+  }, [insertFigureRequest, mergeFigureIntoLocalDraft, onFigureInsertHandled]);
+
+  useEffect(() => {
+    if (!imageProcessRequest || imageProcessRequest.questionId !== localDraftRef.current.question_id) return;
     setLocalDraft((current) => {
-      if (current.figures.some((item) => item.fig_uuid === reviewFigure.fig_uuid)) return current;
+      const updated = applyImageProcessToDraft(current, imageProcessRequest);
+      updated.figureIssues = computeFigureIssues(updated);
+      if (updated.status === 'pending') updated.status = 'modified';
       dirtyRef.current = true;
-      return { ...current, figures: [...current.figures, reviewFigure] };
+      localDraftRef.current = updated;
+      return updated;
     });
-  }, [insertFigureRequest]);
+    onImageProcessHandled(imageProcessRequest.requestId);
+  }, [imageProcessRequest, onImageProcessHandled]);
 
   const updateLocalDraft = useCallback((patch: Partial<ReviewQuestionDraft>) => {
     dirtyRef.current = true;
@@ -1397,9 +1517,10 @@ function EditorPanel({ draft, updateDraftAt, insertFigureRequest, onFigureInsert
             showPreview
             showHeader={false}
             showImageManager={false}
+            showImageToolbarButton={false}
             syncDocument={false}
             insertFigureRequest={insertFigureRequest}
-            onFigureInsertHandled={onFigureInsertHandled}
+            onFigureInsertHandled={completeFigureInsert}
             onRequestImage={openImagePicker}
           />
         </Suspense>
@@ -1663,7 +1784,7 @@ function ChangeValue({ before, after }: { before: string; after: string }) {
   );
 }
 
-function ImageCachePanel({ assets, draft, canUpload, uploading, copyText, copyImage, attachAsset, uploadImage, copyMessage }: {
+function ImageCachePanel({ assets, draft, canUpload, uploading, copyText, copyImage, attachAsset, uploadImage, processAsset, copyMessage }: {
   assets: ImportMediaAsset[];
   draft: ReviewQuestionDraft | null;
   canUpload: boolean;
@@ -1672,9 +1793,11 @@ function ImageCachePanel({ assets, draft, canUpload, uploading, copyText, copyIm
   copyImage: (asset: ImportMediaAsset) => Promise<void>;
   attachAsset: (asset: ImportMediaAsset) => void;
   uploadImage: (file: File) => void;
+  processAsset: (asset: ImportMediaAsset, result: ImageProcessResult) => Promise<void>;
   copyMessage: string | null;
 }) {
   const used = new Set(draft?.figures.map((figure) => figure.local_path) ?? []);
+  const [processorAsset, setProcessorAsset] = useState<ImportMediaAsset | null>(null);
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
       <div className="flex items-center justify-between gap-2">
@@ -1702,7 +1825,7 @@ function ImageCachePanel({ assets, draft, canUpload, uploading, copyText, copyIm
           return (
             <article key={asset.relative_path} className="overflow-hidden rounded-md border border-[var(--color-border)] bg-white">
               <button type="button" className="group relative block h-32 w-full bg-[#f7f9fc] p-2 hover:bg-[var(--color-accent-light)]" onClick={() => attachAsset(asset)} title="插入到当前光标位置">
-                <img src={fileUrl(asset.relative_path) ?? ''} className="h-full w-full object-contain" />
+                <img src={imageThumbnailUrl(asset.relative_path, 720) ?? ''} className="h-full w-full object-contain" />
                 <span className="absolute inset-x-2 bottom-2 rounded bg-slate-900/75 px-2 py-1 text-[10px] font-semibold text-white opacity-0 transition-opacity group-hover:opacity-100">点击插入</span>
               </button>
               <div className="px-2 py-1.5">
@@ -1710,6 +1833,7 @@ function ImageCachePanel({ assets, draft, canUpload, uploading, copyText, copyIm
                 <div className="mt-1 flex items-center justify-between gap-1">
                   {used.has(asset.relative_path) ? <span className="text-[10px] font-semibold text-[var(--color-success)]">当前题已用</span> : <span />}
                   <div className="flex gap-1">
+                    <button type="button" className="text-[10px] font-semibold text-[var(--color-accent)] hover:underline" onClick={() => setProcessorAsset(asset)}>切分/清晰化</button>
                     <button type="button" className="text-[10px] font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-accent)]" onClick={() => void copyImage(asset)}>复制</button>
                     <button type="button" className="text-[10px] font-semibold text-[var(--color-text-muted)] hover:text-[var(--color-accent)]" onClick={() => void copyText(ref, `已复制 ${ref}`)}>引用</button>
                   </div>
@@ -1719,6 +1843,17 @@ function ImageCachePanel({ assets, draft, canUpload, uploading, copyText, copyIm
           );
         })}
       </div>
+      {processorAsset && (
+        <ImageOptionProcessorDialog
+          open
+          sourceUrl={/\.(?:wmf|emf)$/i.test(processorAsset.relative_path)
+            ? imageThumbnailUrl(processorAsset.relative_path, 1600) || ''
+            : fileUrl(processorAsset.relative_path) || ''}
+          sourceName={processorAsset.filename || processorAsset.relative_path}
+          onClose={() => setProcessorAsset(null)}
+          onApply={(result) => processAsset(processorAsset, result)}
+        />
+      )}
     </div>
   );
 }
@@ -1775,13 +1910,13 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: 'da
 
 function CenteredState({ title, desc, action, onAction }: { title: string; desc: string; action?: string; onAction?: () => void }) {
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[var(--color-bg)] p-6">
+    <section aria-label={title} className="flex min-h-screen items-center justify-center bg-[var(--color-bg)] p-6">
       <div className="max-w-md text-center">
         <h1 className="text-xl font-bold">{title}</h1>
         <p className="mt-2 text-sm text-[var(--color-text-secondary)]">{desc}</p>
         {action && <button className={`${PRIMARY_BUTTON_CLASS} mt-4`} onClick={onAction}>{action}</button>}
       </div>
-    </main>
+    </section>
   );
 }
 

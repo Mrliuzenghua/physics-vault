@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react';
 
 import ImageCachePickerDialog from '../editor/ImageCachePickerDialog';
 import type { CachedImageAsset } from '../editor/ImageCachePickerDialog';
+import ImageOptionProcessorDialog from './ImageOptionProcessorDialog';
+import type { ImageProcessResult } from './ImageOptionProcessorDialog';
 import {
   addCachedQuestionImage,
   addQuestionImage,
@@ -12,8 +14,9 @@ import {
   updateQuestionImage,
   validateQuestionImages,
 } from '../../services/assetsApi';
+import { uploadQuestionImageCache } from '../../services/imageCacheApi';
 import type { QuestionImageDetail, ValidationResponse } from '../../types';
-import { imageFileUrl } from '../../utils/imageUrl';
+import { imageFileUrl, imageThumbnailUrl } from '../../utils/imageUrl';
 
 const ROLE_LABELS: Record<string, string> = {
   stem: '题干图',
@@ -26,9 +29,15 @@ interface Props {
   questionId: string;
   stemText: string;
   onImagesChanged?: (images: QuestionImageDetail[]) => void;
+  onProcessedImages?: (payload: {
+    mode: ImageProcessResult['mode'];
+    source: QuestionImageDetail;
+    created: QuestionImageDetail[];
+    images: QuestionImageDetail[];
+  }) => void;
 }
 
-export default function ImageManager({ questionId, stemText, onImagesChanged }: Props) {
+export default function ImageManager({ questionId, stemText, onImagesChanged, onProcessedImages }: Props) {
   const [images, setImages] = useState<QuestionImageDetail[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +50,8 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
   const [cachePickerOpen, setCachePickerOpen] = useState(false);
   const [cacheBusyPath, setCacheBusyPath] = useState<string | null>(null);
   const [replaceTargetId, setReplaceTargetId] = useState<string | null>(null);
+  const [processorSource, setProcessorSource] = useState<QuestionImageDetail | null>(null);
+  const [processorBusy, setProcessorBusy] = useState(false);
 
   const load = useCallback(async (): Promise<QuestionImageDetail[]> => {
     if (!questionId) return [];
@@ -96,7 +107,6 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
       }
       const nextImages = await load();
       onImagesChanged?.(nextImages);
-      setCachePickerOpen(false);
       setReplaceTargetId(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '图片缓存插入失败');
@@ -109,6 +119,38 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
     setReplaceTargetId(oldId);
     setCachePickerOpen(true);
   }, []);
+
+  const handleProcessed = useCallback(async (result: ImageProcessResult) => {
+    if (!processorSource) return;
+    setProcessorBusy(true);
+    setError(null);
+    try {
+      const uploaded = await uploadQuestionImageCache(result.files);
+      if (uploaded.images.length !== result.files.length) {
+        throw new Error(`仅生成 ${uploaded.images.length}/${result.files.length} 张图片，请重试`);
+      }
+      const created: QuestionImageDetail[] = [];
+      for (const asset of uploaded.images) {
+        created.push(await addCachedQuestionImage(questionId, {
+          relative_path: asset.relative_path,
+          role: processorSource.role || 'stem',
+        }));
+      }
+      await deleteQuestionImage(questionId, processorSource.asset_id);
+      const nextImages = await load();
+      if (onProcessedImages) {
+        onProcessedImages({ mode: result.mode, source: processorSource, created, images: nextImages });
+      } else {
+        onImagesChanged?.(nextImages);
+      }
+      setProcessorSource(null);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : '图片处理失败');
+      throw failure;
+    } finally {
+      setProcessorBusy(false);
+    }
+  }, [load, onImagesChanged, onProcessedImages, processorSource, questionId]);
 
   const handleReorder = useCallback(async (draggedIdx: number, dropIdx: number) => {
     if (draggedIdx === dropIdx) { setDragIdx(null); return; }
@@ -146,10 +188,10 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
   void images.find((img) => img.asset_id === previewId); // pre-loaded for preview modal
 
   if (loading) return <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>加载图片...</p>;
-  if (error) return <p className="text-xs" style={{ color: 'var(--color-red)' }}>{error}</p>;
 
   return (
     <div className="space-y-2">
+      {error && <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">{error}</div>}
       {/* Validation status */}
       {validation && !validation.valid && (
         <div className="rounded p-2 text-xs space-y-0.5" style={{ background: 'var(--color-orange-light)', color: 'var(--color-orange)' }}>
@@ -310,6 +352,14 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
           {/* Actions */}
           <div className="flex flex-col gap-1 shrink-0">
             <button
+              onClick={() => setProcessorSource(img)}
+              disabled={processorBusy}
+              className="cursor-pointer rounded border px-1.5 py-0.5 text-xs disabled:opacity-50"
+              style={{ borderColor: 'var(--color-accent)', color: 'var(--color-accent)', background: 'var(--color-accent-light)' }}
+            >
+              切分/清晰化
+            </button>
+            <button
               onClick={() => handleReplace(img.asset_id)}
               className="cursor-pointer rounded border px-1.5 py-0.5 text-xs"
               style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-hover)', color: 'var(--color-text-secondary)' }}
@@ -341,6 +391,17 @@ export default function ImageManager({ questionId, stemText, onImagesChanged }: 
         onClose={() => { setCachePickerOpen(false); setReplaceTargetId(null); }}
         onSelect={handleCacheSelect}
       />
+      {processorSource && (
+        <ImageOptionProcessorDialog
+          open
+          sourceUrl={/\.(?:wmf|emf)$/i.test(processorSource.file_path || processorSource.filename)
+            ? imageThumbnailUrl(processorSource.file_path || processorSource.filename, 1600) || ''
+            : imageFileUrl(processorSource.file_path || processorSource.filename) || ''}
+          sourceName={processorSource.filename}
+          onClose={() => { if (!processorBusy) setProcessorSource(null); }}
+          onApply={handleProcessed}
+        />
+      )}
     </div>
   );
 }

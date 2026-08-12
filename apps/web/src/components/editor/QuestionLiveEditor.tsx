@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { FileText, WandSparkles } from 'lucide-react';
 import type { Option, Question, QuestionImageDetail } from '../../types';
-import { completeQuestionAnalysis, refineQuestionFormat } from '../../services/aiApi';
+import { completeQuestionAnswerAndAnalysis, refineQuestionFormat } from '../../services/aiApi';
 import { addCachedQuestionImage } from '../../services/assetsApi';
 import ImportStemRenderer from '../import/ImportStemRenderer';
 import LatexRenderer from '../render/LatexRenderer';
@@ -21,6 +21,7 @@ interface Props {
   showPreview?: boolean;
   showHeader?: boolean;
   showImageManager?: boolean;
+  showImageToolbarButton?: boolean;
   syncDocument?: boolean;
   insertFigureRequest?: FigureInsertRequest | null;
   onFigureInsertHandled?: (requestId: number) => void;
@@ -130,6 +131,7 @@ export default function QuestionLiveEditor({
   showPreview = true,
   showHeader = true,
   showImageManager = true,
+  showImageToolbarButton = true,
   syncDocument = true,
   insertFigureRequest = null,
   onFigureInsertHandled,
@@ -226,6 +228,62 @@ export default function QuestionLiveEditor({
     onChange(patch);
   }
 
+  function handleProcessedImages(payload: {
+    mode: 'split' | 'enhance';
+    source: QuestionImageDetail;
+    created: QuestionImageDetail[];
+    images: QuestionImageDetail[];
+  }) {
+    const previousFigureMap = new Map((question.figures || []).map((figure) => [figure.fig_uuid, figure]));
+    const nextFigures = payload.images.map((item) => {
+      const figureId = item.placeholder_key || item.asset_id;
+      const previous = previousFigureMap.get(figureId);
+      return {
+        ...previous,
+        fig_uuid: figureId,
+        local_path: item.file_path || item.filename || previous?.local_path || '',
+        display_scale: item.display_scale ?? previous?.display_scale ?? 60,
+        display_align: previous?.display_align || 'center' as const,
+        caption: previous?.caption || '',
+      };
+    });
+    const sourceRef = payload.source.placeholder_key || payload.source.asset_id;
+    const sourceMarker = `![fig:${sourceRef}]`;
+    const createdRefs = payload.created.map((item) => item.placeholder_key || item.asset_id);
+    const currentPatch = parseQuestionDraft(draftText, question);
+    let nextTitle = (currentPatch.title || question.title || '').split(sourceMarker).join('').replace(/\n{3,}/g, '\n\n').trim();
+    let nextOptions = (currentPatch.options || question.options || []).map((option) => ({
+      ...option,
+      content: option.content.split(sourceMarker).join('').trim(),
+    }));
+
+    if (payload.mode === 'split') {
+      const optionMap = new Map(nextOptions.map((option) => [option.opt.toUpperCase(), option]));
+      nextOptions = ['A', 'B', 'C', 'D'].map((letter, index) => {
+        const current = optionMap.get(letter) || { opt: letter, content: '' };
+        const marker = `![fig:${createdRefs[index]}]`;
+        return { ...current, opt: letter, content: `${current.content.trim()}${current.content.trim() ? '\n' : ''}${marker}` };
+      });
+    } else if (createdRefs[0]) {
+      const marker = `![fig:${createdRefs[0]}]`;
+      const sourceWasInOption = (currentPatch.options || question.options || []).some((option) => option.content.includes(sourceMarker));
+      if (sourceWasInOption) {
+        nextOptions = (currentPatch.options || question.options || []).map((option) => ({ ...option, content: option.content.replaceAll(sourceMarker, marker) }));
+      } else {
+        nextTitle = (currentPatch.title || question.title || '').includes(sourceMarker)
+          ? (currentPatch.title || question.title || '').replaceAll(sourceMarker, marker)
+          : `${nextTitle}${nextTitle ? '\n\n' : ''}${marker}`;
+      }
+    }
+
+    const nextQuestion = { ...question, ...currentPatch, title: nextTitle, options: nextOptions, figures: nextFigures };
+    const nextText = questionToDraft(nextQuestion);
+    lastEmittedQuestionText.current = nextText;
+    setDraftText(nextText);
+    setEditorRevision((current) => current + 1);
+    onChange({ title: nextTitle, options: nextOptions, figures: nextFigures });
+  }
+
   async function insertCachedImage(asset: CachedImageAsset) {
     setBusyImagePath(asset.relative_path);
     setImageCacheError(null);
@@ -249,7 +307,6 @@ export default function QuestionLiveEditor({
         onChange({ figures: [...(question.figures || []), figure] });
       }
       setInternalFigureRequest({ requestId: Date.now(), figure });
-      setImageCacheOpen(false);
     } catch (insertError) {
       setImageCacheError(insertError instanceof Error ? insertError.message : '图片插入失败');
     } finally {
@@ -291,12 +348,12 @@ export default function QuestionLiveEditor({
     }
   }
 
-  async function handleAnalysisCompletion() {
+  async function handleAnswerAndAnalysisCompletion() {
     setAnalysisCompleting(true);
     setFormatMessage(null);
     try {
-      const analysis = await completeQuestionAnalysis(question);
-      const nextQuestion = { ...question, analysis };
+      const patch = await completeQuestionAnswerAndAnalysis(question);
+      const nextQuestion = { ...question, ...patch };
       const nextText = questionToDraft(nextQuestion);
       setFormatUndo({
         questionId: question.question_id,
@@ -310,10 +367,10 @@ export default function QuestionLiveEditor({
       lastEmittedQuestionText.current = nextText;
       setDraftText(nextText);
       setEditorRevision((current) => current + 1);
-      onChange({ analysis });
-      setFormatMessage('DeepSeek 已补全解析；请核对后再保存，可撤销本次修改。');
+      onChange(patch);
+      setFormatMessage('DeepSeek 已补充答案和解析；请核对后再保存，可撤销本次修改。');
     } catch (error) {
-      setFormatMessage(error instanceof Error ? error.message : 'DeepSeek 补全解析失败，请检查模型配置。');
+      setFormatMessage(error instanceof Error ? error.message : 'DeepSeek 补充答案和解析失败，请检查模型配置。');
     } finally {
       setAnalysisCompleting(false);
     }
@@ -382,12 +439,12 @@ export default function QuestionLiveEditor({
             <div className="flex flex-wrap justify-end gap-2">
               <button
                 type="button"
-                onClick={() => void handleAnalysisCompletion()}
+                onClick={() => void handleAnswerAndAnalysisCompletion()}
                 disabled={formatRefining || analysisCompleting}
                 className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-teal)] bg-white px-2.5 py-1.5 text-[11px] font-semibold text-[var(--color-teal)] transition-colors hover:bg-[var(--color-teal-light)] disabled:cursor-not-allowed disabled:opacity-55"
-                title="调用已配置的 DeepSeek，根据题干、选项和答案补全解析；不会自动保存"
+                title="调用已配置的 DeepSeek，根据题干和选项补充答案和解析；不会自动保存"
               >
-                <FileText size={14} />{analysisCompleting ? 'DeepSeek 补全中…' : 'DeepSeek 补全解析'}
+                <FileText size={14} />{analysisCompleting ? '一键补充中…' : '一键补充答案和解析'}
               </button>
               <button
                 type="button"
@@ -414,6 +471,7 @@ export default function QuestionLiveEditor({
             storageKey={`physics-vault.tiptap.${question.question_id}.full.v2`}
             minHeight={compact ? 190 : 520}
             compact={compact}
+            showImageToolbarButton={showImageToolbarButton}
             insertFigureRequest={insertFigureRequest || internalFigureRequest}
             onFigureInsertHandled={(requestId) => {
               if (internalFigureRequest?.requestId === requestId) setInternalFigureRequest(null);
@@ -440,12 +498,12 @@ export default function QuestionLiveEditor({
             <details className="mt-3 border-t border-[var(--color-border)] pt-3">
               <summary className="cursor-pointer text-[11px] font-semibold text-[var(--color-accent)]">管理题图与上传</summary>
               <div className="mt-3">
-                <ImageManager questionId={question.question_id} stemText={question.title || ''} onImagesChanged={handleImagesChanged} />
+                <ImageManager questionId={question.question_id} stemText={question.title || ''} onImagesChanged={handleImagesChanged} onProcessedImages={handleProcessedImages} />
               </div>
             </details>
           ) : (
             <div className="mt-4 border-t border-[var(--color-border)] pt-4">
-              <ImageManager questionId={question.question_id} stemText={question.title || ''} onImagesChanged={handleImagesChanged} />
+              <ImageManager questionId={question.question_id} stemText={question.title || ''} onImagesChanged={handleImagesChanged} onProcessedImages={handleProcessedImages} />
             </div>
           ))}
         </div>

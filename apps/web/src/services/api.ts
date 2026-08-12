@@ -192,7 +192,7 @@ export {
 } from './importApi';
 export type { ImportBatchStatus, PersistedImportBatchSummary } from './importApi';
 export {
-  completeQuestionAnalysis,
+  completeQuestionAnswerAndAnalysis,
   fetchAgentConfig,
   fetchMcpRuntimeConfig,
   fetchMcpStatus,

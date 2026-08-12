@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { fetchQuestionImageCache, uploadQuestionImageCache } from '../../services/imageCacheApi';
 import type { ImageCacheAsset } from '../../services/api';
-import { imageFileUrl } from '../../utils/imageUrl';
+import { imageThumbnailUrl } from '../../utils/imageUrl';
 
 export type CachedImageAsset = ImageCacheAsset;
 
@@ -72,10 +72,9 @@ export default function ImageCachePickerDialog({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[110] flex justify-end bg-slate-950/25" role="dialog" aria-modal="true" aria-label="图片缓存">
-      <button type="button" className="absolute inset-0 cursor-default" aria-label="关闭图片缓存" onClick={onClose} />
+    <div className="pointer-events-none fixed inset-0 z-[110] flex justify-end" role="dialog" aria-label="图片缓存">
       <section
-        className={`relative z-10 flex h-full w-[min(720px,94vw)] flex-col border-l bg-white shadow-2xl ${dragging ? 'border-[#2567b8] ring-2 ring-inset ring-[#93c5fd]' : 'border-[#d7e0ea]'}`}
+        className={`pointer-events-auto relative z-10 flex h-full w-[min(720px,94vw)] flex-col border-l bg-white shadow-2xl ${dragging ? 'border-[#2567b8] ring-2 ring-inset ring-[#93c5fd]' : 'border-[#d7e0ea]'}`}
         onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
         onDragOver={(event) => event.preventDefault()}
         onDragLeave={(event) => { if (event.currentTarget === event.target) setDragging(false); }}
@@ -117,7 +116,7 @@ export default function ImageCachePickerDialog({
               return (
                 <button key={asset.relative_path} type="button" disabled={Boolean(busyPath)} onClick={() => void onSelect(asset)} className="group overflow-hidden rounded-md border border-[#d9e2ec] bg-white text-left transition hover:border-[#4d8fd1] hover:shadow-md disabled:cursor-wait disabled:opacity-60">
                   <div className="relative flex h-36 items-center justify-center bg-[#f4f7fa] p-2">
-                    <img src={imageFileUrl(asset.file_path) || ''} alt={asset.filename} loading="lazy" className="h-full w-full object-contain" />
+                    <img src={imageThumbnailUrl(asset.file_path, 720) || ''} alt={asset.filename} loading="lazy" className="h-full w-full object-contain" />
                     <span className="absolute inset-x-2 bottom-2 rounded bg-slate-900/75 px-2 py-1 text-center text-[10px] font-semibold text-white opacity-0 transition-opacity group-hover:opacity-100">{busy ? '正在插入...' : used ? '再次插入' : '插入图片'}</span>
                   </div>
                   <div className="border-t border-[#e4eaf0] px-2.5 py-2">

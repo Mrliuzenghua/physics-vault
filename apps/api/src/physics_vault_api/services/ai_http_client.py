@@ -184,11 +184,7 @@ class AiHttpClient:
         style: str = "classroom_brief",
         include_extension: bool = False,
     ) -> dict[str, Any]:
-        """Generate teaching analysis for a physics question.
-
-        Returns a structured JSON matching the database schema so the
-        frontend can render every field directly.
-        """
+        """Generate only the answer and analysis for a physics question."""
         # Build a rich text description from all available fields
         parts: list[str] = []
         title = str(question.get("title", "")).strip()
@@ -217,37 +213,16 @@ class AiHttpClient:
 
         question_text = "\n\n".join(parts)
 
-        system_prompt = """你是一位资深高中物理教师和题库编辑。请根据题目内容，生成完整的结构化题目数据。
+        system_prompt = """你是一位资深高中物理教师。请解答题目，只生成答案和解析，不要改写题干，不要补充题型、难度、知识点、标签、来源或选项。
 
-严格按以下 JSON 格式输出（不要添加 markdown 代码块标记）：
+严格返回合法 JSON，不要添加 Markdown 代码块：
+{"answer":"最终答案","analysis":"考试标准格式的解析"}
 
-{
-  "question_type": "calculation",
-  "difficulty": 3,
-  "knowledge_point": "匀变速直线运动",
-  "tags": ["力学", "运动学"],
-  "source": "自编",
-  "options": [
-    {"opt": "A", "content": "25m"},
-    {"opt": "B", "content": "50m"}
-  ],
-  "answer": "B",
-  "analysis": "完整的题目解析，包含考点分析、解题步骤、易错提醒。用自然中文段落表述。",
-  "sub_questions": []
-}
-
-字段说明：
-- question_type: single_choice(单选) / multi_choice(多选) / fill(填空) / experiment(实验) / calculation(计算)
-- difficulty: 1-5 整数，1最简单5最难
-- knowledge_point: 最匹配的知识点名称，取最细粒度
-- tags: 2-5个标签，如"力学""电磁学""热学""光学""原子物理"
-- source: 题目来源推测，如"高考真题""模拟题""自编"
-- options: 选项列表，每个有 opt(ABCD) 和 content(内容)
-- answer: 正确答案
-- analysis: 详细解析，200-500字
-- sub_questions: 子问题列表（通常为空数组）
-
-如果题目信息不完整，请根据题干尽力推理补全。保证返回合法的 JSON。"""
+要求：
+1. answer 只写最终答案；选择题写选项字母，填空题写结果，计算题写最终结论。
+2. analysis 给出必要的物理依据、公式和推导，使用自然中文，公式使用 LaTeX。
+3. 只根据下方提供的文字作答。系统不会向你提供或识别题目图片；如果缺少图片内容导致无法确定答案，不得猜测，answer 返回“信息不足”，analysis 简要说明缺少哪项图示信息。
+4. 不输出上述两个字段之外的内容。"""
 
         if style == "classroom_brief":
             extra = "\n请生成课堂教学用的简要解析（150-300字）。"
@@ -258,10 +233,33 @@ class AiHttpClient:
         else:
             extra = ""
 
-        return self._call([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question_text + extra},
-        ], temperature=0.3, max_tokens=4096)
+        # Answer completion is an interactive editing action, so prefer the
+        # lower-latency Flash model on the official DeepSeek V4 endpoint. Keep
+        # custom OpenAI-compatible providers on the explicitly configured model.
+        analysis_model = self._model
+        analysis_thinking: str | None = None
+        if self._base_url.rstrip("/") == "https://api.deepseek.com":
+            if self._model == "deepseek-v4-pro":
+                analysis_model = "deepseek-v4-flash"
+            analysis_thinking = "disabled"
+
+        max_tokens_by_style = {
+            "classroom_brief": 1200,
+            "exam_standard": 1600,
+            "self_study_full": 2600,
+        }
+        return self._call(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question_text + extra},
+            ],
+            temperature=0.2,
+            max_tokens=max_tokens_by_style.get(style, 1600),
+            response_format={"type": "json_object"},
+            timeout_seconds=min(60, self._timeout),
+            model_name=analysis_model,
+            thinking=analysis_thinking,
+        )
 
     def generate_knowledge(
         self,

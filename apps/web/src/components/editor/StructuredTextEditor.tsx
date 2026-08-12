@@ -48,6 +48,7 @@ interface StructuredTextEditorProps {
   minHeight?: number;
   compact?: boolean;
   showToolbar?: boolean;
+  showImageToolbarButton?: boolean;
   insertFigureRequest?: FigureInsertRequest | null;
   onFigureInsertHandled?: (requestId: number) => void;
   onRequestImage?: () => void;
@@ -280,6 +281,7 @@ export default function StructuredTextEditor({
   minHeight = 112,
   compact = false,
   showToolbar = true,
+  showImageToolbarButton = true,
   insertFigureRequest = null,
   onFigureInsertHandled,
   onRequestImage,
@@ -447,7 +449,7 @@ export default function StructuredTextEditor({
         {!compact && <EditorButton label="引用" active={editor.isActive('blockquote')} onClick={() => editor.chain().focus().toggleBlockquote().run()}><Quote size={14} /></EditorButton>}
         <EditorButton label="插入公式模板" onClick={() => editor.chain().focus().insertContent('$...$').run()}><Sigma size={14} /></EditorButton>
         {!compact && <EditorButton label="插入表格" onClick={() => editor.chain().focus().insertContent(richTableNode()).run()}><Table2 size={14} /></EditorButton>}
-        <EditorButton label={onRequestImage ? '从图片缓存插入' : '上传图片'} onClick={() => onRequestImage ? onRequestImage() : fileInputRef.current?.click()}><ImagePlus size={14} /></EditorButton>
+        {showImageToolbarButton && <EditorButton label={onRequestImage ? '从图片缓存插入' : '上传图片'} onClick={() => onRequestImage ? onRequestImage() : fileInputRef.current?.click()}><ImagePlus size={14} /></EditorButton>}
         {!compact && figures.map((figure) => (
           <EditorButton key={figure.fig_uuid} label={`插入题图 ${figure.fig_uuid}`} onClick={() => editor.chain().focus().insertContent(figureNode(figure.fig_uuid, imageFileUrl(figure.local_path) || '', Number(figure.display_scale ?? 60), figure.display_align || 'center')).run()}><ImagePlus size={14} /></EditorButton>
         ))}

@@ -35,9 +35,9 @@ export async function refineQuestionFormat(question: Question): Promise<Partial<
   return result.data;
 }
 
-export async function completeQuestionAnalysis(question: Question): Promise<string> {
+export async function completeQuestionAnswerAndAnalysis(question: Question): Promise<Pick<Question, 'answer' | 'analysis'>> {
   const difficulty = Number(question.difficulty);
-  const result = await request<{ ok: boolean; data: { analysis_text?: string; analysis?: string } }>('/api/mcp/generate-analysis', {
+  const result = await request<{ ok: boolean; data: { answer?: string; answer_text?: string; analysis_text?: string; analysis?: string } }>('/api/mcp/generate-analysis', {
     method: 'POST',
     body: JSON.stringify({
       question: {
@@ -49,9 +49,10 @@ export async function completeQuestionAnalysis(question: Question): Promise<stri
       }, style: 'exam_standard', include_extension: false,
     }),
   });
+  const answer = String(result.data.answer || result.data.answer_text || '').trim();
   const analysis = String(result.data.analysis_text || result.data.analysis || '').trim();
-  if (!analysis) throw new Error('DeepSeek 没有返回可用解析，请检查题干、答案和模型配置。');
-  return analysis;
+  if (!answer || !analysis) throw new Error('DeepSeek 没有返回可用的答案和解析，请检查题干和模型配置。');
+  return { answer, analysis };
 }
 
 export async function sendAiAssistantChat(messages: AiChatMessage[], options?: { query?: string; contextLimit?: number; temperature?: number }): Promise<AiAssistantResponse> {
