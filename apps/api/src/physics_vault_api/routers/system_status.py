@@ -9,6 +9,7 @@ from ..schemas.contracts import HealthResponse, ObjectMapResponse
 from ..database import connect_db
 from ..paths import default_db_path
 from ..repositories.question_search import QuestionSearchRepository
+from ..services.catalog_health import build_catalog_health_report
 
 
 def build_system_status_router(search_repo: QuestionSearchRepository) -> APIRouter:
@@ -44,6 +45,16 @@ def build_system_status_router(search_repo: QuestionSearchRepository) -> APIRout
         except Exception as exc:  # noqa: BLE001
             status["error"] = str(exc)
         return status
+
+    @router.get("/catalog-health", response_model=ObjectMapResponse)
+    def catalog_health() -> dict[str, Any]:
+        """Return an actionable, read-only quality summary for the formal catalog."""
+        db_path = default_db_path()
+        if not db_path.exists():
+            with sqlite3.connect(":memory:") as conn:
+                return build_catalog_health_report(conn)
+        with connect_db(db_path, writable=False) as conn:
+            return build_catalog_health_report(conn)
 
     return router
 

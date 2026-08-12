@@ -7,6 +7,8 @@ import {
   FileStack,
   LibraryBig,
   ListTodo,
+  ShieldCheck,
+  TriangleAlert,
   Upload,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -14,8 +16,8 @@ import { Link } from 'react-router-dom';
 
 import { archiveTeachingProject, duplicateTeachingProject, fetchProcessingRuns, listTeachingProjects } from '../services/api';
 import { fetchMcpStatus } from '../services/aiApi';
+import { fetchCatalogHealth, fetchDatabaseStatus, type CatalogHealthReport } from '../services/catalogApi';
 import { fetchMistakeCount } from '../services/favoritesApi';
-import { searchQuestions } from '../services/questionApi';
 import { fetchReviewTasks } from '../services/reviewApi';
 import { buildClassroomFollowUpTasks, hydrateAllClassroomReflections, listClassroomReflections, setClassroomFollowUpTaskCompleted, type ClassroomFollowUpTask } from '../services/classroomReflection';
 import type { TaskLog } from '../types';
@@ -64,6 +66,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [followUpTasks, setFollowUpTasks] = useState<ClassroomFollowUpTask[]>([]);
   const [recentProjects, setRecentProjects] = useState<TeachingProjectSummary[]>([]);
+  const [catalogHealth, setCatalogHealth] = useState<CatalogHealthReport | null>(null);
 
   const refreshFollowUpTasks = () => setFollowUpTasks(buildClassroomFollowUpTasks(listClassroomReflections()));
 
@@ -107,17 +110,20 @@ export default function DashboardPage() {
     async function loadStats() {
       setLoading(true);
       try {
-        const [questions, mistakes, runs, reviews, mcp, projects] = await Promise.allSettled([
-          searchQuestions({ limit: 1, offset: 0, search_mode: 'browse' }),
+        const [database, mistakes, runs, reviews, mcp, projects, health] = await Promise.allSettled([
+          fetchDatabaseStatus(),
           fetchMistakeCount(),
           fetchProcessingRuns(),
           fetchReviewTasks(80),
           fetchMcpStatus(),
           listTeachingProjects(8),
+          fetchCatalogHealth(),
         ]);
         if (cancelled) return;
         setStats({
-          questionCount: questions.status === 'fulfilled' ? questions.value.total : 0,
+          questionCount: database.status === 'fulfilled'
+            ? database.value.browsable_questions_count ?? database.value.questions_count
+            : 0,
           mistakeCount: mistakes.status === 'fulfilled' ? mistakes.value.count : 0,
           runningTasks: runs.status === 'fulfilled'
             ? (runs.value as TaskLog[]).filter((run) => run.status === 'running' || run.status === 'pending').length
@@ -136,6 +142,7 @@ export default function DashboardPage() {
             updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : undefined,
           })).filter((item) => item.id));
         }
+        if (health.status === 'fulfilled') setCatalogHealth(health.value);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -178,6 +185,8 @@ export default function DashboardPage() {
             ))}
           </div>
         </section>
+
+        <CatalogHealthPanel report={catalogHealth} loading={loading} />
 
         {followUpTasks.length > 0 && <section className="rounded-lg border border-[#dce3ec] bg-white p-4 shadow-sm">
           <div className="mb-3 flex items-center justify-between gap-3">
@@ -279,6 +288,70 @@ export default function DashboardPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+function CatalogHealthPanel({ report, loading }: { report: CatalogHealthReport | null; loading: boolean }) {
+  const scoreTone = !report || report.score >= 95
+    ? 'text-[#28764b] bg-[#eef9f2]'
+    : report.score >= 80
+      ? 'text-[#a35b0a] bg-[#fff7e8]'
+      : 'text-[#b33a3a] bg-[#fff0f0]';
+
+  return (
+    <section className="rounded-lg border border-[#dce3ec] bg-white p-4 shadow-sm" aria-labelledby="catalog-health-title">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <ShieldCheck size={17} className="text-[#52779c]" />
+            <h2 id="catalog-health-title" className="text-sm font-bold text-[#263b52]">题库健康</h2>
+          </div>
+          <p className="mt-1 text-xs text-[#8290a0]">统一检查正式题库的答案、解析、知识点、标签和重复内容。</p>
+        </div>
+        <div className={`rounded-md px-3 py-2 text-right ${scoreTone}`}>
+          <div className="text-xl font-black tabular-nums">{loading || !report ? '-' : report.score}<span className="ml-0.5 text-xs">分</span></div>
+          <div className="text-[10px] font-semibold">{report ? `${report.questions_needing_attention} 题待处理` : '正在检查'}</div>
+        </div>
+      </div>
+
+      {report ? (
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {report.issues.map((issue) => {
+            const sample = issue.sample_questions[0];
+            return (
+              <div key={issue.code} className={`rounded-md border px-3 py-3 ${issue.count > 0 ? 'border-[#ead8bd] bg-[#fffdf8]' : 'border-[#e3e8ee] bg-[#fafbfc]'}`}>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-1.5 text-sm font-semibold text-[#344a61]">
+                    {issue.count > 0 ? <TriangleAlert size={14} className={issue.severity === 'danger' ? 'text-[#b33a3a]' : 'text-[#b56a14]'} /> : <ShieldCheck size={14} className="text-[#4a8a66]" />}
+                    <span className="truncate">{issue.label}</span>
+                  </div>
+                  <span className={`rounded px-1.5 py-0.5 text-xs font-bold tabular-nums ${issue.count > 0 ? 'bg-white text-[#9a5c18]' : 'bg-[#eef9f2] text-[#28764b]'}`}>{issue.count}</span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-[#7b8998]">{issue.description}</p>
+                {sample && (
+                  <Link
+                    to={`/browse?query=${encodeURIComponent(sample.question_id)}&search_mode=strict`}
+                    title={sample.title}
+                    className="mt-2 inline-flex max-w-full items-center gap-1 text-[11px] font-semibold text-[#1768c5] hover:text-[#1159aa]"
+                  >
+                    <span className="truncate">查看样例 {sample.question_id}</span><ArrowRight size={12} className="shrink-0" />
+                  </Link>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : !loading ? (
+        <div className="mt-4 rounded-md bg-[#f6f8fa] px-3 py-3 text-xs text-[#718196]">暂时无法读取题库健康数据，其他工作区功能不受影响。</div>
+      ) : null}
+
+      {report && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#e7ebf0] pt-3 text-[11px] text-[#8290a0]">
+          <span>{report.healthy_questions.toLocaleString()} / {report.total_questions.toLocaleString()} 道正式题目当前无已知结构问题</span>
+          <span>{report.archived_duplicate_count} 道历史重复题已隔离，不计入题库总量</span>
+        </div>
+      )}
+    </section>
   );
 }
 

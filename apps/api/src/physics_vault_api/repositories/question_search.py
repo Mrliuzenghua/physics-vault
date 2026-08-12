@@ -418,7 +418,8 @@ class QuestionSearchRepository:
             filtered = [
                 item
                 for item in filtered
-                if q in (item["canonical_title"] or "").lower()
+                if q in (item["question_id"] or "").lower()
+                or q in (item["canonical_title"] or "").lower()
                 or q in (item.get("answer_text") or "").lower()
                 or q in (item.get("analysis_text") or "").lower()
             ]
@@ -480,7 +481,9 @@ class QuestionSearchRepository:
         _force_like: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
         apply_keyword = search_mode == "strict" and bool(query)
-        use_fts = apply_keyword and not _force_like and self._fts_available()
+        # Question IDs are catalog addresses rather than natural-language content.
+        # They are absent from the FTS document, so use the metadata fallback.
+        use_fts = apply_keyword and not _force_like and not _looks_like_question_id(query) and self._fts_available()
         fts_score_sql = (
             ", -bm25(question_search_fts, 0.0, 8.0, 4.0, 1.0, 1.0, 6.0, 0.5) AS search_score"
             if use_fts
@@ -594,13 +597,14 @@ class QuestionSearchRepository:
         elif apply_keyword and query:
             where.append(
                 """(
-                    q.canonical_title LIKE '%' || ? || '%'
+                    q.question_id LIKE '%' || ? || '%'
+                    OR q.canonical_title LIKE '%' || ? || '%'
                     OR qti.stem_text LIKE '%' || ? || '%'
                     OR qti.answer_text LIKE '%' || ? || '%'
                     OR qti.analysis_text LIKE '%' || ? || '%'
                 )"""
             )
-            params.extend([query, query, query, query])
+            params.extend([query, query, query, query, query])
 
         sql = base_sql
         if where:
@@ -1021,3 +1025,16 @@ def _fetch_distinct(conn: sqlite3.Connection, sql: str) -> list[str]:
 def _build_fts_query(query: str) -> str:
     cleaned = query.strip().replace('"', '""')
     return f'"{cleaned}"'
+
+
+def _looks_like_question_id(query: str | None) -> bool:
+    if not query:
+        return False
+    cleaned = query.strip()
+    return (
+        len(cleaned) >= 5
+        and (
+            (cleaned[:1].upper() == "Q" and cleaned[1:].isdigit())
+            or cleaned.lower().startswith("batch_")
+        )
+    )
