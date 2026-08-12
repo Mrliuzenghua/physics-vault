@@ -1,5 +1,12 @@
 import type { BasketItem, McpConfig, SystemSettings } from '../types';
 import { request } from './apiClient.ts';
+import {
+  isRecord,
+  readJsonStorage,
+  readStorageValue,
+  writeJsonStorage,
+  writeStorageValue,
+} from './safeStorage.ts';
 
 const BASKET_KEY = 'physics_vault_basket';
 const SETTINGS_KEY = 'physics_vault_settings';
@@ -9,37 +16,8 @@ const LEGACY_DASHSCOPE_VL_MODELS = new Set(['qwen-vl-max']);
 
 let basketCache: BasketItem[] | null = null;
 
-function browserStorage(): Storage | null {
-  try {
-    if (typeof window !== 'undefined') return window.localStorage;
-    if (typeof localStorage !== 'undefined') return localStorage;
-  } catch {
-    // Storage can be blocked in embedded or privacy-restricted contexts.
-  }
-  return null;
-}
-
-function readStoredJson(key: string, fallback: unknown): unknown {
-  try {
-    const raw = browserStorage()?.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeStoredValue(key: string, value: string): void {
-  try {
-    browserStorage()?.setItem(key, value);
-  } catch {
-    // In-memory state remains usable when persistence is unavailable.
-  }
-}
-
 function asRecord(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
+  return isRecord(value) ? value : {};
 }
 
 export const DEFAULT_AI_CONFIG = {
@@ -77,7 +55,7 @@ export function getBasket(): BasketItem[] {
     return basketCache;
   }
 
-  const stored = readStoredJson(BASKET_KEY, []);
+  const stored = readJsonStorage<unknown>(BASKET_KEY, []);
   basketCache = Array.isArray(stored)
     ? stored.filter((item): item is BasketItem => {
         const candidate = asRecord(item);
@@ -96,7 +74,7 @@ export function addToBasket(questionId: string): BasketItem[] {
 
   const updated = [...basket, { question_id: questionId, added_at: new Date().toISOString() }];
   basketCache = updated;
-  writeStoredValue(BASKET_KEY, JSON.stringify(updated));
+  writeJsonStorage(BASKET_KEY, updated);
   emitBasketChanged();
   return updated;
 }
@@ -104,7 +82,7 @@ export function addToBasket(questionId: string): BasketItem[] {
 export function removeFromBasket(questionId: string): BasketItem[] {
   const updated = getBasket().filter((item) => item.question_id !== questionId);
   basketCache = updated;
-  writeStoredValue(BASKET_KEY, JSON.stringify(updated));
+  writeJsonStorage(BASKET_KEY, updated);
   emitBasketChanged();
   return updated;
 }
@@ -116,14 +94,14 @@ export function moveBasketItem(questionId: string, direction: 'up' | 'down'): Ba
   if (index < 0 || target < 0 || target >= basket.length) return basket;
   [basket[index], basket[target]] = [basket[target], basket[index]];
   basketCache = basket;
-  writeStoredValue(BASKET_KEY, JSON.stringify(basket));
+  writeJsonStorage(BASKET_KEY, basket);
   emitBasketChanged();
   return basket;
 }
 
 export function clearBasket(): void {
   basketCache = [];
-  writeStoredValue(BASKET_KEY, '[]');
+  writeJsonStorage(BASKET_KEY, []);
   emitBasketChanged();
 }
 
@@ -163,7 +141,7 @@ export function getSettings(): SystemSettings {
     page_size: 20,
   };
 
-  const stored = asRecord(readStoredJson(SETTINGS_KEY, {}));
+  const stored = readJsonStorage<Record<string, unknown>>(SETTINGS_KEY, {}, isRecord);
   const theme = ['light', 'dark', 'system'].includes(String(stored.theme))
     ? stored.theme as SystemSettings['theme']
     : defaults.theme;
@@ -187,7 +165,7 @@ export function getSettings(): SystemSettings {
 }
 
 export function saveSettings(settings: SystemSettings): void {
-  writeStoredValue(SETTINGS_KEY, JSON.stringify(settings));
+  writeJsonStorage(SETTINGS_KEY, settings);
 }
 
 export function getMcpConfig(): McpConfig {
@@ -219,7 +197,7 @@ export function getMcpConfig(): McpConfig {
   };
 
   try {
-    const stored = asRecord(readStoredJson(MCP_KEY, {}));
+    const stored = readJsonStorage<Record<string, unknown>>(MCP_KEY, {}, isRecord);
     const storedVl = asRecord(stored.vl) as Partial<McpConfig['vl']>;
     const storedLlm = asRecord(stored.llm) as Partial<McpConfig['llm']>;
     const vlModel = LEGACY_DASHSCOPE_VL_MODELS.has(String(storedVl.model_name || '').toLowerCase())
@@ -258,11 +236,11 @@ export function saveMcpConfig(config: McpConfig): void {
     String(config.vl.base_url || '').toLowerCase().includes('dashscope.aliyuncs.com/api/v1')
       ? DEFAULT_AI_CONFIG.vl.base_url
       : config.vl.base_url;
-  writeStoredValue(MCP_KEY, JSON.stringify({
+  writeJsonStorage(MCP_KEY, {
     ...config,
     vl: { ...DEFAULT_AI_CONFIG.vl, ...config.vl, base_url: vlBaseUrl, model_name: vlModel },
     llm: { ...DEFAULT_AI_CONFIG.llm, ...config.llm },
-  }));
+  });
 }
 
 export async function pushMcpConfigToBackend(
@@ -292,7 +270,7 @@ export async function pushMcpConfigToBackend(
 
 export function getTheme(): 'light' | 'dark' | 'system' {
   try {
-    const theme = browserStorage()?.getItem('physics_vault_theme');
+    const theme = readStorageValue('physics_vault_theme');
     return theme === 'light' || theme === 'dark' || theme === 'system' ? theme : 'system';
   } catch {
     return 'system';
@@ -300,5 +278,5 @@ export function getTheme(): 'light' | 'dark' | 'system' {
 }
 
 export function saveTheme(theme: 'light' | 'dark' | 'system'): void {
-  writeStoredValue('physics_vault_theme', theme);
+  writeStorageValue('physics_vault_theme', theme);
 }

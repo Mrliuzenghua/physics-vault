@@ -1,19 +1,18 @@
 import type { AiAssistantQuestionContext, Question } from '../types';
+import { readJsonStorage, writeJsonStorage } from '../services/safeStorage.ts';
 
 export const AI_CONTEXT_CACHE_STORAGE_KEY = 'physics_vault.agent_chat.v2.context_cache';
 
 export function readAiContextCache(): AiAssistantQuestionContext[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(AI_CONTEXT_CACHE_STORAGE_KEY) || '[]');
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item) => item && typeof item.question_id === 'string');
-  } catch {
-    return [];
-  }
+  const parsed = readJsonStorage<unknown>(AI_CONTEXT_CACHE_STORAGE_KEY, []);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((item): item is AiAssistantQuestionContext => (
+    item !== null && typeof item === 'object' && typeof item.question_id === 'string'
+  ));
 }
 
 export function writeAiContextCache(items: AiAssistantQuestionContext[]): void {
-  localStorage.setItem(AI_CONTEXT_CACHE_STORAGE_KEY, JSON.stringify(dedupeContexts(items).slice(0, 30)));
+  writeJsonStorage(AI_CONTEXT_CACHE_STORAGE_KEY, dedupeContexts(items).slice(0, 30));
 }
 
 export function addQuestionsToAiContext(questions: Question[]): AiAssistantQuestionContext[] {

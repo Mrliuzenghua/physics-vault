@@ -6,6 +6,7 @@ import type { HandoutArtifact, SlideArtifact, TeachingProject } from '../types/t
 import { lessonPackageToDocumentV2 } from './lessonDocument';
 import { layoutModelToSlideDeck, lessonPackageToLayoutModel } from './lessonLayoutModel';
 import { fetchTeachingProject, saveTeachingProjectSnapshot } from './api';
+import { isRecord, readJsonStorage, writeJsonStorage } from './safeStorage.ts';
 
 const TEACHING_PROJECT_KEY = 'physics-vault.teaching-projects.v1';
 
@@ -40,17 +41,14 @@ function defaultHandoutConfig(pkg: LessonPackage): HandoutConfig {
 }
 
 function readProjects(): TeachingProject[] {
-  try {
-    const raw = localStorage.getItem(TEACHING_PROJECT_KEY);
-    const value = raw ? JSON.parse(raw) : [];
-    return Array.isArray(value) ? value as TeachingProject[] : [];
-  } catch {
-    return [];
-  }
+  const value = readJsonStorage<unknown>(TEACHING_PROJECT_KEY, []);
+  return Array.isArray(value)
+    ? value.filter((item): item is TeachingProject => isRecord(item) && typeof item.id === 'string')
+    : [];
 }
 
 function writeProjects(projects: TeachingProject[]): void {
-  localStorage.setItem(TEACHING_PROJECT_KEY, JSON.stringify(projects));
+  writeJsonStorage(TEACHING_PROJECT_KEY, projects);
 }
 
 function syncRemoteProject(project: TeachingProject): void {

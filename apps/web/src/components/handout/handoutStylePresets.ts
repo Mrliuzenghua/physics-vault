@@ -5,6 +5,7 @@
  */
 
 import type { HandoutStyleConfig, HandoutStylePreset } from '../../types';
+import { isRecord, readJsonStorage, writeJsonStorage } from '../../services/safeStorage.ts';
 
 const STORAGE_KEY = 'physics-vault.handout-style-presets';
 
@@ -132,21 +133,23 @@ const DEFAULT_PRESETS: HandoutStylePreset[] = [
 // ── Public API ─────────────────────────────────────────────────────
 
 export function loadPresets(): HandoutStylePreset[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return mergeDefaults([]);
-    const parsed: HandoutStylePreset[] = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return mergeDefaults([]);
-    return mergeDefaults(parsed);
-  } catch {
-    return mergeDefaults([]);
-  }
+  const parsed = readJsonStorage<unknown>(STORAGE_KEY, []);
+  if (!Array.isArray(parsed)) return mergeDefaults([]);
+  const valid = parsed.filter((item): item is HandoutStylePreset => (
+    isRecord(item)
+    && typeof item.id === 'string'
+    && typeof item.name === 'string'
+    && typeof item.createdAt === 'string'
+    && typeof item.updatedAt === 'string'
+    && isRecord(item.config)
+  ));
+  return mergeDefaults(valid);
 }
 
 export function savePresets(presets: HandoutStylePreset[]): void {
   // Don't persist built-in defaults — they're always merged at load time
   const userPresets = presets.filter((p) => !p.id.startsWith('__'));
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(userPresets));
+  writeJsonStorage(STORAGE_KEY, userPresets);
 }
 
 export function savePreset(preset: HandoutStylePreset): HandoutStylePreset[] {

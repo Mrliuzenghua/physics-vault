@@ -2,6 +2,7 @@ import { DEFAULT_CONFIG as DEFAULT_HEADER_FOOTER } from '../components/handout/H
 import { DEFAULT_STYLE_CONFIG } from '../components/handout/handoutStylePresets';
 import type { HandoutHeaderFooterConfig, HandoutStyleConfig } from '../types';
 import type { SlideDeckTemplate } from '../types/slides';
+import { isRecord, readJsonStorage, writeJsonStorage } from './safeStorage.ts';
 
 const STORAGE_KEY = 'physics-vault.compose-user-settings.v1';
 
@@ -31,26 +32,29 @@ const DEFAULT_SETTINGS: ComposeUserSettings = {
 };
 
 export function getComposeUserSettings(): ComposeUserSettings {
-  if (typeof window === 'undefined') return DEFAULT_SETTINGS;
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    const stored = raw ? JSON.parse(raw) as Partial<ComposeUserSettings> : {};
-    return {
-      ...DEFAULT_SETTINGS,
-      ...stored,
-      headerFooter: { ...DEFAULT_HEADER_FOOTER, ...(stored.headerFooter || {}) },
-      styleConfig: { ...DEFAULT_STYLE_CONFIG, ...(stored.styleConfig || {}) },
-    };
-  } catch {
-    return DEFAULT_SETTINGS;
-  }
+  const stored = readJsonStorage<Record<string, unknown>>(STORAGE_KEY, {}, isRecord);
+  const headerFooter = isRecord(stored.headerFooter) ? stored.headerFooter : {};
+  const styleConfig = isRecord(stored.styleConfig) ? stored.styleConfig : {};
+  const slideTemplate = ['teach_practice_teach', 'teach_then_practice', 'practice_only'].includes(String(stored.slideTemplate))
+    ? stored.slideTemplate as SlideDeckTemplate
+    : DEFAULT_SETTINGS.slideTemplate;
+  const answerExportMode = ['end_answer', 'end_answer_analysis', 'after_answer', 'after_answer_analysis'].includes(String(stored.answerExportMode))
+    ? stored.answerExportMode as ComposeAnswerExportMode
+    : DEFAULT_SETTINGS.answerExportMode;
+  const documentZoom = Number(stored.documentZoom);
+  return {
+    headerFooter: { ...DEFAULT_HEADER_FOOTER, ...headerFooter },
+    styleConfig: { ...DEFAULT_STYLE_CONFIG, ...styleConfig },
+    slideTemplate,
+    showAnswers: typeof stored.showAnswers === 'boolean' ? stored.showAnswers : DEFAULT_SETTINGS.showAnswers,
+    showAnalysis: typeof stored.showAnalysis === 'boolean' ? stored.showAnalysis : DEFAULT_SETTINGS.showAnalysis,
+    outputProfile: stored.outputProfile === 'teacher' ? 'teacher' : 'student',
+    answerExportMode,
+    documentZoom: Number.isFinite(documentZoom) ? Math.max(50, Math.min(125, documentZoom)) : DEFAULT_SETTINGS.documentZoom,
+    zoomMode: stored.zoomMode === 'manual' ? 'manual' : 'fit-width',
+  };
 }
 
 export function saveComposeUserSettings(settings: ComposeUserSettings): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-  } catch {
-    // Ignore storage quota and private-mode failures; the editor remains usable.
-  }
+  writeJsonStorage(STORAGE_KEY, settings);
 }
