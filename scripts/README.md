@@ -19,6 +19,9 @@
 3. `physics_vault_mcp_server.py`
    对外提供物理题库 MCP 工具的 stdio 服务入口
 
+4. `study_sheet_mcp_server.mjs`
+   对外提供教学资源工作流 MCP：受控生成 Typst 学案，以及 HTML 网页、Typst PDF 两种高中物理课堂课件。Typst 课件使用原生数学排版并可完全离线编译，能力包含 `get_typst_presentation_template`、`create_typst_presentation`、`validate_typst_presentation` 与 `audit_typst_presentation_template`。
+
 常用维护命令：
 
 ```powershell

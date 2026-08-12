@@ -7,6 +7,7 @@ Physics Vault 是一个本地高中物理题库、校对与组卷工作台，并
 - 后端 ASGI：`physics_vault_api.main:app`，应用装配位于 `apps/api/src/physics_vault_api/app.py`。
 - 前端：`apps/web/src/main.tsx`。
 - 物理题库 MCP：`scripts/physics_vault_mcp_server.py`，使用 stdio 传输。
+- 教学资源 MCP：`scripts/study_sheet_mcp_server.mjs`，可从受控 Typst 模板生成学案，并提供 HTML 网页课件与 Typst PDF 课件两套课堂工作流。
 - AI 模型适配层：`packages/mcp_contracts/src`，由后端 `/api/mcp/*` 接口调用。
 - 后台 worker：`scripts/dev/start-task-worker.ps1`。
 
@@ -15,6 +16,8 @@ Physics Vault 是一个本地高中物理题库、校对与组卷工作台，并
 - 正式题库：`data/app-db/physics_vault.sqlite3`，可通过 `PHYSICS_DB_PATH` 覆盖。
 - 校对工作区：`data/mcp/review_workspace.sqlite3`，可通过 `PHYSICS_REVIEW_DB_PATH` 覆盖。
 - 素材、导入批次、导出产物和日志都位于 `data/` 下。
+
+课堂课件统一生成到教学资源库的 `05-课堂PPT/`：`create_html_presentation` 输出浏览器放映版，`create_typst_presentation` 输出可编辑 `.typ` 源码和可离线放映的 16:9 PDF。两种格式可以并存和对照使用。
 
 相对环境变量路径以项目根目录为基准。正式库缺失时不会自动返回演示题；仅在明确设置 `PHYSICS_ALLOW_DEMO_DATA=true` 时启用内置演示数据。
 

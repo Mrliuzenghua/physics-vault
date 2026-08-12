@@ -28,6 +28,23 @@ def _resource_root(tmp_path: Path) -> Path:
         '#let topic = "示例"\n#set document(date: none)\n= #topic\n',
         encoding="utf-8",
     )
+    (templates / "教学PPT模板-物理题HTML.html").write_text(
+        """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>模板</title>
+<style>.question-choice{}.question-experiment{}.question-calculation{} body.answers-hidden .analysis-overlay{opacity:0}</style>
+<script>window.MathJax = {};</script><script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+</head><body><main class="deck"><section class="slide">模板页</section></main>
+<div class="deck-controls"><button id="toggle-answer">显示答案</button><div class="deck-indicator" id="deck-indicator">1 / 1</div></div>
+<script>const slides = Array.from(document.querySelectorAll('.slide'));</script></body></html>
+""",
+        encoding="utf-8",
+    )
+    (templates / "教学PPT模板-物理题Typst.typ").write_text(
+        (PROJECT_ROOT / "scripts" / "templates" / "physics_typst_presentation.typ").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
     registry = {
         "templates": [
             {
@@ -99,6 +116,14 @@ def test_lists_expected_tools_and_audits_templates(tmp_path: Path) -> None:
         "create_study_sheet",
         "validate_and_compile_study_sheet",
         "audit_study_sheet_templates",
+        "get_html_presentation_template",
+        "create_html_presentation",
+        "validate_html_presentation",
+        "audit_html_presentation_template",
+        "get_typst_presentation_template",
+        "create_typst_presentation",
+        "validate_typst_presentation",
+        "audit_typst_presentation_template",
     }
     assert _content(responses[1])["checks"][0]["passed"] is True
 
@@ -193,3 +218,119 @@ def test_template_hash_mismatch_is_reported(tmp_path: Path) -> None:
 
     audit = _content(_rpc(root, [_call("audit_study_sheet_templates", {})])[0])
     assert audit["checks"][0]["passed"] is False
+
+
+def test_html_presentation_dry_run_create_and_validate(tmp_path: Path) -> None:
+    root = _resource_root(tmp_path)
+    image = root / "02-知识讲义" / "题图.png"
+    image.write_bytes(b"image")
+    arguments = {
+        "title": "匀变速直线运动",
+        "subtitle": "课堂例题精讲",
+        "teacher": "李老师",
+        "chapter": "运动学",
+        "questions": [
+            {
+                "question_type": "single_choice",
+                "section": "基础辨析",
+                "title": "速度与加速度",
+                "source": "校本题",
+                "stem": "物体做匀加速直线运动，$v=v_0+at$。",
+                "choices": ["速度一定增大", "加速度保持不变"],
+                "answer": "B",
+                "analysis": ["先明确加速度恒定。", "$v=v_0+at$"],
+                "keypoint": "注意速度方向。",
+                "image_paths": [str(image)],
+            }
+        ],
+        "operation_id": "html-deck-001",
+        "dry_run": True,
+    }
+    preview = _content(_rpc(root, [_call("create_html_presentation", arguments)])[0])
+    output = root / "05-课堂PPT"
+    assert preview["status"] == "preview"
+    assert preview["page_count"] == 4
+    assert not output.exists()
+
+    arguments["dry_run"] = False
+    created = _content(_rpc(root, [_call("create_html_presentation", arguments)])[0])
+    source = Path(created["source_path"])
+    assert created["status"] == "created"
+    assert source.exists()
+    body = source.read_text(encoding="utf-8")
+    assert "匀变速直线运动" in body
+    assert "Physics Vault html-presentation-workflow" in body
+    assert "{{" not in body
+    assert len(list((output / "images").glob("*.png"))) == 1
+
+    validated = _content(_rpc(root, [_call("validate_html_presentation", {"source_path": str(source)})])[0])
+    assert validated["status"] == "validated"
+    assert validated["slide_count"] == 4
+    assert validated["question_count"] == 1
+
+
+def test_html_presentation_escapes_markup_and_operation_id_is_idempotent(tmp_path: Path) -> None:
+    root = _resource_root(tmp_path)
+    arguments = {
+        "title": "动量守恒",
+        "questions": [{"stem": "<script>alert(1)</script>，且 $p=mv$", "answer": "守恒"}],
+        "operation_id": "html-momentum-001",
+    }
+    first = _content(_rpc(root, [_call("create_html_presentation", arguments)])[0])
+    replay = _content(_rpc(root, [_call("create_html_presentation", arguments)])[0])
+    body = Path(first["source_path"]).read_text(encoding="utf-8")
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
+    assert "<script>alert(1)</script>" not in body
+    assert replay["status"] == "existing"
+    assert replay["source_path"] == first["source_path"]
+
+
+def test_typst_presentation_dry_run_create_validate_and_replay(tmp_path: Path) -> None:
+    root = _resource_root(tmp_path)
+    arguments = {
+        "title": "动量守恒",
+        "subtitle": "课堂题目与解析",
+        "questions": [
+            {
+                "question_type": "calculation",
+                "title": "完全非弹性碰撞",
+                "stem": "质量分别为 $m_1$、$m_2$ 的两物体碰撞后粘在一起。",
+                "data_items": ["$m_1=1\\,\\text{kg}$", "$m_2=2\\,\\text{kg}$"],
+                "prompt": "求共同速度。",
+                "answer": "$v=2\\,\\text{m/s}$",
+                "analysis": ["选择两物体组成的系统。", "$m_1v_1+m_2v_2=(m_1+m_2)v$"],
+                "keypoint": "先规定正方向。",
+            }
+        ],
+        "operation_id": "typst-momentum-001",
+        "dry_run": True,
+    }
+    preview = _content(_rpc(root, [_call("create_typst_presentation", arguments)])[0])
+    assert preview["status"] == "preview"
+    assert preview["slide_count"] == 4
+    assert not (root / "05-课堂PPT").exists()
+
+    arguments["dry_run"] = False
+    created = _content(_rpc(root, [_call("create_typst_presentation", arguments)])[0])
+    source = Path(created["source_path"])
+    pdf = Path(created["pdf_path"])
+    assert created["status"] == "created"
+    assert source.name.endswith("-TYPST.typ")
+    assert pdf.name.endswith("-TYPST.pdf")
+    assert source.exists()
+    assert pdf.read_bytes().startswith(b"%PDF")
+    assert Path(f"{source}.manifest.json").exists()
+    body = source.read_text(encoding="utf-8")
+    assert "Physics Vault typst-presentation-workflow" in body
+    assert "m_1" in body
+    assert "m_1 v_1" in body
+    assert "{{GENERATED_CONTENT}}" not in body
+
+    replay = _content(_rpc(root, [_call("create_typst_presentation", arguments)])[0])
+    assert replay["status"] == "existing"
+    assert replay["source_path"] == created["source_path"]
+
+    validated = _content(_rpc(root, [_call("validate_typst_presentation", {"source_path": str(source)})])[0])
+    assert validated["status"] == "validated"
+    assert validated["slide_count"] == 4
+    assert validated["errors"] == []

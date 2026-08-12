@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * Study-sheet workflow MCP.
+ * Teaching-resource workflow MCP.
  *
  * This server deliberately lives in Physics Vault.  It treats the teaching
  * resource library as an external, guarded content root: templates are read
- * and hash-checked there, while generated study sheets are written only to
- * the registry-declared output folders in that same library.
+ * and checked there, while generated study sheets, HTML presentations, and
+ * Typst PDF presentations are
+ * written only to their controlled output folders in that same library.
  */
 
 import crypto from 'node:crypto';
@@ -15,6 +16,20 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import {
+  auditHtmlPresentationTemplate,
+  createHtmlPresentation,
+  htmlPresentationTemplateInfo,
+  htmlPresentationTools,
+  validateHtmlPresentation,
+} from './lib/html_presentation_workflow.mjs';
+import {
+  auditTypstPresentationTemplate,
+  createTypstPresentation,
+  typstPresentationInfo,
+  typstPresentationTools,
+  validateTypstPresentation,
+} from './lib/typst_presentation_workflow.mjs';
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, '..');
@@ -320,6 +335,8 @@ const tools = [
   { name: 'create_study_sheet', description: '将结构化 Typst 内容注入经校验的模板，且只在教学资源库允许的成品目录创建 .typ。dry_run=true 时仅预览；传入 operation_id 可安全重试而不重复建档。', inputSchema: { type: 'object', properties: { template_id: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, typst_body: { type: 'string' }, metadata: { type: 'object', additionalProperties: true }, operation_id: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,80}$' }, dry_run: { type: 'boolean', default: false } }, required: ['template_id', 'topic', 'typst_body'], additionalProperties: false } },
   { name: 'validate_and_compile_study_sheet', description: '再次校验模板完整性，并将 MCP 创建的 .typ 编译为 PDF；默认不覆盖已有 PDF。', inputSchema: { type: 'object', properties: { template_id: { type: 'string' }, source_path: { type: 'string' }, compile: { type: 'boolean', default: true }, overwrite: { type: 'boolean', default: false } }, required: ['template_id', 'source_path'], additionalProperties: false } },
   { name: 'audit_study_sheet_templates', description: '检查所有外置 Typst 模板是否仍与注册表 SHA-256 一致。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  ...htmlPresentationTools,
+  ...typstPresentationTools,
 ];
 
 function content(data) {
@@ -328,7 +345,7 @@ function content(data) {
 
 function handle(message) {
   if (message.method === 'initialize') {
-    return { protocolVersion: message.params?.protocolVersion ?? '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'physics-vault-study-sheet-workflow', version: '1.0.0' } };
+    return { protocolVersion: message.params?.protocolVersion ?? '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'physics-vault-study-sheet-workflow', version: '1.3.0' } };
   }
   if (message.method === 'tools/list') return { tools };
   if (message.method === 'tools/call') {
@@ -339,6 +356,14 @@ function handle(message) {
       create_study_sheet: () => createStudySheet(input),
       validate_and_compile_study_sheet: () => validateAndCompile(input),
       audit_study_sheet_templates: auditTemplates,
+      get_html_presentation_template: () => htmlPresentationTemplateInfo(resolveStudySheetRoot()),
+      create_html_presentation: () => createHtmlPresentation(input, { resourceRoot: resolveStudySheetRoot(), projectRoot }),
+      validate_html_presentation: () => validateHtmlPresentation(input, { resourceRoot: resolveStudySheetRoot() }),
+      audit_html_presentation_template: () => auditHtmlPresentationTemplate(resolveStudySheetRoot()),
+      get_typst_presentation_template: () => typstPresentationInfo(resolveStudySheetRoot()),
+      create_typst_presentation: () => createTypstPresentation(input, { resourceRoot: resolveStudySheetRoot(), projectRoot }),
+      validate_typst_presentation: () => validateTypstPresentation(input, { resourceRoot: resolveStudySheetRoot() }),
+      audit_typst_presentation_template: () => auditTypstPresentationTemplate(resolveStudySheetRoot()),
     };
     const handler = handlers[message.params?.name];
     if (!handler) fail(`未知工具：${message.params?.name}`);
