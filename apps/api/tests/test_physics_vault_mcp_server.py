@@ -1897,7 +1897,7 @@ def test_export_job_tools_fail_closed_when_server_export_service_is_missing(monk
     module = _load_mcp_server()
     monkeypatch.setattr(module, "_task_center_service", lambda: object())
 
-    result = module.submit_word_export_job({"id": "lesson-001", "questions": [], "nodes": []})
+    result = module.submit_word_export_job({"id": "lesson-001", "questions": [], "nodes": []}, confirmed=True)
 
     assert result["ok"] is False
     assert result["capability_unavailable"] is True
@@ -1930,9 +1930,24 @@ def test_export_job_tool_calls_formal_service_without_echoing_snapshot(monkeypat
     result = module.submit_pptx_export_job(
         {"id": "lesson-002", "questions": [{"stem": "large snapshot"}], "nodes": []},
         session_id="session-pptx",
+        confirmed=True,
     )
 
     assert result["ok"] is True
     assert result["audit_id"] == "audit-export"
     assert result["job"]["download_url"] == "/api/tasks/export-002/download"
     assert "input_summary" not in result["job"]
+
+
+def test_direct_high_risk_submissions_require_explicit_confirmation(monkeypatch):
+    module = _load_mcp_server()
+    monkeypatch.setattr(module, "_task_center_service", lambda: pytest.fail("must not submit"))
+    monkeypatch.setattr(module, "_import_service", lambda: pytest.fail("must not create review task"))
+
+    review = module.submit_ai_generated_review("generated question")
+    imported = module.submit_import_job("batch-1")
+    cleaned = module.submit_ai_clean_job("batch-1")
+    exported = module.submit_word_export_job({"id": "lesson-1", "questions": [{}], "nodes": []})
+
+    assert all(item["confirmation_required"] is True for item in (review, imported, cleaned, exported))
+    assert exported["target"]["question_count"] == 1

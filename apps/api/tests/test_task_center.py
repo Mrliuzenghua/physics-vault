@@ -4,7 +4,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+import pytest
 
 from physics_vault_api.config import TaskQueueSettings
 from physics_vault_api.paths import project_root
@@ -27,16 +29,19 @@ class StubDispatcher:
         self.submissions: list[tuple[str, str]] = []
         self.settings = TaskQueueSettings(enabled=False)
 
-    def submit_batch_stage(self, operation: str, batch_id: str, *, request_context=None):
+    def submit_batch_stage(self, operation: str, batch_id: str, *, request_context=None, idempotency_key=None):
         self.submissions.append((operation, batch_id))
-        return self.repository.create(
-            f"background_{operation}",
-            {
-                "operation": operation,
-                "batch_id": batch_id,
-                "request_context": request_context or {},
-            },
-        )
+        summary = {
+            "operation": operation,
+            "batch_id": batch_id,
+            "request_context": request_context or {},
+        }
+        if idempotency_key:
+            task, _ = self.repository.create_or_get(
+                f"background_{operation}", summary, idempotency_key=idempotency_key
+            )
+            return task
+        return self.repository.create(f"background_{operation}", summary)
 
 
 def build_client():
@@ -156,6 +161,52 @@ def test_mcp_submission_records_source_session_operator_and_audit() -> None:
     assert audits[0].operator == "teacher-li"
 
 
+def test_operation_id_makes_task_submission_idempotent() -> None:
+    _client, repository, dispatcher = build_client()
+    import_service = ImportPipelineService(
+        task_repo=repository,
+        pandoc=PandocAdapter(),
+        cleaner=DocumentCleaningService(),
+        parser=StructuredQuestionParsingService(),
+    )
+    service = TaskCenterService(import_service, dispatcher=dispatcher)  # type: ignore[arg-type]
+    from physics_vault_api.services.task_center import TaskActionContext
+
+    context = TaskActionContext(operation_id="import-batch-001")
+    first, _ = service.submit_batch_job("recognize", "batch-idempotent", context=context)
+    replay, _ = service.submit_batch_job("recognize", "batch-idempotent", context=context)
+
+    assert replay["task_id"] == first["task_id"]
+    assert len(repository.list(limit=20)) == 1
+
+
+def test_active_task_limit_rejects_new_submission_but_allows_replay() -> None:
+    _client, repository, dispatcher = build_client()
+    dispatcher.settings.max_active_tasks = 1
+    import_service = ImportPipelineService(
+        task_repo=repository,
+        pandoc=PandocAdapter(),
+        cleaner=DocumentCleaningService(),
+        parser=StructuredQuestionParsingService(),
+    )
+    service = TaskCenterService(import_service, dispatcher=dispatcher)  # type: ignore[arg-type]
+    from physics_vault_api.services.task_center import TaskActionContext
+
+    first, _ = service.submit_batch_job(
+        "recognize", "batch-one", context=TaskActionContext(operation_id="capacity-one")
+    )
+    replay, _ = service.submit_batch_job(
+        "recognize", "batch-one", context=TaskActionContext(operation_id="capacity-one")
+    )
+    assert replay["task_id"] == first["task_id"]
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.submit_batch_job(
+            "recognize", "batch-two", context=TaskActionContext(operation_id="capacity-two")
+        )
+    assert exc_info.value.status_code == 429
+
+
 def test_mcp_word_export_uses_formal_export_service_and_returns_download(tmp_path: Path) -> None:
     repository = InMemoryImportTaskRepository()
     import_service = ImportPipelineService(
@@ -223,3 +274,32 @@ def test_mcp_word_export_uses_formal_export_service_and_returns_download(tmp_pat
     assert duplicate["task_id"] == task["task_id"]
     assert duplicate_audit_id != audit_id
     assert len(repository.list_action_audits(task["task_id"])) == 2
+
+
+def test_export_submission_enforces_question_limit(tmp_path: Path) -> None:
+    repository = InMemoryImportTaskRepository()
+    import_service = ImportPipelineService(
+        task_repo=repository,
+        pandoc=PandocAdapter(),
+        cleaner=DocumentCleaningService(),
+        parser=StructuredQuestionParsingService(),
+    )
+    export_service = LessonExportService(repository, export_dir=tmp_path / "exports", project_dir=tmp_path)
+    service = TaskCenterService(
+        import_service,
+        lesson_export_service=export_service,
+        export_dispatcher=LessonExportDispatcher(export_service, settings=TaskQueueSettings(enabled=False)),
+    )
+    service._dispatcher.settings.max_export_questions = 1
+    from physics_vault_api.services.task_center import TaskActionContext
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.submit_export_job(
+            "word",
+            {"id": "lesson-limit", "title": "limit", "questions": [{}, {}], "nodes": []},
+            include_answers=False,
+            include_analysis=False,
+            file_name=None,
+            context=TaskActionContext(operation_id="export-limit"),
+        )
+    assert exc_info.value.status_code == 413

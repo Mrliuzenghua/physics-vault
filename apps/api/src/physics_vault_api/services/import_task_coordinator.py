@@ -110,12 +110,13 @@ class ImportTaskCoordinator:
         *,
         max_attempts: int = 1,
         request_context: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> tuple[ImportTask, bool]:
         if operation not in self.SUPPORTED_OPERATIONS:
             raise ValueError(f"Unsupported background import operation: {operation}")
         metadata = self._read_metadata(batch_id)
         input_version = max(1, int(metadata.get("content_version") or 1))
-        idempotency_key = self.idempotency_key(operation, batch_id, metadata)
+        resolved_idempotency_key = idempotency_key or self.idempotency_key(operation, batch_id, metadata)
         summary: dict[str, Any] = {
             "batch_id": batch_id,
             "operation": operation,
@@ -127,11 +128,18 @@ class ImportTaskCoordinator:
             summary["request_context"] = {
                 key: str(value)
                 for key, value in request_context.items()
-                if value is not None and key in {"source", "session_id", "operator", "trace_id"}
+                if value is not None and key in {"source", "session_id", "operator", "trace_id", "operation_id"}
             }
-        task, created = self._create_or_get(operation, summary, max_attempts, idempotency_key)
-        should_dispatch = created
+        task, created = self._create_or_get(operation, summary, max_attempts, resolved_idempotency_key)
         if not created and (
+            task.task_type != f"background_{operation}"
+            or str(task.input_summary.get("batch_id") or "") != batch_id
+        ):
+            raise ValueError("operation_id has already been used with a different task payload")
+        should_dispatch = created
+        if not created and idempotency_key:
+            should_dispatch = False
+        elif not created and (
             task.status in {"failed", "cancelled"}
             or (task.status == "completed" and not self.result_is_valid(operation, task))
         ):
@@ -139,7 +147,7 @@ class ImportTaskCoordinator:
                 operation,
                 summary,
                 max_attempts,
-                f"{idempotency_key}:retry:{task.attempt + 1}",
+                f"{resolved_idempotency_key}:retry:{task.attempt + 1}",
             )
         elif not created:
             should_dispatch = False

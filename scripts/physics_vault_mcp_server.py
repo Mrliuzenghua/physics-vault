@@ -3782,6 +3782,7 @@ def _legacy_mcp_system_health(include_details: bool = False) -> dict[str, Any]:
     database = _legacy_database_health_report()
     templates = _study_sheet_template_health()
     embeddings = _embedding_health()
+    operations = _operation_audit_health()
     exposed = _TOOL_REGISTRY.names() if _MCP_PROFILE == "all" else profile_tool_names(_MCP_PROFILE)
     policies = [item for item in tool_policy_manifest() if item["name"] in exposed]
 
@@ -3791,8 +3792,68 @@ def _legacy_mcp_system_health(include_details: bool = False) -> dict[str, Any]:
         templates=templates,
         embeddings=embeddings,
         policies=policies,
+        operations=operations,
         include_details=include_details,
     )
+
+
+def _operation_audit_health() -> dict[str, Any]:
+    """Summarize durable task, plan, change, and outbox audit state without mutation."""
+
+    def grouped(conn: sqlite3.Connection, table: str, column: str = "status") -> dict[str, int]:
+        if not _table_exists(conn, table):
+            return {}
+        return {
+            str(row[0]): int(row[1])
+            for row in conn.execute(
+                f"SELECT {column}, COUNT(*) FROM {table} GROUP BY {column} ORDER BY {column}"
+            ).fetchall()
+        }
+
+    with _connect_formal_read_db() as conn:
+        change_batches = grouped(conn, "change_batches")
+        review_outbox = grouped(conn, "review_queue_outbox", "delivery_status")
+    with _connect_review_db() as conn:
+        background_tasks = grouped(conn, "import_pipeline_tasks")
+        task_audit_count = _safe_count(conn, "task_action_audit") or 0
+
+    operation_plans: dict[str, int] = {}
+    expired_planned = 0
+    plan_path = _formal_db_path().parent / "mcp_operation_plans.sqlite3"
+    if plan_path.is_file():
+        plan_conn = sqlite3.connect(f"file:{plan_path.as_posix()}?mode=ro", uri=True)
+        try:
+            operation_plans = grouped(plan_conn, "operation_plans")
+            if _table_exists(plan_conn, "operation_plans"):
+                expired_planned = int(
+                    plan_conn.execute(
+                        "SELECT COUNT(*) FROM operation_plans WHERE status='planned' AND julianday(expires_at) < julianday('now')"
+                    ).fetchone()[0]
+                )
+        finally:
+            plan_conn.close()
+
+    active_count = sum(
+        background_tasks.get(status, 0)
+        for status in ("pending", "running", "retrying", "cancel_requested")
+    )
+    pending_outbox = review_outbox.get("pending", 0) + review_outbox.get("failed", 0)
+    issues: list[dict[str, Any]] = []
+    if pending_outbox:
+        issues.append({"code": "review_outbox_pending", "severity": "high", "count": pending_outbox})
+    if expired_planned:
+        issues.append({"code": "expired_operation_plans", "severity": "low", "count": expired_planned})
+    return {
+        "status": "attention" if issues else "ok",
+        "active_task_count": active_count,
+        "task_statuses": background_tasks,
+        "task_action_audit_count": task_audit_count,
+        "operation_plan_statuses": operation_plans,
+        "expired_planned_count": expired_planned,
+        "change_batch_statuses": change_batches,
+        "review_outbox_statuses": review_outbox,
+        "issues": issues,
+    }
 
 
 def _legacy_database_health_report() -> dict[str, Any]:
@@ -3852,6 +3913,7 @@ def _legacy_database_health_report() -> dict[str, Any]:
             FROM questions q
             LEFT JOIN question_knowledge_points qkp ON qkp.question_id = q.question_id
             WHERE qkp.question_id IS NULL
+              AND COALESCE(q.status, '') != 'archived_duplicate'
             """
         ).fetchone()[0]
         legacy_review_queue_count = _safe_count(conn, "review_queue") or 0
@@ -6831,8 +6893,20 @@ def _legacy_submit_ai_generated_review(
     source: str = "Claude Code MCP",
     chat_context: str | None = None,
     session_id: str | None = None,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
-    """把 AI 生成的试题文本提交到审核工作台草稿。只写草稿，不写正式题库。"""
+    """把 AI 生成的试题文本提交到审核草稿；首次调用仅预览，confirmed=true 后写入。"""
+    if not confirmed:
+        return {
+            "ok": False,
+            "confirmation_required": True,
+            "action": "submit_ai_generated_review",
+            "target": "review_workspace",
+            "source": str(source or "")[:160],
+            "source_reference": source_text.startswith("@file:"),
+            "source_text_length": len(source_text),
+            "message": "尚未创建审核草稿。确认来源和规模后，以相同参数及 confirmed=true 再次调用。",
+        }
     # Large trusted imports are prepared locally as JSON.  Accepting a
     # project-relative file reference keeps the MCP request small while the
     # actual write still goes through the normal review-workbench service.
@@ -6870,16 +6944,28 @@ def _legacy_submit_import_job(
     session_id: str | None = None,
     operator: str = "MCP user",
     trace_id: str | None = None,
+    operation_id: str | None = None,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
     """为已有导入批次提交识别任务。返回简短任务摘要；重复请求由正式任务 service 幂等处理。"""
     bid = str(batch_id or "").strip()
     if not bid:
         return {"ok": False, "error": "batch_id 不能为空。"}
+    if len(bid) > 200:
+        return _tool_error("INVALID_ARGUMENT", "batch_id 长度不能超过 200。", field="batch_id")
+    if not confirmed:
+        return {
+            "ok": False,
+            "confirmation_required": True,
+            "action": "submit_import_job",
+            "target": {"batch_id": bid, "operation": "recognize"},
+            "message": "尚未提交导入识别任务。确认目标批次后，以相同参数及 confirmed=true 再次调用。",
+        }
     try:
         task, audit_id = _task_center_service().submit_batch_job(
             "recognize",
             bid,
-            context=_task_action_context(source, session_id, operator, trace_id=trace_id),
+            context=_task_action_context(source, session_id, operator, trace_id=trace_id, operation_id=operation_id),
         )
     except Exception as exc:  # noqa: BLE001
         return _job_tool_error(exc)
@@ -6898,16 +6984,28 @@ def _legacy_submit_ai_clean_job(
     session_id: str | None = None,
     operator: str = "MCP user",
     trace_id: str | None = None,
+    operation_id: str | None = None,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
     """为已有导入批次提交 AI 清洗任务。返回简短任务摘要。"""
     bid = str(batch_id or "").strip()
     if not bid:
         return {"ok": False, "error": "batch_id 不能为空。"}
+    if len(bid) > 200:
+        return _tool_error("INVALID_ARGUMENT", "batch_id 长度不能超过 200。", field="batch_id")
+    if not confirmed:
+        return {
+            "ok": False,
+            "confirmation_required": True,
+            "action": "submit_ai_clean_job",
+            "target": {"batch_id": bid, "operation": "ai_clean"},
+            "message": "尚未提交 AI 清洗任务。确认目标批次后，以相同参数及 confirmed=true 再次调用。",
+        }
     try:
         task, audit_id = _task_center_service().submit_batch_job(
             "ai_clean",
             bid,
-            context=_task_action_context(source, session_id, operator, trace_id=trace_id),
+            context=_task_action_context(source, session_id, operator, trace_id=trace_id, operation_id=operation_id),
         )
     except Exception as exc:  # noqa: BLE001
         return _job_tool_error(exc)
@@ -6932,6 +7030,8 @@ def _legacy_submit_word_export_job(
     session_id: str | None = None,
     operator: str = "MCP user",
     trace_id: str | None = None,
+    operation_id: str | None = None,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
     """提交服务端 Word 导出任务；仅返回任务 ID、摘要和下载地址。"""
     return _submit_export_job(
@@ -6943,7 +7043,8 @@ def _legacy_submit_word_export_job(
         template_id=template_id,
         format_spec=format_spec,
         answer_position=answer_position,
-        context=_task_action_context(source, session_id, operator, trace_id=trace_id),
+        context=_task_action_context(source, session_id, operator, trace_id=trace_id, operation_id=operation_id),
+        confirmed=confirmed,
     )
 
 
@@ -6956,6 +7057,8 @@ def _legacy_submit_pptx_export_job(
     session_id: str | None = None,
     operator: str = "MCP user",
     trace_id: str | None = None,
+    operation_id: str | None = None,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
     """提交服务端 PPTX 导出任务；仅返回任务 ID、摘要和下载地址。"""
     return _submit_export_job(
@@ -6964,7 +7067,8 @@ def _legacy_submit_pptx_export_job(
         include_answers=include_answers,
         include_analysis=include_analysis,
         file_name=file_name,
-        context=_task_action_context(source, session_id, operator, trace_id=trace_id),
+        context=_task_action_context(source, session_id, operator, trace_id=trace_id, operation_id=operation_id),
+        confirmed=confirmed,
     )
 
 
@@ -7101,8 +7205,16 @@ def _task_action_context(
     *,
     confirmed: bool = False,
     trace_id: str | None = None,
+    operation_id: str | None = None,
 ) -> TaskActionContext:
-    return build_task_action_context(source, session_id, operator, confirmed=confirmed, trace_id=trace_id)
+    return build_task_action_context(
+        source,
+        session_id,
+        operator,
+        confirmed=confirmed,
+        trace_id=trace_id,
+        operation_id=operation_id,
+    )
 
 
 def _compact_job(task: dict[str, Any]) -> dict[str, Any]:
@@ -7165,6 +7277,7 @@ def _submit_export_job(
     template_id: str | None = None,
     format_spec: dict[str, Any] | None = None,
     answer_position: str | None = None,
+    confirmed: bool = True,
 ) -> dict[str, Any]:
     if not isinstance(lesson_package, dict) or not str(lesson_package.get("id") or "").strip():
         return _tool_error("INVALID_ARGUMENT", "lesson_package.id 不能为空。", field="lesson_package.id")
@@ -7187,6 +7300,20 @@ def _submit_export_job(
     else:
         include_answers = bool(include_answers)
         include_analysis = bool(include_analysis)
+    if not confirmed:
+        return {
+            "ok": False,
+            "confirmation_required": True,
+            "action": f"submit_{export_format}_export_job",
+            "target": {
+                "lesson_id": str(lesson_package.get("id") or ""),
+                "export_format": export_format,
+                "question_count": len(lesson_package.get("questions") or []),
+                "node_count": len(lesson_package.get("nodes") or []),
+                "file_name": file_name,
+            },
+            "message": "尚未创建导出任务。确认格式、题量和文件名后，以相同参数及 confirmed=true 再次调用。",
+        }
     service = _task_center_service()
     submitter = getattr(service, "submit_export_job", None)
     if not callable(submitter):

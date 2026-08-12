@@ -92,6 +92,22 @@ def build_mcp_system_health(
         )
     operation_health = dict(operations or {})
     issues.extend(list(operation_health.get("issues") or []))
+    high_risk_writes = [
+        item for item in policies
+        if item.get("risk") == "high" and not bool(item.get("read_only"))
+    ]
+    unprotected_high_risk = [
+        str(item.get("name"))
+        for item in high_risk_writes
+        if str(item.get("confirmation") or "none") in {"none", "direct"}
+    ]
+    if unprotected_high_risk:
+        issues.append({
+            "code": "high_risk_confirmation_gap",
+            "severity": "high",
+            "count": len(unprotected_high_risk),
+            "tools": unprotected_high_risk,
+        })
     response: dict[str, Any] = {
         "ok": True,
         "status": "attention" if issues else "ok",
@@ -113,6 +129,15 @@ def build_mcp_system_health(
         "embeddings": dict(embeddings),
         "study_sheet_templates": dict(templates),
         "operations": operation_health,
+        "safety_controls": {
+            "high_risk_write_count": len(high_risk_writes),
+            "confirmation_protected_count": len(high_risk_writes) - len(unprotected_high_risk),
+            "confirmation_coverage": (
+                round((len(high_risk_writes) - len(unprotected_high_risk)) / len(high_risk_writes), 4)
+                if high_risk_writes else 1.0
+            ),
+            "unprotected_tools": unprotected_high_risk,
+        },
         "issues": issues,
         "next_tools": ["get_workflow_guide", "database_boundary_report", "database_health_report"],
     }

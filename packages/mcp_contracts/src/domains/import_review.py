@@ -67,8 +67,8 @@ class ImportReviewDomain:
     def update_review_task_draft(self, task_id: str, updates: list[dict[str, Any]], dry_run: bool = True, reason: str | None = None, expected_updated_at: str | None = None, plan_token: str | None = None) -> dict[str, Any]:
         return self._call("update_review_task_draft", task_id, updates, dry_run, reason, expected_updated_at, plan_token)
 
-    def submit_ai_generated_review(self, source_text: str, source: str = "Claude Code MCP", chat_context: str | None = None, session_id: str | None = None) -> dict[str, Any]:
-        return self._call("submit_ai_generated_review", source_text, source, chat_context, session_id)
+    def submit_ai_generated_review(self, source_text: str, source: str = "Claude Code MCP", chat_context: str | None = None, session_id: str | None = None, confirmed: bool = False) -> dict[str, Any]:
+        return self._call("submit_ai_generated_review", source_text, source, chat_context, session_id, confirmed)
 
 
 def import_review_tool_names(registry: ToolRegistry) -> tuple[str, ...]:

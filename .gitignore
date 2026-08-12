@@ -55,6 +55,8 @@ data/.cache/
 data/config/*
 data/exports/*
 data/logs/*
+data/health/*.json
+data/retrieval-quality/*.json
 data/import-batches/*
 data/mcp-downloads/*
 data/backups/

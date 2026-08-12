@@ -38,6 +38,15 @@ def _contains_arg(server: dict[str, Any], expected: str) -> bool:
     return expected in [str(value) for value in server.get("args", [])]
 
 
+def _arg_value(server: dict[str, Any], flag: str) -> str | None:
+    args = [str(value) for value in server.get("args", [])]
+    try:
+        index = args.index(flag)
+    except ValueError:
+        return None
+    return args[index + 1] if index + 1 < len(args) else None
+
+
 def _client_servers(
     path: Path,
     *,
@@ -111,6 +120,14 @@ def check() -> dict[str, Any]:
         for expected_arg in baseline.get("playwright_required_args", []):
             if playwright and not _contains_arg(playwright, str(expected_arg)):
                 issues.append({"client": client_name, "server": "playwright", "issue": f"missing_arg={expected_arg}"})
+        if playwright:
+            expected_output_dir = _normalized_path(baseline.get("playwright_output_dir"))
+            actual_output_dir = _normalized_path(_arg_value(playwright, "--output-dir"))
+            if expected_output_dir and actual_output_dir != expected_output_dir:
+                issues.append({"client": client_name, "server": "playwright", "issue": "output_dir_mismatch"})
+            expected_output_size = str(baseline.get("playwright_output_max_size") or "")
+            if expected_output_size and _arg_value(playwright, "--output-max-size") != expected_output_size:
+                issues.append({"client": client_name, "server": "playwright", "issue": "output_max_size_mismatch"})
 
     return {
         "ok": not issues,

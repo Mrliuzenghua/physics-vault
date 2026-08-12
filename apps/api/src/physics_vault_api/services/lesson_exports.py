@@ -68,6 +68,7 @@ class LessonExportService:
         *,
         max_attempts: int = 1,
         request_context: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
         force_new: bool = False,
     ) -> ImportTask:
         snapshot = {
@@ -108,7 +109,7 @@ class LessonExportService:
             input_summary["request_context"] = {
                 key: str(value)
                 for key, value in request_context.items()
-                if value is not None and key in {"source", "session_id", "operator", "trace_id"}
+                if value is not None and key in {"source", "session_id", "operator", "trace_id", "operation_id"}
             }
         idempotency_payload = {
             "schema": snapshot["schema"],
@@ -117,7 +118,7 @@ class LessonExportService:
             "options": snapshot["options"],
             "requested_file_name": payload.file_name,
         }
-        idempotency_key = "lesson-export:" + hashlib.sha256(
+        content_idempotency_key = "lesson-export:" + hashlib.sha256(
             json.dumps(
                 idempotency_payload,
                 ensure_ascii=False,
@@ -125,6 +126,8 @@ class LessonExportService:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        input_summary["request_fingerprint"] = content_idempotency_key
+        resolved_idempotency_key = idempotency_key or content_idempotency_key
         create_or_get = getattr(self._repository, "create_or_get", None)
         created = True
         if callable(create_or_get) and not force_new:
@@ -132,8 +135,15 @@ class LessonExportService:
                 _EXPORT_TASK_TYPES[export_format],
                 input_summary,
                 max_attempts=max(1, int(max_attempts)),
-                idempotency_key=idempotency_key,
+                idempotency_key=resolved_idempotency_key,
             )
+            if not created and idempotency_key and (
+                task.task_type != _EXPORT_TASK_TYPES[export_format]
+                or str(task.input_summary.get("request_fingerprint") or "") != content_idempotency_key
+            ):
+                raise ValueError("operation_id has already been used with a different export payload")
+            if not created and idempotency_key:
+                return task
             if not created and self._export_task_is_reusable(task):
                 return task
         if force_new or not created:
@@ -142,9 +152,9 @@ class LessonExportService:
                 input_summary,
                 max_attempts=max(1, int(max_attempts)),
                 idempotency_key=(
-                    f"{idempotency_key}:retry:{uuid4().hex}"
+                    f"{resolved_idempotency_key}:retry:{uuid4().hex}"
                     if force_new
-                    else idempotency_key
+                    else resolved_idempotency_key
                 ),
             )
         elif not callable(create_or_get):
@@ -152,7 +162,7 @@ class LessonExportService:
                 _EXPORT_TASK_TYPES[export_format],
                 input_summary,
                 max_attempts=max(1, int(max_attempts)),
-                idempotency_key=idempotency_key,
+                idempotency_key=resolved_idempotency_key,
             )
         try:
             task_dir = self._task_dir(task.task_id)

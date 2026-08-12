@@ -1164,12 +1164,14 @@ class ImportPipelineService:
         *,
         max_attempts: int = 1,
         request_context: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> tuple[ImportTask, bool]:
         return self._task_coordinator.prepare_background_task(
             operation,
             batch_id,
             max_attempts=max_attempts,
             request_context=request_context,
+            idempotency_key=idempotency_key,
         )
 
     def execute_background_batch_task(

@@ -68,7 +68,7 @@ def test_system_health_aggregates_policy_counts_and_details() -> None:
     }
     policies = [
         {"name": "read", "read_only": True, "domain": "search", "risk": "low", "impact_scope": "none"},
-        {"name": "write", "read_only": False, "domain": "review", "risk": "high", "impact_scope": "review"},
+        {"name": "write", "read_only": False, "domain": "review", "risk": "high", "impact_scope": "review", "confirmation": "explicit_confirmation"},
     ]
 
     result = build_mcp_system_health(
@@ -94,3 +94,4 @@ def test_system_health_aggregates_policy_counts_and_details() -> None:
     ]
     assert result["tool_policies"] == policies
     assert result["database_details"] == database
+    assert result["safety_controls"]["confirmation_coverage"] == 1.0

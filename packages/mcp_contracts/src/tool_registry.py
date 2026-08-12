@@ -220,7 +220,7 @@ _WRITE_POLICIES = {
     "split_merged_options": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.PLAN_TOKEN),
     "deduplicate_review_task_questions": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.PLAN_TOKEN),
     "update_review_task_draft": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.PLAN_TOKEN),
-    "submit_ai_generated_review": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.LIMITED, ToolConfirmation.DIRECT),
+    "submit_ai_generated_review": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.LIMITED, ToolConfirmation.EXPLICIT),
     # Teaching projects and classroom sessions
     "duplicate_teaching_project": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.TEACHING_PROJECT, ToolReversibility.VERSIONED, ToolConfirmation.DIRECT),
     "publish_teaching_artifact": _write_policy(ToolRisk.HIGH, ToolImpactScope.TEACHING_PROJECT, ToolReversibility.VERSIONED, ToolConfirmation.PLAN_TOKEN),
@@ -253,10 +253,10 @@ _WRITE_POLICIES = {
     "associate_questions_to_paper": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.CANONICAL_METADATA, ToolReversibility.AUDITED, ToolConfirmation.DIRECT),
     "export_questions_to_typst": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.EXPORT_FILES, ToolReversibility.REGENERABLE, ToolConfirmation.DRY_RUN),
     # Background jobs
-    "submit_import_job": _write_policy(ToolRisk.HIGH, ToolImpactScope.TASK_QUEUE, ToolReversibility.LIMITED, ToolConfirmation.DIRECT),
-    "submit_ai_clean_job": _write_policy(ToolRisk.HIGH, ToolImpactScope.TASK_QUEUE, ToolReversibility.LIMITED, ToolConfirmation.DIRECT),
-    "submit_word_export_job": _write_policy(ToolRisk.HIGH, ToolImpactScope.TASK_QUEUE, ToolReversibility.LIMITED, ToolConfirmation.DIRECT),
-    "submit_pptx_export_job": _write_policy(ToolRisk.HIGH, ToolImpactScope.TASK_QUEUE, ToolReversibility.LIMITED, ToolConfirmation.DIRECT),
+    "submit_import_job": _write_policy(ToolRisk.HIGH, ToolImpactScope.TASK_QUEUE, ToolReversibility.LIMITED, ToolConfirmation.EXPLICIT),
+    "submit_ai_clean_job": _write_policy(ToolRisk.HIGH, ToolImpactScope.TASK_QUEUE, ToolReversibility.LIMITED, ToolConfirmation.EXPLICIT),
+    "submit_word_export_job": _write_policy(ToolRisk.HIGH, ToolImpactScope.TASK_QUEUE, ToolReversibility.LIMITED, ToolConfirmation.EXPLICIT),
+    "submit_pptx_export_job": _write_policy(ToolRisk.HIGH, ToolImpactScope.TASK_QUEUE, ToolReversibility.LIMITED, ToolConfirmation.EXPLICIT),
     "retry_job": _write_policy(ToolRisk.HIGH, ToolImpactScope.TASK_QUEUE, ToolReversibility.LIMITED, ToolConfirmation.EXPLICIT),
     "cancel_job": _write_policy(ToolRisk.HIGH, ToolImpactScope.TASK_QUEUE, ToolReversibility.LIMITED, ToolConfirmation.EXPLICIT),
 }

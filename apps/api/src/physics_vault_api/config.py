@@ -83,6 +83,9 @@ class TaskQueueSettings:
     worker_heartbeat_interval_seconds: int = 10
     worker_heartbeat_ttl_seconds: int = 35
     stale_task_after_seconds: int = 1_900
+    max_active_tasks: int = 8
+    max_export_questions: int = 500
+    max_export_nodes: int = 2_000
 
     @property
     def max_attempts(self) -> int:
@@ -114,6 +117,9 @@ class TaskQueueSettings:
             stale_task_after_seconds=max(
                 5, _env_int("PHYSICS_TASK_STALE_AFTER_SECONDS", 1_900)
             ),
+            max_active_tasks=max(1, _env_int("PHYSICS_TASK_MAX_ACTIVE", 8)),
+            max_export_questions=max(1, _env_int("PHYSICS_EXPORT_MAX_QUESTIONS", 500)),
+            max_export_nodes=max(1, _env_int("PHYSICS_EXPORT_MAX_NODES", 2_000)),
         )
 
 

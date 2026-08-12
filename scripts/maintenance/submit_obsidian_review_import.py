@@ -111,6 +111,7 @@ def main() -> int:
                         "source_text": f"@file:{relative}",
                         "source": f"Obsidian Vault2 标准题库（批次 {number}/{len(chunks)}）",
                         "chat_context": "来源：Pysics Vault2.0/01-Obsidian/02-题库；图片：data/assets/questions/obsidian-vault2/",
+                        "confirmed": True,
                     },
                 },
             )

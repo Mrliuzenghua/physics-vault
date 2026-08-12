@@ -24,17 +24,17 @@ class OperationsDomain:
     def _call(self, name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return self._handlers[name](*args, **kwargs)
 
-    def submit_import_job(self, batch_id: str, source: str='physics_vault_mcp', session_id: str | None=None, operator: str='MCP user', trace_id: str | None=None) -> dict[str, Any]:
-        return self._call("submit_import_job", batch_id, source, session_id, operator, trace_id)
+    def submit_import_job(self, batch_id: str, source: str='physics_vault_mcp', session_id: str | None=None, operator: str='MCP user', trace_id: str | None=None, operation_id: str | None=None, confirmed: bool=False) -> dict[str, Any]:
+        return self._call("submit_import_job", batch_id, source, session_id, operator, trace_id, operation_id, confirmed)
 
-    def submit_ai_clean_job(self, batch_id: str, source: str='physics_vault_mcp', session_id: str | None=None, operator: str='MCP user', trace_id: str | None=None) -> dict[str, Any]:
-        return self._call("submit_ai_clean_job", batch_id, source, session_id, operator, trace_id)
+    def submit_ai_clean_job(self, batch_id: str, source: str='physics_vault_mcp', session_id: str | None=None, operator: str='MCP user', trace_id: str | None=None, operation_id: str | None=None, confirmed: bool=False) -> dict[str, Any]:
+        return self._call("submit_ai_clean_job", batch_id, source, session_id, operator, trace_id, operation_id, confirmed)
 
-    def submit_word_export_job(self, lesson_package: dict[str, Any], include_answers: bool | None=None, include_analysis: bool | None=None, file_name: str | None=None, template_id: str | None=None, format_spec: dict[str, Any] | None=None, answer_position: Literal['after_question', 'end'] | None=None, source: str='physics_vault_mcp', session_id: str | None=None, operator: str='MCP user', trace_id: str | None=None) -> dict[str, Any]:
-        return self._call("submit_word_export_job", lesson_package, include_answers, include_analysis, file_name, template_id, format_spec, answer_position, source, session_id, operator, trace_id)
+    def submit_word_export_job(self, lesson_package: dict[str, Any], include_answers: bool | None=None, include_analysis: bool | None=None, file_name: str | None=None, template_id: str | None=None, format_spec: dict[str, Any] | None=None, answer_position: Literal['after_question', 'end'] | None=None, source: str='physics_vault_mcp', session_id: str | None=None, operator: str='MCP user', trace_id: str | None=None, operation_id: str | None=None, confirmed: bool=False) -> dict[str, Any]:
+        return self._call("submit_word_export_job", lesson_package, include_answers, include_analysis, file_name, template_id, format_spec, answer_position, source, session_id, operator, trace_id, operation_id, confirmed)
 
-    def submit_pptx_export_job(self, lesson_package: dict[str, Any], include_answers: bool=False, include_analysis: bool=False, file_name: str | None=None, source: str='physics_vault_mcp', session_id: str | None=None, operator: str='MCP user', trace_id: str | None=None) -> dict[str, Any]:
-        return self._call("submit_pptx_export_job", lesson_package, include_answers, include_analysis, file_name, source, session_id, operator, trace_id)
+    def submit_pptx_export_job(self, lesson_package: dict[str, Any], include_answers: bool=False, include_analysis: bool=False, file_name: str | None=None, source: str='physics_vault_mcp', session_id: str | None=None, operator: str='MCP user', trace_id: str | None=None, operation_id: str | None=None, confirmed: bool=False) -> dict[str, Any]:
+        return self._call("submit_pptx_export_job", lesson_package, include_answers, include_analysis, file_name, source, session_id, operator, trace_id, operation_id, confirmed)
 
     def get_job_status(self, task_id: str) -> dict[str, Any]:
         return self._call("get_job_status", task_id)

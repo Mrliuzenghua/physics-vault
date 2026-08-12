@@ -32,6 +32,7 @@ class ImportTaskDispatcher:
         batch_id: str,
         *,
         request_context: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> ImportTask:
         correlated_context = current_context().as_request_context()
         correlated_context.update(request_context or {})
@@ -40,6 +41,7 @@ class ImportTaskDispatcher:
             batch_id,
             max_attempts=self.settings.max_attempts,
             request_context=correlated_context,
+            idempotency_key=idempotency_key,
         )
         if not should_dispatch:
             return task
@@ -95,6 +97,7 @@ class LessonExportDispatcher:
         payload: LessonExportRequest,
         *,
         request_context: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> ImportTask:
         correlated_context = current_context().as_request_context()
         correlated_context.update(request_context or {})
@@ -103,6 +106,7 @@ class LessonExportDispatcher:
             payload,
             max_attempts=self.settings.max_attempts,
             request_context=correlated_context,
+            idempotency_key=idempotency_key,
         )
         return self._dispatch(task)
 

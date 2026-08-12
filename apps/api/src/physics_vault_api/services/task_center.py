@@ -12,6 +12,7 @@ from ..paths import project_root
 from ..repositories.import_tasks import ImportTask
 from ..observability import resolve_trace_id
 from ..schemas.lesson_exports import LessonExportRequest
+from ..config import TaskQueueSettings
 from .document_pipeline import ImportPipelineService
 from .task_queue import ImportTaskDispatcher
 
@@ -57,6 +58,7 @@ class TaskActionContext:
     operator: str = "MCP user"
     confirmed: bool = False
     trace_id: str | None = None
+    operation_id: str | None = None
 
     def as_request_context(self) -> dict[str, str]:
         values = {
@@ -64,6 +66,7 @@ class TaskActionContext:
             "session_id": (self.session_id or "").strip(),
             "operator": self.operator.strip() or "MCP user",
             "trace_id": resolve_trace_id(self.trace_id),
+            "operation_id": (self.operation_id or "").strip(),
         }
         return {key: value for key, value in values.items() if value}
 
@@ -205,10 +208,12 @@ class TaskCenterService:
     ) -> tuple[dict[str, Any], str]:
         if operation not in {"recognize", "ai_clean"}:
             raise HTTPException(status_code=400, detail=f"Unsupported MCP task operation: {operation}")
+        self._ensure_submission_allowed(context)
         task = self._dispatcher.submit_batch_stage(
             operation,
             batch_id,
             request_context=context.as_request_context(),
+            idempotency_key=self._operation_key(context),
         )
         audit_id = self._record_action(
             task.task_id,
@@ -233,6 +238,20 @@ class TaskCenterService:
             raise HTTPException(status_code=400, detail=f"Unsupported export format: {export_format}")
         if self._export_dispatcher is None:
             raise HTTPException(status_code=503, detail="服务端导出暂不可用")
+        settings = self._submission_settings()
+        question_count = len(lesson_package.get("questions") or [])
+        node_count = len(lesson_package.get("nodes") or [])
+        if question_count > settings.max_export_questions:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Export contains {question_count} questions; limit is {settings.max_export_questions}",
+            )
+        if node_count > settings.max_export_nodes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Export contains {node_count} nodes; limit is {settings.max_export_nodes}",
+            )
+        self._ensure_submission_allowed(context)
         payload = LessonExportRequest(
             lesson_package=lesson_package,
             include_answers=include_answers,
@@ -244,6 +263,7 @@ class TaskCenterService:
             export_format,
             payload,
             request_context=context.as_request_context(),
+            idempotency_key=self._operation_key(context),
         )
         audit_id = self._record_action(
             task.task_id,
@@ -317,6 +337,34 @@ class TaskCenterService:
         if not callable(request_cancel):
             raise HTTPException(status_code=503, detail="当前任务存储不支持取消操作")
         return self.serialize(request_cancel(task_id))
+
+    def _submission_settings(self) -> TaskQueueSettings:
+        settings = getattr(self._dispatcher, "settings", None)
+        return settings if isinstance(settings, TaskQueueSettings) else TaskQueueSettings.from_env()
+
+    @staticmethod
+    def _operation_key(context: TaskActionContext) -> str | None:
+        operation_id = (context.operation_id or "").strip()
+        return f"mcp-operation:{operation_id}" if operation_id else None
+
+    def _ensure_submission_allowed(self, context: TaskActionContext) -> None:
+        operation_key = self._operation_key(context)
+        finder = getattr(self._repository, "find_by_idempotency_key", None)
+        if operation_key and callable(finder) and finder(operation_key) is not None:
+            return
+        settings = self._submission_settings()
+        active = self._repository.list(
+            limit=settings.max_active_tasks,
+            statuses=list(ACTIVE_STATUSES),
+        )
+        if len(active) >= settings.max_active_tasks:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Active task limit reached ({settings.max_active_tasks}); "
+                    "wait for a task to finish or cancel an unneeded task"
+                ),
+            )
 
     def _record_action(
         self,

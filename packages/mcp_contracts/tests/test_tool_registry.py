@@ -63,6 +63,7 @@ def test_discovery_filters_by_domain_risk_and_write_capability() -> None:
     assert registry.get("update_review_task_draft").confirmation is ToolConfirmation.PLAN_TOKEN
     assert high_risk_writes
     assert all(spec.risk is ToolRisk.HIGH and not spec.read_only for spec in high_risk_writes)
+    assert all(spec.confirmation not in {ToolConfirmation.NONE, ToolConfirmation.DIRECT} for spec in high_risk_writes)
 
 
 def test_every_write_tool_has_explicit_impact_policy() -> None:
