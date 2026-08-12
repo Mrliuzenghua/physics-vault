@@ -18,6 +18,7 @@ import { useBasket } from '../hooks/useBasket';
 import { useComposeDraftSession } from '../hooks/compose/useComposeDraftSession';
 import { useComposeWorkbenchStore } from '../stores/useComposeWorkbenchStore';
 import { savePaperDraft } from '../services/paperDraftApi';
+import { getDraftSavePresentation, type DraftSaveState } from '../services/composeSaveState';
 import { searchQuestions } from '../services/questionApi';
 import { ApiError } from '../services/apiClient';
 import {
@@ -287,11 +288,13 @@ export default function ComposePage() {
 
   const {
     draftId,
+    draftSaveError,
     draftSaveState,
+    lastSavedAt,
     loading,
     recordSavedDraft,
-    refreshDraft,
     serverDraftUpdatedAt,
+    setDraftSaveError,
     setDraftSaveState,
   } = useComposeDraftSession({
     basketItems,
@@ -305,6 +308,14 @@ export default function ComposePage() {
     startNewDraft,
     updateComposeItems: updateItems,
   });
+  const draftSavePresentation = useMemo(
+    () => getDraftSavePresentation(draftSaveState, lastSavedAt, draftSaveError),
+    [draftSaveError, draftSaveState, lastSavedAt],
+  );
+  const serverDraftUpdatedAtRef = useRef(serverDraftUpdatedAt);
+  useEffect(() => {
+    serverDraftUpdatedAtRef.current = serverDraftUpdatedAt;
+  }, [serverDraftUpdatedAt]);
 
   const undoSettings = useCallback(() => {
     const previous = settingsPastRef.current.at(-1);
@@ -385,6 +396,10 @@ export default function ComposePage() {
     () => lessonDocumentToLessonPackage(previewLessonDocument),
     [previewLessonDocument],
   );
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const lastQueuedPackageRef = useRef<typeof previewLessonPackage | null>(null);
+  const latestPackageRef = useRef(previewLessonPackage);
+  latestPackageRef.current = previewLessonPackage;
 
   const previewLayoutModel = useMemo(
     () => buildLessonLayoutModel(previewLessonDocument),
@@ -441,41 +456,68 @@ export default function ComposePage() {
     [previewModel],
   );
 
+  const persistCurrentDraft = useCallback((options: { manual?: boolean; retry?: boolean } = {}) => {
+    const packageToSave = previewLessonPackage;
+    const revisionToSave = documentRevision;
+    const reportToSave = diagnostics as unknown as Record<string, unknown>;
+
+    if (options.manual) saveLessonPackageToLibrary(packageToSave);
+    if (packageToSave.nodes.length === 0) {
+      setDraftSaveState('idle');
+      return Promise.resolve();
+    }
+    if (!options.retry && lastQueuedPackageRef.current === packageToSave) return saveQueueRef.current;
+
+    lastQueuedPackageRef.current = packageToSave;
+    setDraftSaveError(null);
+    setDraftSaveState('saving');
+    const run = async () => {
+      try {
+        const draft = await savePaperDraft(
+          packageToSave,
+          reportToSave,
+          revisionToSave,
+          serverDraftUpdatedAtRef.current,
+        );
+        serverDraftUpdatedAtRef.current = draft.updated_at;
+        recordSavedDraft(draft);
+        markSaved(revisionToSave);
+        if (latestPackageRef.current === packageToSave) {
+          setDraftSaveState('saved');
+        } else if (lastQueuedPackageRef.current === packageToSave) {
+          setDraftSaveState('pending');
+        }
+      } catch (error: unknown) {
+        if (lastQueuedPackageRef.current !== packageToSave) return;
+        const message = error instanceof ApiError && error.status === 409
+          ? '另一页面已经保存了更新版本。当前内容仍保留，请刷新页面确认后重试。'
+          : error instanceof Error
+            ? error.message
+            : '草稿库暂时不可用，请稍后重试。';
+        setDraftSaveError(message);
+        setDraftSaveState('error');
+      }
+    };
+    const queued = saveQueueRef.current.catch(() => undefined).then(run);
+    saveQueueRef.current = queued;
+    return queued;
+  }, [diagnostics, documentRevision, markSaved, previewLessonPackage, recordSavedDraft, setDraftSaveError, setDraftSaveState]);
+
   useEffect(() => {
     if (previewLessonPackage.nodes.length === 0) {
+      setDraftSaveError(null);
       setDraftSaveState('idle');
-      return;
+      return undefined;
     }
+    if (lastQueuedPackageRef.current === previewLessonPackage) return undefined;
 
-    setDraftSaveState('saving');
-    const revisionToSave = documentRevision;
+    setDraftSaveError(null);
+    setDraftSaveState('pending');
     const timer = window.setTimeout(() => {
-      void savePaperDraft(
-        previewLessonPackage,
-        diagnostics as unknown as Record<string, unknown>,
-        revisionToSave,
-        serverDraftUpdatedAt,
-      )
-        .then((draft) => {
-          recordSavedDraft(draft);
-          markSaved(revisionToSave);
-          setDraftSaveState('saved');
-        })
-        .catch((error: unknown) => {
-          if (error instanceof ApiError && error.status === 409) {
-            void refreshDraft()
-              .then((refreshed) => {
-                if (!refreshed) setDraftSaveState('error');
-              })
-              .catch(() => setDraftSaveState('error'));
-            return;
-          }
-          setDraftSaveState('error');
-        });
+      void persistCurrentDraft();
     }, 700);
-
     return () => window.clearTimeout(timer);
-  }, [diagnostics, documentRevision, markSaved, previewLessonPackage, recordSavedDraft, refreshDraft, serverDraftUpdatedAt, setDraftSaveState]);
+  }, [persistCurrentDraft, previewLessonPackage, setDraftSaveError, setDraftSaveState]);
 
   const selectedItem = selectedIndex >= 0 ? composeItems[selectedIndex] : null;
   const selectCanvasItem = useCallback((itemId: string, additive = false) => {
@@ -1052,9 +1094,8 @@ export default function ComposePage() {
   }, [commitItems, composeItems, selectedIndex, setStyleConfig]);
 
   const handleSaveCurrent = useCallback(() => {
-    saveLessonPackageToLibrary(previewLessonPackage);
-    setDraftSaveState('saved');
-  }, [previewLessonPackage, setDraftSaveState]);
+    void persistCurrentDraft({ manual: true, retry: draftSaveState === 'error' });
+  }, [draftSaveState, persistCurrentDraft]);
 
   const handleClearAll = useCallback(() => {
     if (!window.confirm(`确定清空全部 ${composeItems.length} 个内容对象吗？此操作可通过撤销恢复。`)) return;
@@ -1134,6 +1175,7 @@ export default function ComposePage() {
         canUndo={canUndo}
         canRedo={canRedo}
         saveState={draftSaveState}
+        savePresentation={draftSavePresentation}
         insertMenu={<InsertMenu onAddExamTitle={handleAddEditableExamTitle} onAddNameLine={handleAddEditableNameLine} onAddSectionTitle={handleAddEditableSectionTitle} onAddTextBlock={handleAddTextBlock} onAddTextBox={handleAddTextBox} onAddPageBreak={handleAddPageBreak} />}
         outlineOpen={outlineOpen}
         outputProfile={outputProfile}
@@ -1393,7 +1435,7 @@ export default function ComposePage() {
                   report={diagnostics}
                   questionCount={questionCount}
                   pageBreakCount={pageBreakCount}
-                  saveState={draftSaveState}
+                  saveLabel={draftSavePresentation.label}
                   paginationReport={effectivePaginationReport}
                   onLocateQuestion={locateQuestion}
                   onFixWarning={fixDiagnosticWarning}
@@ -1430,6 +1472,7 @@ export default function ComposePage() {
         riskCount={diagnostics.warnings.filter((warning) => warning.level === 'danger').length}
         warningCount={diagnostics.warnings.filter((warning) => warning.level === 'warning').length}
         saveState={draftSaveState}
+        saveLabel={draftSavePresentation.label}
         zoom={effectiveZoom}
         layoutLabel={documentLayoutLabel}
       />
@@ -2004,7 +2047,7 @@ function PreflightSection({
   report,
   questionCount,
   pageBreakCount,
-  saveState,
+  saveLabel,
   paginationReport,
   onLocateQuestion,
   onFixWarning,
@@ -2012,7 +2055,7 @@ function PreflightSection({
   report: ComposeDiagnosticReport;
   questionCount: number;
   pageBreakCount: number;
-  saveState: 'idle' | 'saving' | 'saved' | 'error';
+  saveLabel: string;
   paginationReport: HandoutPaginationReport | null;
   onLocateQuestion: (questionId: string) => void;
   onFixWarning: (warning: ComposeDiagnosticWarning) => void;
@@ -2020,13 +2063,6 @@ function PreflightSection({
   const riskCount = report.warnings.filter((warning) => warning.level === 'danger').length;
   const warningCount = report.warnings.filter((warning) => warning.level === 'warning').length;
   const topTypes = Object.entries(report.typeDistribution).slice(0, 3);
-  const saveLabel = {
-    idle: '等待编辑',
-    saving: '正在同步',
-    saved: '已同步到草稿库',
-    error: '本地已保存，草稿库同步失败',
-  }[saveState];
-
   return (
     <div className="space-y-3">
       <PanelCard title="出稿预检">
@@ -2142,6 +2178,7 @@ function StatusBar({
   riskCount,
   warningCount,
   saveState,
+  saveLabel,
   zoom,
   layoutLabel,
 }: {
@@ -2153,7 +2190,8 @@ function StatusBar({
   totalScore: number;
   riskCount: number;
   warningCount: number;
-  saveState: 'idle' | 'saving' | 'saved' | 'error';
+  saveState: DraftSaveState;
+  saveLabel: string;
   zoom: number;
   layoutLabel: string;
 }) {
@@ -2165,15 +2203,6 @@ function StatusBar({
         ? selectedItem.title
         : '内容对象'
     : '未选择';
-
-  const saveLabel =
-    saveState === 'saving'
-      ? '保存中…'
-      : saveState === 'saved'
-        ? '已保存'
-        : saveState === 'error'
-          ? '保存失败'
-          : '自动保存';
 
   return (
     <footer className="flex h-[26px] shrink-0 items-center gap-3 border-t border-[#d4deea] bg-[#f8fafc] px-3.5 text-[11px] text-[var(--color-text-muted)] shadow-[0_-1px_0_rgba(255,255,255,0.70)]">

@@ -1,14 +1,15 @@
 import type { ReactNode } from 'react';
 
+import type { DraftSavePresentation, DraftSaveState } from '../../services/composeSaveState';
 import { Button } from '../ui/Button';
 
 type OutputProfile = 'student' | 'teacher';
-type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 interface Props {
   canUndo: boolean;
   canRedo: boolean;
-  saveState: SaveState;
+  saveState: DraftSaveState;
+  savePresentation: DraftSavePresentation;
   insertMenu: ReactNode;
   outlineOpen: boolean;
   outputProfile: OutputProfile;
@@ -45,6 +46,7 @@ export default function ComposeWorkspaceToolbar({
   canUndo,
   canRedo,
   saveState,
+  savePresentation,
   insertMenu,
   outlineOpen,
   outputProfile,
@@ -84,9 +86,11 @@ export default function ComposeWorkspaceToolbar({
           <IconButton title="撤销 (Ctrl+Z)" disabled={!canUndo} onClick={onUndo}><UndoIcon /></IconButton>
           <IconButton title="重做 (Ctrl+Y)" disabled={!canRedo} onClick={onRedo}><RedoIcon /></IconButton>
           <ToolDivider />
-          <SaveStateDot state={saveState} />
+          <SaveStateDot state={saveState} presentation={savePresentation} />
           <Button variant="ghost" size="sm" onClick={onClear}>清空</Button>
-          <Button variant="outline" size="sm" onClick={onSave}>保存项目</Button>
+          <Button variant="outline" size="sm" onClick={onSave} disabled={saveState === 'saving'}>
+            {saveState === 'saving' ? '正在保存' : saveState === 'error' ? '重试保存' : '立即保存'}
+          </Button>
           <Button size="sm" onClick={onOpenHandout}>进入讲义排版</Button>
         </div>
       </header>
@@ -148,9 +152,8 @@ function PillToggle({ active, children, onClick }: { active: boolean; children: 
   return <button type="button" onClick={onClick} aria-pressed={active} className={`flex h-7 shrink-0 items-center gap-1.5 rounded border px-2.5 text-xs font-semibold transition-colors ${active ? 'border-[#a9c8ef] bg-[#e8f1fb] text-[#1f5fb8]' : 'border-[#d4deea] bg-white/70 text-[var(--color-text-muted)] hover:border-[#bcc9d8] hover:text-[var(--color-text)]'}`}><span className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-text-subtle)]'}`} />{children}</button>;
 }
 
-function SaveStateDot({ state }: { state: SaveState }) {
-  const meta = state === 'saving' ? { label: '保存中…', color: '#3984c6' } : state === 'saved' ? { label: '已保存', color: '#2f9e68' } : state === 'error' ? { label: '保存失败', color: '#c84545' } : { label: '未保存', color: '#94a3b8' };
-  return <span className="flex items-center gap-1.5 text-[10px] font-semibold text-[#6e8195]" title={meta.label}><span className={`h-1.5 w-1.5 rounded-full ${state === 'saving' ? 'animate-pulse' : ''}`} style={{ background: meta.color }} />{meta.label}</span>;
+function SaveStateDot({ state, presentation }: { state: DraftSaveState; presentation: DraftSavePresentation }) {
+  return <span className="flex items-center gap-1.5 text-[10px] font-semibold text-[#6e8195]" title={presentation.title}><span className={`h-1.5 w-1.5 rounded-full ${state === 'saving' ? 'animate-pulse' : ''}`} style={{ background: presentation.color }} />{presentation.label}</span>;
 }
 
 function UndoIcon() { return <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M3 7h6a3.5 3.5 0 0 1 0 7H7" strokeLinecap="round" /><path d="M6 3.5L2.5 7 6 10.5" strokeLinecap="round" strokeLinejoin="round" /></svg>; }

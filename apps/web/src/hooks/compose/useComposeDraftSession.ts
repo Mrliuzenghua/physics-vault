@@ -3,13 +3,12 @@ import { useQueryClient } from '@tanstack/react-query';
 
 import { fetchLatestPaperDraft, fetchPaperDraft } from '../../services/paperDraftApi';
 import { fetchQuestion, fetchQuestionsByIds } from '../../services/questionApi';
+import type { DraftSaveState } from '../../services/composeSaveState';
 import { buildComposeItemsFromPaperDraft, getQuestionSnapshot } from '../../utils/composeDraft';
 import type { BasketItem, ComposeItem, ComposeQuestionItem, PaperDraft, Question, TemplateMaterialPackage } from '../../types';
 
 const CURRENT_COMPOSE_DRAFT_STORAGE_KEY = 'physics-vault.compose.current-draft-id';
 const DEFAULT_SUBTITLE = '知识点、文本说明与试题自由拼接';
-
-type DraftSaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 interface UseComposeDraftSessionOptions {
   basketItems: BasketItem[];
@@ -55,12 +54,16 @@ export function useComposeDraftSession({
   const [serverDraftUpdatedAt, setServerDraftUpdatedAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [draftSaveState, setDraftSaveState] = useState<DraftSaveState>('idle');
+  const [draftSaveError, setDraftSaveError] = useState<string | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
 
   const recordSavedDraft = useCallback((draft: PaperDraft) => {
     draftIdRef.current = draft.id;
     setDraftId(draft.id);
     window.localStorage.setItem(CURRENT_COMPOSE_DRAFT_STORAGE_KEY, draft.id);
     setServerDraftUpdatedAt(draft.updated_at);
+    setLastSavedAt(draft.updated_at || new Date().toISOString());
+    setDraftSaveError(null);
     queryClient.setQueryData(['paper-draft', 'latest'], draft);
   }, [queryClient]);
 
@@ -245,12 +248,15 @@ export function useComposeDraftSession({
 
   return {
     draftId,
+    draftSaveError,
     draftSaveState,
     hydrateServerDraft,
     loading,
+    lastSavedAt,
     recordSavedDraft,
     refreshDraft,
     serverDraftUpdatedAt,
+    setDraftSaveError,
     setDraftSaveState,
   };
 }
