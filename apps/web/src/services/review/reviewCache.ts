@@ -1,5 +1,6 @@
 import type { QuestionQualityCode, QuestionQualityRuleConfig, QuestionQualitySeverity } from '../questionQuality';
 import type { ImportMediaAsset, KnowledgeReviewDraft, ReviewQuestionDraft } from '../../types';
+import { readJsonStorage, removeStorageValue, writeJsonStorage } from '../safeStorage.ts';
 
 const REVIEW_CACHE_PREFIX = 'physics_vault_review_cache.';
 const REVIEW_CACHE_VERSION = 1;
@@ -49,52 +50,30 @@ export interface CachedReviewState<Queue extends string = string> {
   queue: Queue;
 }
 
-function getStorage(): Storage | null {
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
 export function reviewCacheKey(taskId: string): string {
   return `${REVIEW_CACHE_PREFIX}${taskId}`;
 }
 
 export function readReviewCache<Queue extends string = string>(taskId: string): CachedReviewState<Queue> | null {
-  try {
-    const raw = getStorage()?.getItem(reviewCacheKey(taskId));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as CachedReviewState<Queue>;
-    if (parsed.version !== REVIEW_CACHE_VERSION || parsed.taskId !== taskId || !Array.isArray(parsed.drafts)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+  const parsed = readJsonStorage<CachedReviewState<Queue> | null>(reviewCacheKey(taskId), null);
+  if (!parsed || parsed.version !== REVIEW_CACHE_VERSION || parsed.taskId !== taskId || !Array.isArray(parsed.drafts)) return null;
+  return parsed;
 }
 
 export function writeReviewCache<Queue extends string>(
   taskId: string,
   state: Omit<CachedReviewState<Queue>, 'version' | 'taskId' | 'savedAt'>,
 ): void {
-  try {
-    getStorage()?.setItem(reviewCacheKey(taskId), JSON.stringify({
-      version: REVIEW_CACHE_VERSION,
-      taskId,
-      savedAt: new Date().toISOString(),
-      ...state,
-    }));
-  } catch {
-    // Ignore storage quota or privacy-mode failures; the page still works.
-  }
+  writeJsonStorage(reviewCacheKey(taskId), {
+    version: REVIEW_CACHE_VERSION,
+    taskId,
+    savedAt: new Date().toISOString(),
+    ...state,
+  });
 }
 
 export function clearReviewCache(taskId: string): void {
-  try {
-    getStorage()?.removeItem(reviewCacheKey(taskId));
-  } catch {
-    // Ignore localStorage failures.
-  }
+  removeStorageValue(reviewCacheKey(taskId));
 }
 
 export function mergeMediaAssets(...groups: ImportMediaAsset[][]): ImportMediaAsset[] {
@@ -134,18 +113,9 @@ export function mergeTaskMeta(
 }
 
 export function readQualityConfig(): QuestionQualityRuleConfig {
-  try {
-    const raw = getStorage()?.getItem(REVIEW_QUALITY_CONFIG_KEY);
-    return raw ? JSON.parse(raw) as QuestionQualityRuleConfig : {};
-  } catch {
-    return {};
-  }
+  return readJsonStorage<QuestionQualityRuleConfig>(REVIEW_QUALITY_CONFIG_KEY, {});
 }
 
 export function writeQualityConfig(config: QuestionQualityRuleConfig): void {
-  try {
-    getStorage()?.setItem(REVIEW_QUALITY_CONFIG_KEY, JSON.stringify(config));
-  } catch {
-    // Keep the in-memory configuration when browser storage is unavailable.
-  }
+  writeJsonStorage(REVIEW_QUALITY_CONFIG_KEY, config);
 }

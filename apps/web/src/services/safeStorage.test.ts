@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   isRecord,
+  listStorageKeys,
   readJsonStorage,
   readSessionJsonStorage,
   readStorageValue,
@@ -18,6 +19,8 @@ class MemoryStorage {
   getItem(key: string): string | null { return this.values.get(key) ?? null; }
   setItem(key: string, value: string): void { this.values.set(key, value); }
   removeItem(key: string): void { this.values.delete(key); }
+  key(index: number): string | null { return Array.from(this.values.keys())[index] ?? null; }
+  get length(): number { return this.values.size; }
 }
 
 function withStorage(
@@ -55,6 +58,11 @@ test('reads and writes guarded JSON values', () => {
     assert.deepEqual(readJsonStorage('settings', { fallback: true }), { fallback: true });
     assert.equal(removeStorageValue('settings'), true);
     assert.equal(readStorageValue('settings'), null);
+
+    storage.setItem('cache.one', '1');
+    storage.setItem('cache.two', '2');
+    storage.setItem('other', '3');
+    assert.deepEqual(listStorageKeys('cache.'), ['cache.one', 'cache.two']);
   });
 });
 
@@ -63,6 +71,8 @@ test('returns fallbacks and false writes when storage is unavailable', () => {
     getItem(): string | null { throw new Error('blocked'); },
     setItem(): void { throw new Error('blocked'); },
     removeItem(): void { throw new Error('blocked'); },
+    key(): string | null { throw new Error('blocked'); },
+    get length(): number { throw new Error('blocked'); },
   };
   withStorage(blocked, () => {
     assert.equal(readStorageValue('key'), null);
@@ -70,6 +80,7 @@ test('returns fallbacks and false writes when storage is unavailable', () => {
     assert.equal(writeStorageValue('key', 'value'), false);
     assert.equal(writeJsonStorage('key', { value: true }), false);
     assert.equal(removeStorageValue('key'), false);
+    assert.deepEqual(listStorageKeys(), []);
     assert.deepEqual(readSessionJsonStorage('key', {}), {});
     assert.equal(writeSessionJsonStorage('key', { value: true }), false);
   }, blocked);

@@ -1,3 +1,5 @@
+import { isRecord, listStorageKeys, readJsonStorage, writeJsonStorage } from './safeStorage.ts';
+
 export interface ClassroomReflection {
   id: string;
   projectId: string;
@@ -36,29 +38,18 @@ function storageKey(projectId: string) {
   return `${STORAGE_PREFIX}${projectId}`;
 }
 
-function getStorage(): Storage | null {
-  return typeof window === 'undefined' ? null : window.localStorage;
-}
-
 function loadTaskState(): Record<string, boolean> {
-  const storage = getStorage();
-  if (!storage) return {};
-  try {
-    const parsed = JSON.parse(storage.getItem(TASK_STATE_KEY) || '{}');
-    if (!parsed || typeof parsed !== 'object') return {};
-    return Object.fromEntries(Object.entries(parsed).filter(([, value]) => typeof value === 'boolean')) as Record<string, boolean>;
-  } catch {
-    return {};
-  }
+  const parsed = readJsonStorage<unknown>(TASK_STATE_KEY, {});
+  if (!isRecord(parsed)) return {};
+  return Object.fromEntries(Object.entries(parsed).filter(([, value]) => typeof value === 'boolean')) as Record<string, boolean>;
 }
 
 export function setClassroomFollowUpTaskCompleted(taskId: string, completed: boolean): void {
-  const storage = getStorage();
-  if (!storage || !taskId) return;
+  if (!taskId) return;
   const state = loadTaskState();
   if (completed) state[taskId] = true;
   else delete state[taskId];
-  storage.setItem(TASK_STATE_KEY, JSON.stringify(state));
+  writeJsonStorage(TASK_STATE_KEY, state);
 
   const reflection = listClassroomReflections().find((item) => taskId.startsWith(`${item.id}-`));
   if (!reflection) return;
@@ -76,18 +67,11 @@ export function setClassroomFollowUpTaskCompleted(taskId: string, completed: boo
 }
 
 export function loadClassroomReflections(projectId: string): ClassroomReflection[] {
-  const storage = getStorage();
-  if (!storage) return [];
-  try {
-    const raw = storage.getItem(storageKey(projectId));
-    const parsed = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is ClassroomReflection => Boolean(
-      item && typeof item === 'object' && item.projectId === projectId && typeof item.id === 'string',
-    ));
-  } catch {
-    return [];
-  }
+  const parsed = readJsonStorage<unknown>(storageKey(projectId), []);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((item): item is ClassroomReflection => Boolean(
+    item && typeof item === 'object' && item.projectId === projectId && typeof item.id === 'string',
+  ));
 }
 
 export function loadLatestClassroomReflection(projectId: string): ClassroomReflection | null {
@@ -95,12 +79,8 @@ export function loadLatestClassroomReflection(projectId: string): ClassroomRefle
 }
 
 export function listClassroomReflections(): ClassroomReflection[] {
-  const storage = getStorage();
-  if (!storage) return [];
   const reflections: ClassroomReflection[] = [];
-  for (let index = 0; index < storage.length; index += 1) {
-    const key = storage.key(index);
-    if (!key?.startsWith(STORAGE_PREFIX)) continue;
+  for (const key of listStorageKeys(STORAGE_PREFIX)) {
     const projectId = key.slice(STORAGE_PREFIX.length);
     reflections.push(...loadClassroomReflections(projectId));
   }
@@ -133,7 +113,7 @@ export function saveClassroomReflection(reflection: ClassroomReflection): Classr
   const index = reflections.findIndex((item) => item.id === reflection.id);
   if (index >= 0) reflections[index] = reflection;
   else reflections.unshift(reflection);
-  getStorage()?.setItem(storageKey(reflection.projectId), JSON.stringify(reflections.slice(0, 30)));
+  writeJsonStorage(storageKey(reflection.projectId), reflections.slice(0, 30));
   return reflections;
 }
 
@@ -145,7 +125,7 @@ function mergeRemoteReflection(reflection: ClassroomReflection): void {
   const merged = { ...reflection, remoteUpdatedAt: reflection.updatedAt, remoteSyncState: 'synced' as const };
   if (index >= 0) local[index] = { ...local[index], ...merged };
   else local.unshift(merged);
-  getStorage()?.setItem(storageKey(reflection.projectId), JSON.stringify(local.slice(0, 30)));
+  writeJsonStorage(storageKey(reflection.projectId), local.slice(0, 30));
 }
 
 export async function syncClassroomReflection(reflection: ClassroomReflection): Promise<ClassroomReflection | null> {
@@ -162,7 +142,7 @@ export async function syncClassroomReflection(reflection: ClassroomReflection): 
         ...local[index],
         remoteSyncState: error instanceof Error && /409|conflict|冲突/i.test(error.message) ? 'conflict' : 'offline',
       };
-      getStorage()?.setItem(storageKey(reflection.projectId), JSON.stringify(local.slice(0, 30)));
+      writeJsonStorage(storageKey(reflection.projectId), local.slice(0, 30));
     }
     return null;
   }

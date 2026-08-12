@@ -54,6 +54,21 @@ export function removeStorageValue(key: string): boolean {
   }
 }
 
+export function listStorageKeys(prefix = ''): string[] {
+  try {
+    const storage = browserStorage();
+    if (!storage) return [];
+    const keys: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key !== null && key.startsWith(prefix)) keys.push(key);
+    }
+    return keys;
+  } catch {
+    return [];
+  }
+}
+
 export function readJsonStorage<T>(key: string, fallback: T, guard?: JsonGuard<T>): T {
   const raw = readStorageValue(key);
   if (!raw) return fallback;

@@ -60,6 +60,14 @@ test('keeps working when browser storage is unavailable', () => {
   try {
     assert.deepEqual(readQualityConfig(), {});
     assert.doesNotThrow(() => writeQualityConfig({ minimumChoiceOptions: 4 }));
+    assert.equal(readReviewCache('blocked-task'), null);
+    assert.doesNotThrow(() => writeReviewCache('blocked-task', {
+      drafts: [],
+      taskMeta: { warnings: [], pageResults: [], mediaAssets: [] },
+      currentIndex: 0,
+      queue: 'risk',
+    }));
+    assert.doesNotThrow(() => clearReviewCache('blocked-task'));
   } finally {
     Object.defineProperty(globalThis, 'window', { configurable: true, value: original });
   }
