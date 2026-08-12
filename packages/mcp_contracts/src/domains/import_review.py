@@ -55,17 +55,17 @@ class ImportReviewDomain:
     def suggest_knowledge_points_for_task(self, task_id: str, question_ids: list[str] | None = None, max_suggestions: int = 3) -> dict[str, Any]:
         return self._call("suggest_knowledge_points_for_task", task_id, question_ids, max_suggestions)
 
-    def clean_review_task_latex(self, task_id: str, question_ids: list[str] | None = None, dry_run: bool = True, reason: str | None = None, expected_updated_at: str | None = None) -> dict[str, Any]:
-        return self._call("clean_review_task_latex", task_id, question_ids, dry_run, reason, expected_updated_at)
+    def clean_review_task_latex(self, task_id: str, question_ids: list[str] | None = None, dry_run: bool = True, reason: str | None = None, expected_updated_at: str | None = None, plan_token: str | None = None) -> dict[str, Any]:
+        return self._call("clean_review_task_latex", task_id, question_ids, dry_run, reason, expected_updated_at, plan_token)
 
-    def split_merged_options(self, task_id: str, question_ids: list[str] | None = None, dry_run: bool = True, reason: str | None = None, expected_updated_at: str | None = None) -> dict[str, Any]:
-        return self._call("split_merged_options", task_id, question_ids, dry_run, reason, expected_updated_at)
+    def split_merged_options(self, task_id: str, question_ids: list[str] | None = None, dry_run: bool = True, reason: str | None = None, expected_updated_at: str | None = None, plan_token: str | None = None) -> dict[str, Any]:
+        return self._call("split_merged_options", task_id, question_ids, dry_run, reason, expected_updated_at, plan_token)
 
-    def deduplicate_review_task_questions(self, task_id: str, dry_run: bool = True, reason: str | None = None, expected_updated_at: str | None = None) -> dict[str, Any]:
-        return self._call("deduplicate_review_task_questions", task_id, dry_run, reason, expected_updated_at)
+    def deduplicate_review_task_questions(self, task_id: str, dry_run: bool = True, reason: str | None = None, expected_updated_at: str | None = None, plan_token: str | None = None) -> dict[str, Any]:
+        return self._call("deduplicate_review_task_questions", task_id, dry_run, reason, expected_updated_at, plan_token)
 
-    def update_review_task_draft(self, task_id: str, updates: list[dict[str, Any]], dry_run: bool = True, reason: str | None = None, expected_updated_at: str | None = None) -> dict[str, Any]:
-        return self._call("update_review_task_draft", task_id, updates, dry_run, reason, expected_updated_at)
+    def update_review_task_draft(self, task_id: str, updates: list[dict[str, Any]], dry_run: bool = True, reason: str | None = None, expected_updated_at: str | None = None, plan_token: str | None = None) -> dict[str, Any]:
+        return self._call("update_review_task_draft", task_id, updates, dry_run, reason, expected_updated_at, plan_token)
 
     def submit_ai_generated_review(self, source_text: str, source: str = "Claude Code MCP", chat_context: str | None = None, session_id: str | None = None) -> dict[str, Any]:
         return self._call("submit_ai_generated_review", source_text, source, chat_context, session_id)

@@ -4966,10 +4966,11 @@ def _legacy_clean_review_task_latex(
     dry_run: bool = True,
     reason: str | None = None,
     expected_updated_at: str | None = None,
+    plan_token: str | None = None,
 ) -> dict[str, Any]:
     """清理当前校对草稿中的 Markdown 斜体公式。
 
-    默认预览，确认后 dry_run=false 才写入。若仍有 LaTeX 风险，调用方必须
+    默认预览，确认后携带 plan_token 且 dry_run=false 才写入。若仍有 LaTeX 风险，调用方必须
     回读完整题目，并用 update_review_task_draft 逐字段写回标准 LaTeX 格式。
     """
     full = get_review_task_full(task_id)
@@ -5000,39 +5001,31 @@ def _legacy_clean_review_task_latex(
             )
             total_replacements += replacements
 
-    if not dry_run and changed:
-        try:
-            _update_review_task_questions(
-                resolved_task_id,
-                cleaned_questions,
-                changed,
-                kind="latex_cleanup",
-                reason=reason,
-                expected_updated_at=expected_updated_at,
-            )
-        except ReviewTaskConflictError as exc:
-            return _tool_error(
-                "REVIEW_TASK_CONFLICT",
-                str(exc),
-                field="expected_updated_at",
-                task_id=exc.task_id,
-                expected_updated_at=exc.expected,
-                current_updated_at=exc.current,
-                next_tools=["get_review_task_full", "validate_review_task"],
-            )
-    remaining = None
-    if not dry_run and changed:
-        remaining = validate_review_task(resolved_task_id, question_ids=question_ids)
-    remaining_items = (remaining or {}).get("items", []) if isinstance(remaining, dict) else []
-    return {
+    base_updated_at = str(full.get("task", {}).get("updated_at") or "")
+    version_snapshot = {
+        "task_id": resolved_task_id,
+        "updated_at": base_updated_at,
+        "question_ids": sorted(wanted),
+        "reason": str(reason or "").strip(),
+        "items": changed,
+    }
+    response = {
         "ok": True,
         "task_id": resolved_task_id,
         "dry_run": dry_run,
         "changed_count": len(changed),
         "replacement_count": total_replacements,
         "items": changed,
-        "operation_plan": (
-            _operation_plan_payload(
+        "operation_plan": None,
+        "remaining_risks": [],
+        "manual_action_required": False,
+        "workflow": None,
+        "manual_format_guidance": None,
+        "message": "预览完成，未写入当前草稿。",
+    }
+    if dry_run:
+        if changed:
+            operation_plan = _persisted_operation_plan_payload(
                 action="review.latex_cleanup",
                 targets=[
                     {"type": "review_question", "id": str(item["question_id"])}
@@ -5040,46 +5033,61 @@ def _legacy_clean_review_task_latex(
                     if str(item.get("question_id") or "").strip()
                 ],
                 summary=f"清理审核任务 {resolved_task_id} 中 {len(changed)} 道题的 LaTeX 格式。",
-                warnings=["计划仅预览，不会写入审核库；确认机制将在 SAFE-202 接入。"],
-                version_snapshot={
-                    "task_id": resolved_task_id,
-                    "updated_at": full.get("task", {}).get("updated_at"),
-                    "items": changed,
-                },
+                warnings=["执行会写入当前审核草稿；预览后草稿变化时必须重新预览。"],
+                version_snapshot=version_snapshot,
                 reversible=False,
             )
-            if dry_run and changed
-            else None
-        ),
-        "remaining_risks": remaining_items,
-        "manual_action_required": bool(remaining_items),
-        "workflow": (remaining or {}).get("workflow") if isinstance(remaining, dict) else None,
-        "manual_format_guidance": (
-            {
-                "standard": [
-                    "行内公式统一使用 $...$。",
-                    "独立成行的块公式统一使用 $$...$$。",
-                    "每个开分隔符必须以同类型的闭分隔符结束，不混用 $ 与 $$。",
-                ],
-                "next_steps": [
-                    "用 get_review_task_full 读取 remaining_risks 对应题目的完整字段。",
-                    "用 update_review_task_draft 为 title、stem、options、answer 或 analysis 生成逐题补丁；先 dry_run=true 预览，获得明确修复要求时写回。",
-                    "再次调用 validate_review_task，只在相关风险已消除后报告完成。",
-                ],
-            }
-            if remaining_items
-            else None
-        ),
-        "message": (
-            "预览完成，未写入当前草稿。"
-            if dry_run
-            else (
-                "已完成自动清洗，但仍有风险需要人工处理。"
+            response["operation_plan"] = operation_plan
+            response["plan_token"] = operation_plan["operation_id"]
+            response["requires_confirmation"] = True
+        return response
+
+    def execute_cleanup() -> dict[str, Any]:
+        if changed:
+            try:
+                _update_review_task_questions(
+                    resolved_task_id,
+                    cleaned_questions,
+                    changed,
+                    kind="latex_cleanup",
+                    reason=reason,
+                    expected_updated_at=base_updated_at,
+                )
+            except ReviewTaskConflictError as exc:
+                raise OperationPlanVersionConflict(str(exc)) from exc
+        remaining = validate_review_task(resolved_task_id, question_ids=question_ids) if changed else None
+        remaining_items = (remaining or {}).get("items", []) if isinstance(remaining, dict) else []
+        result = {**response, "dry_run": False}
+        result.update({
+            "remaining_risks": remaining_items,
+            "manual_action_required": bool(remaining_items),
+            "workflow": (remaining or {}).get("workflow") if isinstance(remaining, dict) else None,
+            "manual_format_guidance": (
+                {
+                    "standard": [
+                        "行内公式统一使用 $...$。",
+                        "独立成行的块公式统一使用 $$...$$。",
+                        "每个开分隔符必须以同类型的闭分隔符结束，不混用 $ 与 $$。",
+                    ],
+                    "next_steps": [
+                        "用 get_review_task_full 读取 remaining_risks 对应题目的完整字段。",
+                        "用 update_review_task_draft 为 title、stem、options、answer 或 analysis 生成逐题补丁。",
+                        "再次调用 validate_review_task，只在相关风险已消除后报告完成。",
+                    ],
+                }
                 if remaining_items
-                else "已完成自动清洗，复核未发现剩余风险。"
-            )
-        ),
-    }
+                else None
+            ),
+            "message": "已完成自动清洗，但仍有风险需要人工处理。" if remaining_items else "已完成自动清洗，复核未发现剩余风险。",
+        })
+        return result
+
+    return _execute_persisted_operation(
+        plan_token,
+        action="review.latex_cleanup",
+        version_snapshot_reader=lambda: version_snapshot,
+        executor=execute_cleanup,
+    )
 
 
 _MERGED_OPTION_RE = re.compile(
@@ -5145,8 +5153,9 @@ def _legacy_split_merged_options(
     dry_run: bool = True,
     reason: str | None = None,
     expected_updated_at: str | None = None,
+    plan_token: str | None = None,
 ) -> dict[str, Any]:
-    """从原始识别文本中拆分被合并到一个选项里的 A/B/C/D 选项。默认只预览。"""
+    """从原始识别文本拆分合并选项；默认预览，执行必须携带 plan_token。"""
     full = get_review_task_full(task_id, question_ids=question_ids, include_knowledge=False)
     if not full.get("ok"):
         return full
@@ -5181,57 +5190,75 @@ def _legacy_split_merged_options(
             }
         )
 
-    if not dry_run and changed:
-        try:
-            _update_review_task_questions(
-                resolved_task_id,
-                updated_questions,
-                changed,
-                kind="split_merged_options",
-                reason=reason,
-                expected_updated_at=expected_updated_at,
-            )
-        except ReviewTaskConflictError as exc:
-            return _tool_error(
-                "REVIEW_TASK_CONFLICT",
-                str(exc),
-                field="expected_updated_at",
-                task_id=exc.task_id,
-                expected_updated_at=exc.expected,
-                current_updated_at=exc.current,
-                next_tools=["get_review_task_full", "validate_review_task"],
-            )
-    validation = None
-    if not dry_run and changed:
-        validation = validate_review_task(resolved_task_id, question_ids=question_ids)
-    return {
+    base_updated_at = str(full.get("task", {}).get("updated_at") or "")
+    version_snapshot = {
+        "task_id": resolved_task_id,
+        "updated_at": base_updated_at,
+        "question_ids": sorted(wanted),
+        "reason": str(reason or "").strip(),
+        "items": changed,
+    }
+    response = {
         "ok": True,
         "task_id": resolved_task_id,
         "dry_run": dry_run,
         "changed_count": len(changed),
         "items": changed,
-        "operation_plan": (
-            _operation_plan_payload(
+        "operation_plan": None,
+        "validation": None,
+        "remaining_risks": [],
+        "manual_action_required": False,
+        "workflow": None,
+        "message": "预览完成，未写入当前草稿。",
+    }
+    if dry_run:
+        if changed:
+            operation_plan = _persisted_operation_plan_payload(
                 action="review.split_merged_options",
                 targets=[{"type": "review_question", "id": str(item["question_id"])} for item in changed],
                 summary=f"拆分审核任务 {resolved_task_id} 中 {len(changed)} 道题的合并选项。",
-                warnings=["选项结构会被直接重写，请先核对原始识别文本。"],
-                version_snapshot={"task_id": resolved_task_id, "updated_at": full.get("task", {}).get("updated_at"), "items": changed},
+                warnings=["选项结构会被直接重写；预览后草稿变化时必须重新预览。"],
+                version_snapshot=version_snapshot,
                 reversible=False,
             )
-            if dry_run and changed
-            else None
-        ),
-        "validation": validation,
-        "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
-        "manual_action_required": bool((validation or {}).get("risk_count")) if isinstance(validation, dict) else False,
-        "workflow": (validation or {}).get("workflow") if isinstance(validation, dict) else None,
-        "message": "预览完成，未写入当前草稿。" if dry_run else (
-            "已拆分合并选项，但仍有风险需要继续处理。"
-            if isinstance(validation, dict) and validation.get("risk_count")
-            else "已拆分合并选项并通过复核。"
-        ),
-    }
+            response["operation_plan"] = operation_plan
+            response["plan_token"] = operation_plan["operation_id"]
+            response["requires_confirmation"] = True
+        return response
+
+    def execute_split() -> dict[str, Any]:
+        if changed:
+            try:
+                _update_review_task_questions(
+                    resolved_task_id,
+                    updated_questions,
+                    changed,
+                    kind="split_merged_options",
+                    reason=reason,
+                    expected_updated_at=base_updated_at,
+                )
+            except ReviewTaskConflictError as exc:
+                raise OperationPlanVersionConflict(str(exc)) from exc
+        validation = validate_review_task(resolved_task_id, question_ids=question_ids) if changed else None
+        result = {**response, "dry_run": False, "validation": validation}
+        result.update({
+            "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
+            "manual_action_required": bool((validation or {}).get("risk_count")) if isinstance(validation, dict) else False,
+            "workflow": (validation or {}).get("workflow") if isinstance(validation, dict) else None,
+            "message": (
+                "已拆分合并选项，但仍有风险需要继续处理。"
+                if isinstance(validation, dict) and validation.get("risk_count")
+                else "已拆分合并选项并通过复核。"
+            ),
+        })
+        return result
+
+    return _execute_persisted_operation(
+        plan_token,
+        action="review.split_merged_options",
+        version_snapshot_reader=lambda: version_snapshot,
+        executor=execute_split,
+    )
 
 
 def _legacy_deduplicate_review_task_questions(
@@ -5239,8 +5266,9 @@ def _legacy_deduplicate_review_task_questions(
     dry_run: bool = True,
     reason: str | None = None,
     expected_updated_at: str | None = None,
+    plan_token: str | None = None,
 ) -> dict[str, Any]:
-    """删除当前审核草稿中内容完全一致的重复题；默认只预览。
+    """删除当前审核草稿中内容完全一致的重复题；执行必须携带预览返回的 plan_token。
 
     仅在题型、题干、选项、答案、解析和来源都一致时才判为重复，图片占位符 ID
     的差异不会阻止识别。每组保留导入顺序最靠前的一题。
@@ -5275,28 +5303,14 @@ def _legacy_deduplicate_review_task_questions(
         if not isinstance(raw, dict)
         or str(raw.get("question_id") or raw.get("id") or raw.get("draft_id") or "").strip() not in removed_ids
     ]
-    if not dry_run and removed_ids:
-        try:
-            _update_review_task_questions(
-                resolved_task_id,
-                updated_questions,
-                items,
-                kind="deduplicate_review_questions",
-                reason=reason,
-                expected_updated_at=expected_updated_at,
-            )
-        except ReviewTaskConflictError as exc:
-            return _tool_error(
-                "REVIEW_TASK_CONFLICT",
-                str(exc),
-                field="expected_updated_at",
-                task_id=exc.task_id,
-                expected_updated_at=exc.expected,
-                current_updated_at=exc.current,
-                next_tools=["get_review_task_full", "deduplicate_review_task_questions", "validate_review_task"],
-            )
-    validation = validate_review_task(resolved_task_id) if not dry_run and removed_ids else None
-    return {
+    base_updated_at = str(full.get("task", {}).get("updated_at") or "")
+    version_snapshot = {
+        "task_id": resolved_task_id,
+        "updated_at": base_updated_at,
+        "reason": str(reason or "").strip(),
+        "items": items,
+    }
+    response = {
         "ok": True,
         "task_id": resolved_task_id,
         "dry_run": dry_run,
@@ -5305,8 +5319,14 @@ def _legacy_deduplicate_review_task_questions(
         "kept_count": len(kept_ids),
         "remaining_question_count": len(updated_questions),
         "items": items,
-        "operation_plan": (
-            _operation_plan_payload(
+        "operation_plan": None,
+        "validation": None,
+        "remaining_risks": [],
+        "message": "重复题预览完成，未写入当前草稿。",
+    }
+    if dry_run:
+        if removed_ids:
+            operation_plan = _persisted_operation_plan_payload(
                 action="review.deduplicate_questions",
                 targets=[
                     {"type": "review_question", "id": str(question_id), "label": "待删除重复题"}
@@ -5314,21 +5334,42 @@ def _legacy_deduplicate_review_task_questions(
                     for question_id in item["removed_question_ids"]
                 ],
                 summary=f"从审核任务 {resolved_task_id} 删除 {len(removed_ids)} 道完全重复的草稿题。",
-                warnings=["每个重复组仅保留导入顺序最靠前的题目。"],
-                version_snapshot={"task_id": resolved_task_id, "updated_at": full.get("task", {}).get("updated_at"), "items": items},
+                warnings=["每个重复组仅保留导入顺序最靠前的题目；预览后草稿变化时必须重新预览。"],
+                version_snapshot=version_snapshot,
                 reversible=False,
             )
-            if dry_run and removed_ids
-            else None
-        ),
-        "validation": validation,
-        "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
-        "message": (
-            "重复题预览完成，未写入当前草稿。"
-            if dry_run
-            else f"已删除 {len(removed_ids)} 道内容完全重复的审核草稿题，保留每组首题。"
-        ),
-    }
+            response["operation_plan"] = operation_plan
+            response["plan_token"] = operation_plan["operation_id"]
+            response["requires_confirmation"] = True
+        return response
+
+    def execute_deduplication() -> dict[str, Any]:
+        if removed_ids:
+            try:
+                _update_review_task_questions(
+                    resolved_task_id,
+                    updated_questions,
+                    items,
+                    kind="deduplicate_review_questions",
+                    reason=reason,
+                    expected_updated_at=base_updated_at,
+                )
+            except ReviewTaskConflictError as exc:
+                raise OperationPlanVersionConflict(str(exc)) from exc
+        validation = validate_review_task(resolved_task_id) if removed_ids else None
+        result = {**response, "dry_run": False, "validation": validation}
+        result.update({
+            "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
+            "message": f"已删除 {len(removed_ids)} 道内容完全重复的审核草稿题，保留每组首题。",
+        })
+        return result
+
+    return _execute_persisted_operation(
+        plan_token,
+        action="review.deduplicate_questions",
+        version_snapshot_reader=lambda: version_snapshot,
+        executor=execute_deduplication,
+    )
 
 
 def _legacy_update_review_task_draft(
@@ -5337,8 +5378,9 @@ def _legacy_update_review_task_draft(
     dry_run: bool = True,
     reason: str | None = None,
     expected_updated_at: str | None = None,
+    plan_token: str | None = None,
 ) -> dict[str, Any]:
-    """按题号直接更新当前校对草稿的字段。默认预览，不会生成新校对任务。"""
+    """按题号更新当前校对草稿；默认预览，执行必须携带 plan_token。"""
     if len(updates) > 100:
         return {"ok": False, "error": "一次最多修改 100 道草稿题。"}
     full = get_review_task_full(task_id)
@@ -5430,57 +5472,75 @@ def _legacy_update_review_task_draft(
         changed_count += int(changed)
         preview_items.append({"question_id": qid, "before": before, "after": after, "status": "changed" if changed else "unchanged"})
 
-    if not dry_run and changed_count:
-        try:
-            _update_review_task_questions(
-                resolved_task_id,
-                updated_questions,
-                [item for item in preview_items if item["status"] == "changed"],
-                kind="draft_update",
-                reason=reason,
-                expected_updated_at=expected_updated_at,
-            )
-        except ReviewTaskConflictError as exc:
-            return _tool_error(
-                "REVIEW_TASK_CONFLICT",
-                str(exc),
-                field="expected_updated_at",
-                task_id=exc.task_id,
-                expected_updated_at=exc.expected,
-                current_updated_at=exc.current,
-                next_tools=["get_review_task_full", "validate_review_task"],
-            )
-    validation = None
-    if not dry_run and changed_count:
-        validation = validate_review_task(resolved_task_id)
-    return {
+    changed_items = [item for item in preview_items if item["status"] == "changed"]
+    base_updated_at = str(full.get("task", {}).get("updated_at") or "")
+    version_snapshot = {
+        "task_id": resolved_task_id,
+        "updated_at": base_updated_at,
+        "reason": str(reason or "").strip(),
+        "items": preview_items,
+    }
+    response = {
         "ok": True,
         "task_id": resolved_task_id,
         "dry_run": dry_run,
         "changed_count": changed_count,
         "items": preview_items,
-        "operation_plan": (
-            _operation_plan_payload(
+        "operation_plan": None,
+        "validation": None,
+        "remaining_risks": [],
+        "manual_action_required": False,
+        "workflow": None,
+        "message": "预览完成，未写入当前草稿。",
+    }
+    if dry_run:
+        if changed_count > 0:
+            operation_plan = _persisted_operation_plan_payload(
                 action="review.update_draft",
                 targets=_question_operation_targets(preview_items),
                 summary=f"更新审核任务 {resolved_task_id} 中 {changed_count} 道草稿题。",
-                warnings=["计划仅描述字段补丁；执行前应核对题干、选项、答案与解析。"],
-                version_snapshot={"task_id": resolved_task_id, "updated_at": full.get("task", {}).get("updated_at"), "items": preview_items},
+                warnings=["执行前应核对题干、选项、答案与解析；预览后草稿变化时必须重新预览。"],
+                version_snapshot=version_snapshot,
                 reversible=False,
             )
-            if dry_run and changed_count > 0
-            else None
-        ),
-        "validation": validation,
-        "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
-        "manual_action_required": bool((validation or {}).get("risk_count")) if isinstance(validation, dict) else False,
-        "workflow": (validation or {}).get("workflow") if isinstance(validation, dict) else None,
-        "message": "预览完成，未写入当前草稿。" if dry_run else (
-            "已更新当前校对草稿，但仍有风险需要继续处理。"
-            if isinstance(validation, dict) and validation.get("risk_count")
-            else "已更新当前校对草稿并通过复核。"
-        ),
-    }
+            response["operation_plan"] = operation_plan
+            response["plan_token"] = operation_plan["operation_id"]
+            response["requires_confirmation"] = True
+        return response
+
+    def execute_update() -> dict[str, Any]:
+        if changed_count:
+            try:
+                _update_review_task_questions(
+                    resolved_task_id,
+                    updated_questions,
+                    changed_items,
+                    kind="draft_update",
+                    reason=reason,
+                    expected_updated_at=base_updated_at,
+                )
+            except ReviewTaskConflictError as exc:
+                raise OperationPlanVersionConflict(str(exc)) from exc
+        validation = validate_review_task(resolved_task_id) if changed_count else None
+        result = {**response, "dry_run": False, "validation": validation}
+        result.update({
+            "remaining_risks": (validation or {}).get("items", []) if isinstance(validation, dict) else [],
+            "manual_action_required": bool((validation or {}).get("risk_count")) if isinstance(validation, dict) else False,
+            "workflow": (validation or {}).get("workflow") if isinstance(validation, dict) else None,
+            "message": (
+                "已更新当前校对草稿，但仍有风险需要继续处理。"
+                if isinstance(validation, dict) and validation.get("risk_count")
+                else "已更新当前校对草稿并通过复核。"
+            ),
+        })
+        return result
+
+    return _execute_persisted_operation(
+        plan_token,
+        action="review.update_draft",
+        version_snapshot_reader=lambda: version_snapshot,
+        executor=execute_update,
+    )
 
 
 def _legacy_list_question_tags(
@@ -5749,9 +5809,13 @@ def _legacy_batch_replace_question_tags(
                 items.append({"question_id": question_id, "status": "missing"})
                 continue
 
+            raw_before = _raw_tags(row["tags_json"])
             before = _parse_tags(row["tags_json"])
             after = update_map[question_id]
-            status = "unchanged" if before == after else "changed"
+            # Compare the stored representation as well as its normalized
+            # meaning. Otherwise duplicate/whitespace-only corruption is
+            # permanently reported by health checks but can never be fixed.
+            status = "unchanged" if raw_before == after else "changed"
             if status == "changed":
                 changed += 1
             items.append(
@@ -5761,9 +5825,9 @@ def _legacy_batch_replace_question_tags(
                     "question_type": row["question_type"],
                     "difficulty": row["difficulty"],
                     "knowledge_point": row["module"],
-                    "before_tags": before,
+                    "before_tags": raw_before,
                     "after_tags": after,
-                    "before_value": before,
+                    "before_value": raw_before,
                     "after_value": after,
                     "status": status,
                 }

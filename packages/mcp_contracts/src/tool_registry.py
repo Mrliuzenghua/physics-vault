@@ -216,10 +216,10 @@ _WRITE_POLICIES = {
     # Review workspace
     "import_word_folder_to_review": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.LIMITED, ToolConfirmation.DRY_RUN),
     "delete_review_tasks": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.LIMITED, ToolConfirmation.EXPLICIT),
-    "clean_review_task_latex": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.DRY_RUN),
-    "split_merged_options": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.DRY_RUN),
-    "deduplicate_review_task_questions": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.DRY_RUN),
-    "update_review_task_draft": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.DRY_RUN),
+    "clean_review_task_latex": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.PLAN_TOKEN),
+    "split_merged_options": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.PLAN_TOKEN),
+    "deduplicate_review_task_questions": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.PLAN_TOKEN),
+    "update_review_task_draft": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.VERSIONED, ToolConfirmation.PLAN_TOKEN),
     "submit_ai_generated_review": _write_policy(ToolRisk.HIGH, ToolImpactScope.REVIEW_WORKSPACE, ToolReversibility.LIMITED, ToolConfirmation.DIRECT),
     # Teaching projects and classroom sessions
     "duplicate_teaching_project": _write_policy(ToolRisk.MEDIUM, ToolImpactScope.TEACHING_PROJECT, ToolReversibility.VERSIONED, ToolConfirmation.DIRECT),

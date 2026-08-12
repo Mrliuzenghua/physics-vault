@@ -55,3 +55,30 @@ def test_import_review_domain_preserves_public_arguments_and_result() -> None:
 
     assert result == {"ok": True, "items": []}
     assert calls == [("validate_review_task", ("task-1", ["question-1"], False, False, True))]
+
+
+def test_import_review_domain_forwards_plan_tokens_for_draft_repairs() -> None:
+    calls: list[tuple[object, ...]] = []
+
+    def handler(*args):
+        calls.append(args)
+        return {"ok": True, "idempotent": False}
+
+    result = ImportReviewDomain({"update_review_task_draft": handler}).update_review_task_draft(
+        "task-1",
+        [{"question_id": "question-1", "answer": "A"}],
+        dry_run=False,
+        reason="fix answer",
+        expected_updated_at="version-1",
+        plan_token="OP-plan",
+    )
+
+    assert result == {"ok": True, "idempotent": False}
+    assert calls == [(
+        "task-1",
+        [{"question_id": "question-1", "answer": "A"}],
+        False,
+        "fix answer",
+        "version-1",
+        "OP-plan",
+    )]

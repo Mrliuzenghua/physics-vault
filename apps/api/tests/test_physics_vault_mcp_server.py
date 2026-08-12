@@ -1145,7 +1145,7 @@ def test_tag_normalization_is_dry_run_first_and_audited(tmp_path, monkeypatch):
 
     batch = module.get_change_batch(applied["audit_batch_id"])
     assert batch["ok"] is True
-    assert batch["items"][0]["before_value"] == ["mechanics", "basic"]
+    assert batch["items"][0]["before_value"] == ["mechanics", "basic", "mechanics"]
 
     rollback_preview = module.rollback_change_batch(applied["audit_batch_id"])
     assert rollback_preview["dry_run"] is True
@@ -1340,13 +1340,40 @@ def test_review_tools_use_review_db_with_legacy_task_migration(tmp_path, monkeyp
     assert full["ok"] is True
     assert full["questions"][0]["stem"] == "A force acts on a cart."
 
-    applied = module.update_review_task_draft(
+    updates = [{"question_id": "draft-001", "stem": "A force acts on a cart with mass m."}]
+    preview = module.update_review_task_draft(
         "task-review-001",
-        [{"question_id": "draft-001", "stem": "A force acts on a cart with mass m."}],
+        updates,
+        reason="fix draft wording",
+    )
+    assert preview["requires_confirmation"] is True
+
+    missing = module.update_review_task_draft(
+        "task-review-001",
+        updates,
         dry_run=False,
         reason="fix draft wording",
     )
+    assert missing["error_info"]["code"] == "PLAN_TOKEN_REQUIRED"
+
+    applied = module.update_review_task_draft(
+        "task-review-001",
+        updates,
+        dry_run=False,
+        reason="fix draft wording",
+        plan_token=preview["plan_token"],
+    )
     assert applied["dry_run"] is False
+    assert applied["idempotent"] is False
+
+    replay = module.update_review_task_draft(
+        "task-review-001",
+        updates,
+        dry_run=False,
+        reason="fix draft wording",
+        plan_token=preview["plan_token"],
+    )
+    assert replay["idempotent"] is True
 
     with sqlite3.connect(review_db) as conn:
         saved = conn.execute("SELECT result_json FROM import_pipeline_tasks WHERE task_id='task-review-001'").fetchone()[0]
@@ -1539,6 +1566,54 @@ def test_latex_risk_workflow_guides_mcp_to_manually_standardize_draft(tmp_path, 
     assert "行内公式用 $...$" in action["message"]
 
 
+def test_latex_cleanup_requires_plan_token_and_replays_once(tmp_path, monkeypatch):
+    module = _load_mcp_server()
+    _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+    payload = {
+        "questions": [
+            {
+                "question_id": "draft-latex",
+                "question_type": "calculation",
+                "title": "公式清理",
+                "stem": "由 *F* = *ma* 可知加速度。",
+                "answer": "见解析",
+            }
+        ]
+    }
+    with sqlite3.connect(review_db) as conn:
+        conn.execute(
+            "UPDATE import_pipeline_tasks SET result_json = ? WHERE task_id = 'task-review-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+    preview = module.clean_review_task_latex("task-review-001", reason="统一公式格式")
+    assert preview["changed_count"] == 1
+    assert preview["requires_confirmation"] is True
+
+    missing = module.clean_review_task_latex(
+        "task-review-001", dry_run=False, reason="统一公式格式"
+    )
+    assert missing["error_info"]["code"] == "PLAN_TOKEN_REQUIRED"
+
+    applied = module.clean_review_task_latex(
+        "task-review-001",
+        dry_run=False,
+        reason="统一公式格式",
+        plan_token=preview["plan_token"],
+    )
+    assert applied["idempotent"] is False
+    saved = module.get_review_task_full("task-review-001", include_knowledge=False)
+    assert saved["questions"][0]["stem"] == "由 $F$ = $ma$ 可知加速度。"
+
+    replay = module.clean_review_task_latex(
+        "task-review-001",
+        dry_run=False,
+        reason="统一公式格式",
+        plan_token=preview["plan_token"],
+    )
+    assert replay["idempotent"] is True
+
+
 def test_deduplicate_review_task_questions_removes_only_exact_content_duplicates(tmp_path, monkeypatch):
     module = _load_mcp_server()
     _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
@@ -1579,32 +1654,45 @@ def test_deduplicate_review_task_questions_removes_only_exact_content_duplicates
             (json.dumps(payload, ensure_ascii=False),),
         )
 
-    preview = module.deduplicate_review_task_questions("task-review-001")
+    preview = module.deduplicate_review_task_questions("task-review-001", reason="删除重复导入题")
     assert preview["dry_run"] is True
     assert preview["duplicate_group_count"] == 1
     assert preview["removed_count"] == 1
     assert preview["items"] == [{"kept_question_id": "draft-keep", "removed_question_ids": ["draft-remove"], "count": 2}]
 
-    applied = module.deduplicate_review_task_questions("task-review-001", dry_run=False, reason="删除重复导入题")
+    applied = module.deduplicate_review_task_questions(
+        "task-review-001",
+        dry_run=False,
+        reason="删除重复导入题",
+        plan_token=preview["plan_token"],
+    )
     assert applied["remaining_question_count"] == 2
     saved = module.get_review_task_full("task-review-001", include_knowledge=False)
     assert [item["question_id"] for item in saved["questions"]] == ["draft-keep", "draft-distinct"]
 
 
-def test_review_draft_write_rejects_stale_updated_at(tmp_path, monkeypatch):
+def test_review_draft_write_rejects_changes_after_preview(tmp_path, monkeypatch):
     module = _load_mcp_server()
-    _standard_db, _review_db = _configure_paths(module, tmp_path, monkeypatch)
+    _standard_db, review_db = _configure_paths(module, tmp_path, monkeypatch)
+
+    updates = [{"question_id": "draft-001", "source": "new source"}]
+    preview = module.update_review_task_draft("task-review-001", updates, reason="update source")
+    with sqlite3.connect(review_db) as conn:
+        conn.execute(
+            "UPDATE import_pipeline_tasks SET updated_at = ? WHERE task_id = 'task-review-001'",
+            ("changed-after-preview",),
+        )
 
     result = module.update_review_task_draft(
         "task-review-001",
-        [{"question_id": "draft-001", "source": "new source"}],
+        updates,
         dry_run=False,
-        expected_updated_at="stale-version",
+        reason="update source",
+        plan_token=preview["plan_token"],
     )
 
     assert result["ok"] is False
-    assert result["error_info"]["code"] == "REVIEW_TASK_CONFLICT"
-    assert result["next_tools"] == ["get_review_task_full", "validate_review_task"]
+    assert result["error_info"]["code"] == "OPERATION_PLAN_VERSION_CONFLICT"
 
 
 def test_split_merged_options_uses_raw_text_and_writes_back(tmp_path, monkeypatch):
@@ -1628,12 +1716,17 @@ def test_split_merged_options_uses_raw_text_and_writes_back(tmp_path, monkeypatc
             (json.dumps(payload, ensure_ascii=False),),
         )
 
-    preview = module.split_merged_options("task-review-001")
+    preview = module.split_merged_options("task-review-001", reason="修复 OCR 合并选项")
     assert preview["dry_run"] is True
     assert preview["changed_count"] == 1
     assert [item["label"] for item in preview["items"][0]["options"]] == ["A", "B", "C", "D"]
 
-    applied = module.split_merged_options("task-review-001", dry_run=False, reason="修复 OCR 合并选项")
+    applied = module.split_merged_options(
+        "task-review-001",
+        dry_run=False,
+        reason="修复 OCR 合并选项",
+        plan_token=preview["plan_token"],
+    )
     assert applied["changed_count"] == 1
     assert applied["validation"]["ok"] is True
     assert applied["manual_action_required"] is True

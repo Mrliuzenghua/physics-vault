@@ -57,6 +57,10 @@ def test_discovery_filters_by_domain_risk_and_write_capability() -> None:
     assert registry.get("apply_composition_workbench_plan").impact_scope is ToolImpactScope.WORKBENCH_DRAFT
     assert registry.get("restore_saved_handout_version").reversibility is ToolReversibility.VERSIONED
     assert registry.get("publish_teaching_artifact").confirmation is ToolConfirmation.PLAN_TOKEN
+    assert registry.get("clean_review_task_latex").confirmation is ToolConfirmation.PLAN_TOKEN
+    assert registry.get("split_merged_options").confirmation is ToolConfirmation.PLAN_TOKEN
+    assert registry.get("deduplicate_review_task_questions").confirmation is ToolConfirmation.PLAN_TOKEN
+    assert registry.get("update_review_task_draft").confirmation is ToolConfirmation.PLAN_TOKEN
     assert high_risk_writes
     assert all(spec.risk is ToolRisk.HIGH and not spec.read_only for spec in high_risk_writes)
 
