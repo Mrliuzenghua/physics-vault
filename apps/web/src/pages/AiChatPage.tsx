@@ -10,8 +10,14 @@ import { fetchAgentConfig, streamQuestionPickerAgent } from '../services/aiApi';
 import { submitAiGeneratedReview } from '../services/reviewApi';
 import LatexRenderer from '../components/render/LatexRenderer';
 import { useBasket } from '../hooks/useBasket';
-import { AI_CONTEXT_CACHE_STORAGE_KEY, readAiContextCache } from '../utils/aiContextCache';
+import { readAiContextCache, writeAiContextCache } from '../utils/aiContextCache';
 import { useComposeWorkbenchStore } from '../stores/useComposeWorkbenchStore';
+import {
+  readJsonStorage,
+  readStorageValue,
+  writeJsonStorage,
+  writeStorageValue,
+} from '../services/safeStorage';
 import {
   applyComposeCommandsToWorkbench,
   describeComposeCommand,
@@ -76,7 +82,6 @@ const ACTIVE_CONVERSATION_STORAGE_KEY = 'physics_vault.agent_chat.v4.active';
 const OLD_CHAT_MESSAGES_STORAGE_KEY = 'physics_vault.agent_chat.v2.messages';
 const OLD_CHAT_TURNS_STORAGE_KEY = 'physics_vault.agent_chat.v2.turns';
 const OLD_AGENT_SESSION_STORAGE_KEY = 'physics_vault.agent_chat.v2.session_id';
-const CONTEXT_CACHE_STORAGE_KEY = AI_CONTEXT_CACHE_STORAGE_KEY;
 const CONVERSATION_COUNT = 3;
 const REVIEW_CACHE_PREFIX = 'physics_vault_review_cache.';
 const LESSON_PACKAGE_KEY = 'physics-vault.current-lesson-package';
@@ -90,7 +95,7 @@ interface LessonPackageSnapshot {
 
 function readLessonPackageSnapshot(): LessonPackageSnapshot {
   try {
-    const pkg = JSON.parse(window.localStorage.getItem(LESSON_PACKAGE_KEY) || 'null');
+    const pkg = readJsonStorage<Record<string, unknown> | null>(LESSON_PACKAGE_KEY, null);
     return {
       nodeCount: Array.isArray(pkg?.nodes) ? pkg.nodes.length : 0,
       questionCount: Array.isArray(pkg?.questions) ? pkg.questions.length : 0,
@@ -444,7 +449,7 @@ function createConversation(index: number, seed?: Partial<AgentConversation>): A
 
 function readStoredConversations(): AgentConversation[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem(CONVERSATIONS_STORAGE_KEY) || 'null');
+    const parsed = readJsonStorage<unknown>(CONVERSATIONS_STORAGE_KEY, null);
     if (Array.isArray(parsed) && parsed.length > 0) {
       return Array.from({ length: CONVERSATION_COUNT }, (_, index) =>
         createConversation(index, parsed[index]),
@@ -474,7 +479,7 @@ function readStoredConversations(): AgentConversation[] {
 
 function readLegacyMessages(): AiChatMessage[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem(OLD_CHAT_MESSAGES_STORAGE_KEY) || 'null');
+    const parsed = readJsonStorage<unknown>(OLD_CHAT_MESSAGES_STORAGE_KEY, null);
     if (!Array.isArray(parsed) || parsed.length === 0) return DEFAULT_MESSAGES;
     return parsed.filter(
       (item) =>
@@ -489,7 +494,7 @@ function readLegacyMessages(): AiChatMessage[] {
 
 function readLegacyTurns(): AgentConversationTurn[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem(OLD_CHAT_TURNS_STORAGE_KEY) || '[]');
+    const parsed = readJsonStorage<unknown>(OLD_CHAT_TURNS_STORAGE_KEY, []);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
@@ -498,7 +503,7 @@ function readLegacyTurns(): AgentConversationTurn[] {
 
 function readLegacySession(): AgentSessionState {
   try {
-    const stored = localStorage.getItem(OLD_AGENT_SESSION_STORAGE_KEY);
+    const stored = readStorageValue(OLD_AGENT_SESSION_STORAGE_KEY);
     if (stored) return { id: stored, shouldResume: true };
   } catch {
     // A fresh session still works if storage is unavailable.
@@ -589,7 +594,7 @@ function buildBrowsePageDetails(search: string, basketCount: number): string[] {
 function buildLessonPackageDetails(basketCount: number): string[] {
   const details = [`当前题篮数量：${basketCount} 道。`];
   try {
-    const pkg = JSON.parse(localStorage.getItem(LESSON_PACKAGE_KEY) || 'null');
+    const pkg = readJsonStorage<Record<string, unknown> | null>(LESSON_PACKAGE_KEY, null);
     if (!pkg || typeof pkg !== 'object') {
       details.push('当前没有读到本地教学包缓存。');
       return details;
@@ -609,7 +614,7 @@ function buildLessonPackageDetails(basketCount: number): string[] {
 
 function readReviewPageCache(taskId: string): string[] | null {
   try {
-    const parsed = JSON.parse(localStorage.getItem(`${REVIEW_CACHE_PREFIX}${taskId}`) || 'null');
+    const parsed = readJsonStorage<Record<string, unknown> | null>(`${REVIEW_CACHE_PREFIX}${taskId}`, null);
     if (!parsed || parsed.taskId !== taskId || !Array.isArray(parsed.drafts)) return null;
     const drafts = parsed.drafts as Array<Record<string, unknown>>;
     const currentIndex = Number(parsed.currentIndex || 0);
@@ -871,7 +876,7 @@ export default function AiChatPage() {
   const [conversations, setConversations] = useState<AgentConversation[]>(() => readStoredConversations());
   const [activeConversationId, setActiveConversationId] = useState(() => {
     try {
-      return localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) || '';
+      return readStorageValue(ACTIVE_CONVERSATION_STORAGE_KEY) || '';
     } catch {
       return '';
     }
@@ -931,12 +936,12 @@ export default function AiChatPage() {
       messages: conversation.messages.slice(-50),
       turns: conversation.turns.slice(0, 24),
     }));
-    localStorage.setItem(CONVERSATIONS_STORAGE_KEY, JSON.stringify(serializable));
+    writeJsonStorage(CONVERSATIONS_STORAGE_KEY, serializable);
   }, [conversations]);
 
   useEffect(() => {
     if (activeConversationId) {
-      localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeConversationId);
+      writeStorageValue(ACTIVE_CONVERSATION_STORAGE_KEY, activeConversationId);
     }
   }, [activeConversationId]);
 
@@ -959,7 +964,7 @@ export default function AiChatPage() {
   }, [location.pathname]);
 
   useEffect(() => {
-    localStorage.setItem(CONTEXT_CACHE_STORAGE_KEY, JSON.stringify(contextCache.slice(0, 30)));
+    writeAiContextCache(contextCache);
   }, [contextCache]);
 
   useEffect(() => {
