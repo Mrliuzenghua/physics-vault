@@ -17,6 +17,7 @@ from physics_vault_api.repositories.question_search import (
     QuestionDatabaseUnavailableError,
     QuestionSearchRepository,
 )
+from physics_vault_api.services.question_search import QuestionSearchService, _extract_source_filters
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +69,26 @@ def test_search_browse_returns_all_items() -> None:
     assert data["search_mode"] == "browse"
 
 
+def test_search_browse_with_keyword_does_not_return_the_unfiltered_catalog() -> None:
+    """Global-search URLs without an explicit mode must still apply the query."""
+    client = _client()
+    response = client.get(
+        "/search/questions",
+        params={"search_mode": "browse", "query": "牛顿"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert "牛顿" in (data["items"][0]["title"] or "")
+
+
+def test_source_like_query_is_split_into_exact_filters_and_remaining_keywords() -> None:
+    assert _extract_source_filters("广东高考 电场") == ("广东", "高考", "电场")
+    assert _extract_source_filters("广东高考") == ("广东", "高考", None)
+    assert _extract_source_filters("深一模") == (None, None, "深圳 第一次调研")
+
+
 def test_search_browse_item_structure() -> None:
     """Each item in a browse response must contain all required fields."""
     client = _client()
@@ -105,6 +126,22 @@ def test_search_browse_item_structure() -> None:
     }
     for field in required_fields:
         assert field in item, f"Field '{field}' missing from QuestionItem"
+
+
+def test_question_item_prefers_curated_stored_tags() -> None:
+    service = QuestionSearchService(repository=QuestionSearchRepository())
+
+    tags = service._build_tags(
+        {
+            "module": "力学",
+            "topic2": "运动学",
+            "topic3": "匀变速直线运动",
+            "difficulty": 2,
+            "tags_json": '["数量级估算", "待人工复核", "数量级估算"]',
+        }
+    )
+
+    assert tags == ["数量级估算", "待人工复核"]
 
 
 # ---------------------------------------------------------------------------

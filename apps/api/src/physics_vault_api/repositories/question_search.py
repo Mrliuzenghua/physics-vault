@@ -480,9 +480,14 @@ class QuestionSearchRepository:
         offset: int,
         _force_like: bool = False,
     ) -> tuple[list[dict[str, Any]], int]:
-        apply_keyword = search_mode == "strict" and bool(query)
-        # Question IDs are catalog addresses rather than natural-language content.
-        # They are absent from the FTS document, so use the metadata fallback.
+        # A keyword must never be silently ignored just because the client
+        # arrived on the browse tab (for example from the global search box).
+        # Hybrid and similar are resolved by the service before reaching here;
+        # strict still retains the same FTS-backed ranking semantics.
+        apply_keyword = search_mode in {"browse", "strict"} and bool(query)
+        # Question IDs are catalog addresses rather than natural-language
+        # content. They are not part of the FTS document, so route ID-shaped
+        # queries through the metadata fallback instead of returning no rows.
         use_fts = apply_keyword and not _force_like and not _looks_like_question_id(query) and self._fts_available()
         fts_score_sql = (
             ", -bm25(question_search_fts, 0.0, 8.0, 4.0, 1.0, 1.0, 6.0, 0.5) AS search_score"
@@ -595,16 +600,40 @@ class QuestionSearchRepository:
             where.append("question_search_fts MATCH ?")
             params.append(_build_fts_query(query))
         elif apply_keyword and query:
-            where.append(
-                """(
-                    q.question_id LIKE '%' || ? || '%'
-                    OR q.canonical_title LIKE '%' || ? || '%'
-                    OR qti.stem_text LIKE '%' || ? || '%'
-                    OR qti.answer_text LIKE '%' || ? || '%'
-                    OR qti.analysis_text LIKE '%' || ? || '%'
-                )"""
-            )
-            params.extend([query, query, query, query, query])
+            # FTS5's default tokenizer cannot reliably segment compact Chinese
+            # source names.  For its fallback, require every entered term but
+            # let the terms occur anywhere across the searchable metadata.
+            # This makes aliases expanded to e.g. “深圳 第一次调研” work even
+            # when the original source contains intervening words.
+            for term in _keyword_terms(query):
+                where.append(
+                    """(
+                        q.question_id LIKE '%' || ? || '%'
+                        OR q.canonical_title LIKE '%' || ? || '%'
+                        OR qti.stem_text LIKE '%' || ? || '%'
+                        OR qti.answer_text LIKE '%' || ? || '%'
+                        OR qti.analysis_text LIKE '%' || ? || '%'
+                        OR qti.tags_json LIKE '%' || ? || '%'
+                        OR q.source LIKE '%' || ? || '%'
+                        OR qti.source_text LIKE '%' || ? || '%'
+                        OR qs.source_label LIKE '%' || ? || '%'
+                        OR p.paper_name LIKE '%' || ? || '%'
+                        OR q.module LIKE '%' || ? || '%'
+                        OR q.topic2 LIKE '%' || ? || '%'
+                        OR q.topic3 LIKE '%' || ? || '%'
+                        OR EXISTS (
+                            SELECT 1
+                            FROM question_knowledge_points_view kpv
+                            WHERE kpv.question_id = q.question_id
+                              AND (
+                                  kpv.topic1_name LIKE '%' || ? || '%'
+                                  OR kpv.topic2_name LIKE '%' || ? || '%'
+                                  OR kpv.topic3_name LIKE '%' || ? || '%'
+                              )
+                        )
+                    )"""
+                )
+                params.extend([term] * 16)
 
         sql = base_sql
         if where:
@@ -617,7 +646,7 @@ class QuestionSearchRepository:
         # browse requests only filter columns on ``questions``.  The row query
         # below is deliberately unchanged, so returned data keeps the same
         # source and paper resolution rules.
-        paper_filter_active = any(value is not None for value in (year, region, exam_type))
+        paper_filter_active = any(value is not None for value in (year, region, exam_type)) or (apply_keyword and not use_fts)
         text_index_needed_for_count = (
             image_count_min > 0 or (apply_keyword and not use_fts)
         )
@@ -733,6 +762,7 @@ class QuestionSearchRepository:
                 qti.figures_json,
                 qti.image_asset_ids_json,
                 qti.image_filenames_json,
+                qti.tags_json,
                 qti.source_text,
                 qs.source_label,
                 COALESCE(qti.image_count, 0) AS image_count,
@@ -1038,3 +1068,8 @@ def _looks_like_question_id(query: str | None) -> bool:
             or cleaned.lower().startswith("batch_")
         )
     )
+
+
+def _keyword_terms(query: str) -> list[str]:
+    """Return the terms that must each be present in LIKE fallback search."""
+    return [term for term in query.split() if term]

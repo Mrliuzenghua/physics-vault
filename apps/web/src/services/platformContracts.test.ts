@@ -106,7 +106,7 @@ test('question client preserves search normalization and excludes media fields f
   const requests: Array<{ url: string; body?: string }> = [];
   globalThis.fetch = async (input, init) => {
     requests.push({ url: String(input), body: typeof init?.body === 'string' ? init.body : undefined });
-    if (String(input).startsWith('/search/questions')) {
+    if (String(input).startsWith('/api/search/questions')) {
       return new Response(JSON.stringify([{ question_id: 'question-1', title: '弹簧题' }]), { status: 200 });
     }
     return new Response(JSON.stringify({ question_id: 'question/1', title: '已更新', figures: [] }), { status: 200 });
@@ -115,7 +115,7 @@ test('question client preserves search normalization and excludes media fields f
   try {
     const search = await searchQuestions({ query: '弹簧', limit: 5, offset: 0, search_mode: 'browse' });
     assert.equal(search.items[0]?.title, '弹簧题');
-    assert.match(requests[0]?.url || '', /^\/search\/questions\?/);
+    assert.match(requests[0]?.url || '', /^\/api\/search\/questions\?/);
     assert.match(requests[0]?.url || '', /include_facets=false/);
 
     await updateQuestion('question/1', {
@@ -123,7 +123,7 @@ test('question client preserves search normalization and excludes media fields f
       figures: [{ fig_uuid: 'asset-1', local_path: 'data/gallery/asset-1.png' }],
       image_asset_ids: ['asset-1'],
     });
-    assert.equal(requests[1]?.url, '/questions/question%2F1');
+    assert.equal(requests[1]?.url, '/api/questions/question%2F1');
     assert.deepEqual(JSON.parse(requests[1]?.body || '{}'), { title: '已更新' });
   } finally {
     globalThis.fetch = originalFetch;

@@ -46,7 +46,7 @@ export default function TopToolbar({
   const handleSearch = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== 'Enter') return;
     const query = (event.target as HTMLInputElement).value.trim();
-    if (query) navigate(`/browse?query=${encodeURIComponent(query)}`);
+    if (query) navigate(`/browse?query=${encodeURIComponent(query)}&search_mode=hybrid`);
   };
 
   return (

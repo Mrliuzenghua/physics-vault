@@ -51,7 +51,7 @@ export async function searchQuestions(filters: SearchFilters): Promise<SearchRes
   // BrowsePage does not render the full facet payload. Avoid regenerating and
   // transferring it for every page of results.
   params.set('include_facets', 'false');
-  const result = await request<SearchResponse | Question[]>(`/search/questions?${params}`);
+  const result = await request<SearchResponse | Question[]>(`/api/search/questions?${params}`);
   if (Array.isArray(result)) {
     return {
       items: result.map(normalizeQuestion),
@@ -69,11 +69,11 @@ export async function searchQuestions(filters: SearchFilters): Promise<SearchRes
 }
 
 export async function fetchFacets(): Promise<FilterFacets> {
-  return request('/filters/facets');
+  return request('/api/filters/facets');
 }
 
 export async function fetchQuestion(id: string): Promise<Question> {
-  const result = await request<Question | Record<string, unknown>>(`/questions/${encodeURIComponent(id)}`);
+  const result = await request<Question | Record<string, unknown>>(`/api/questions/${encodeURIComponent(id)}`);
   return normalizeQuestion(result);
 }
 
@@ -114,7 +114,7 @@ export async function updateQuestion(id: string, data: Partial<Question>): Promi
   delete contentData.stem_text;
   delete contentData.canonical_title;
 
-  const result = await request<Question | Record<string, unknown>>(`/questions/${encodeURIComponent(id)}`, {
+  const result = await request<Question | Record<string, unknown>>(`/api/questions/${encodeURIComponent(id)}`, {
     method: 'PUT',
     body: JSON.stringify(contentData),
   });
@@ -130,14 +130,14 @@ export async function updateQuestion(id: string, data: Partial<Question>): Promi
 }
 
 export async function fetchQuestionVersions(questionId: string): Promise<QuestionVersionSummary[]> {
-  return request(`/questions/${encodeURIComponent(questionId)}/versions`);
+  return request(`/api/questions/${encodeURIComponent(questionId)}/versions`);
 }
 
 export async function fetchQuestionVersionDetail(
   questionId: string,
   versionId: string,
 ): Promise<QuestionVersionDetail> {
-  return request(`/questions/${encodeURIComponent(questionId)}/versions/${encodeURIComponent(versionId)}`);
+  return request(`/api/questions/${encodeURIComponent(questionId)}/versions/${encodeURIComponent(versionId)}`);
 }
 
 export async function rollbackQuestionVersion(
@@ -145,32 +145,32 @@ export async function rollbackQuestionVersion(
   versionId: string,
 ): Promise<RollbackQuestionVersionResponse> {
   return request(
-    `/questions/${encodeURIComponent(questionId)}/versions/${encodeURIComponent(versionId)}/rollback`,
+    `/api/questions/${encodeURIComponent(questionId)}/versions/${encodeURIComponent(versionId)}/rollback`,
     { method: 'POST', body: JSON.stringify({ modified_by: 'teacher' }) },
   );
 }
 
 export async function fetchQuestionKnowledgePoints(id: string): Promise<KnowledgePoint[]> {
-  return request(`/questions/${encodeURIComponent(id)}/knowledge-points`);
+  return request(`/api/questions/${encodeURIComponent(id)}/knowledge-points`);
 }
 
 export async function updateQuestionKnowledgePoints(id: string, points: KnowledgePoint[]): Promise<void> {
-  await request(`/questions/${encodeURIComponent(id)}/knowledge-points`, {
+  await request(`/api/questions/${encodeURIComponent(id)}/knowledge-points`, {
     method: 'PUT',
     body: JSON.stringify(points),
   });
 }
 
 export async function fetchKnowledgePoints(): Promise<KnowledgePointFlatItem[]> {
-  return request('/knowledge-points');
+  return request('/api/knowledge-points');
 }
 
 export async function fetchKnowledgePointCounts(): Promise<Record<string, number>> {
-  return request('/knowledge-points/counts');
+  return request('/api/knowledge-points/counts');
 }
 
 export async function fetchQuestionAssets(id: string): Promise<QuestionAsset[]> {
-  return request(`/questions/${encodeURIComponent(id)}/assets`);
+  return request(`/api/questions/${encodeURIComponent(id)}/assets`);
 }
 
 export async function fetchSimilarQuestions(

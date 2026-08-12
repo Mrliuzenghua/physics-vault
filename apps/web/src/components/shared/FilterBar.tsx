@@ -54,8 +54,18 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
 
   const handleSearch = (event: React.KeyboardEvent) => {
     if (event.key === 'Enter') {
-      update({ query: keyword || undefined });
+      update({
+        query: keyword || undefined,
+        search_mode: keyword.trim() ? (filters.search_mode === 'browse' ? 'hybrid' : filters.search_mode) : 'browse',
+      });
     }
+  };
+
+  const submitSearch = () => {
+    update({
+      query: keyword || undefined,
+      search_mode: keyword.trim() ? (filters.search_mode === 'browse' ? 'hybrid' : filters.search_mode) : 'browse',
+    });
   };
 
   const clearAll = () => {
@@ -111,7 +121,7 @@ export default function FilterBar({ filters, onChange, facets }: Props) {
           />
           <button
             type="button"
-            onClick={() => update({ query: keyword || undefined })}
+            onClick={submitSearch}
             className="h-9 shrink-0 border-l border-[var(--color-border)] px-4 text-xs font-bold text-[var(--color-accent)] hover:bg-[var(--color-accent-light)]"
           >
             搜索

@@ -11,10 +11,10 @@ import QuestionCompactRow from '../components/shared/QuestionCompactRow';
 import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { useBasket } from '../hooks/useBasket';
-import { deleteQuestions, returnQuestionToReview, searchQuestions, updateQuestion } from '../services/questionApi';
+import { deleteQuestions, fetchFacets, returnQuestionToReview, searchQuestions, updateQuestion } from '../services/questionApi';
 import { batchMarkMistake, batchStarFavorites, batchUnmarkMistake } from '../services/favoritesApi';
 import { batchUpdateMetadata, fetchKnowledgePoints } from '../services/metadataApi';
-import type { KnowledgePointFlatItem, MetadataField, Question, SearchFilters } from '../types';
+import type { FilterFacets, KnowledgePointFlatItem, MetadataField, Question, SearchFilters } from '../types';
 import { addQuestionsToAiContext, readAiContextCache } from '../utils/aiContextCache';
 import LatexRenderer from '../components/render/LatexRenderer';
 import { loadCurrentLessonPackage } from '../services/lessonPackage';
@@ -179,6 +179,7 @@ export default function BrowsePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [knowledgePoints, setKnowledgePoints] = useState<KnowledgePointFlatItem[]>([]);
+  const [facets, setFacets] = useState<FilterFacets>();
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
@@ -214,8 +215,8 @@ export default function BrowsePage() {
 
   const filters: SearchFilters = useMemo(
     () => ({
-      search_mode: (searchParams.get('search_mode') as SearchFilters['search_mode']) || 'browse',
       query: searchParams.get('query') || undefined,
+      search_mode: (searchParams.get('search_mode') as SearchFilters['search_mode']) || (searchParams.get('query') ? 'hybrid' : 'browse'),
       year: searchParams.get('year') ? Number(searchParams.get('year')) : undefined,
       module: searchParams.get('module') || undefined,
       question_type: searchParams.get('question_type') || undefined,
@@ -273,6 +274,24 @@ export default function BrowsePage() {
       cancelled = true;
     };
   }, [filters, reloadToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetchFacets()
+      .then((data) => {
+        if (!cancelled) setFacets(data);
+      })
+      .catch(() => {
+        // Keep the filter bar usable with its built-in fallback if the facet
+        // endpoint is temporarily unavailable.
+        if (!cancelled) setFacets(undefined);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadToken]);
 
   useEffect(() => {
     let cancelled = false;
@@ -925,11 +944,11 @@ export default function BrowsePage() {
           </div>
         </aside>}
 
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-[#eef2f7] shadow-sm">
+        <section aria-label="题库内容" className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-[#eef2f7] shadow-sm">
           <div className="border-b border-[var(--color-border)] bg-white px-3 py-2 sm:px-4">
             {browseMode === 'questions' ? (
               <>
-                <FilterBar filters={filters} onChange={updateFilters} />
+                <FilterBar filters={filters} onChange={updateFilters} facets={facets} />
                 <div className="mt-2 flex flex-wrap items-center gap-2">
                   <button
                     type="button"
@@ -1134,7 +1153,7 @@ export default function BrowsePage() {
               </div>
             )}
           </div>
-        </main>
+        </section>
 
         {browseMode === 'questions' && <aside className="browse-quick-panel relative flex w-52 shrink-0 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-card)] shadow-[var(--shadow-card)]">
           <div className="border-b border-[var(--color-border)] px-4 py-4">
