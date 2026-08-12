@@ -7,6 +7,7 @@ const apiTarget = process.env.PHYSICS_API_TARGET || 'http://127.0.0.1:8000'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
+    manifest: true,
     rollupOptions: {
       output: {
         manualChunks(id) {
