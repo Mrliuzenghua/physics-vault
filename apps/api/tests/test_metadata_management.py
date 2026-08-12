@@ -269,7 +269,7 @@ def test_metadata_supports_three_ranked_knowledge_points_and_audits_change(tmp_p
     assert audit == ("knowledge_binding_normalization", "修复知识点绑定", 1)
 
 
-def test_knowledge_maintenance_repairs_high_confidence_wrong_label_without_self_confirmation(tmp_path: Path) -> None:
+def test_knowledge_maintenance_does_not_auto_replace_an_existing_label(tmp_path: Path) -> None:
     db_path = _database(tmp_path)
     service = MetadataManagementService(db_path)
     created = service.create_knowledge_points(
@@ -290,14 +290,14 @@ def test_knowledge_maintenance_repairs_high_confidence_wrong_label_without_self_
 
     diagnosis = result["items"][0]
     assert diagnosis["status"] == "suspected_mismatch"
-    assert diagnosis["auto_fix_safe"] is True
+    assert diagnosis["auto_fix_safe"] is False
     assert diagnosis["recommended_topic3_ids"] == [by_name["万有引力定律"]]
-    assert result["repair"]["audit_batch_id"]
+    assert result["repair"] is None
     with sqlite3.connect(db_path) as conn:
         repaired = conn.execute(
             "SELECT topic3_id, source FROM question_knowledge_points WHERE question_id='q-1'"
         ).fetchone()
-    assert repaired == (by_name["万有引力定律"], "agent_maintenance")
+    assert repaired == (by_name["折射定律"], "ai_metadata")
 
 
 def test_knowledge_search_uses_fuzzy_chinese_aliases(tmp_path: Path) -> None:

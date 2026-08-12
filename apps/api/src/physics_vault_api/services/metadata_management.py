@@ -21,7 +21,12 @@ MAX_KNOWLEDGE_POINTS = 100
 MAX_TAGS_PER_QUESTION = 20
 MAX_KNOWLEDGE_POINTS_PER_QUESTION = 3
 KNOWLEDGE_SUGGESTION_THRESHOLD = 18
-KNOWLEDGE_AUTO_FIX_THRESHOLD = 80
+# A knowledge binding changes search behaviour materially.  Keyword overlap is
+# useful for triage, but not enough to replace an existing teacher-facing
+# classification.  Automatic writes are therefore reserved for an entirely
+# missing binding with an almost exact match; corrections and extra secondary
+# points always remain review-only.
+KNOWLEDGE_AUTO_FIX_THRESHOLD = 95
 
 
 class MetadataManagementService:
@@ -260,10 +265,15 @@ class MetadataManagementService:
                 recommended_ids = strong_ids
             else:
                 recommended_ids = current_ids
+            # Do not turn a high keyword score into several speculative
+            # bindings.  For the narrow auto-fill case, retain only the best
+            # direct match.  Existing bindings are never overwritten here.
+            if status == "missing" and top_score >= KNOWLEDGE_AUTO_FIX_THRESHOLD and suggested_ids:
+                recommended_ids = [suggested_ids[0]]
             auto_fix_safe = (
-                status in {"missing", "suspected_mismatch", "incomplete"}
+                status == "missing"
                 and top_score >= KNOWLEDGE_AUTO_FIX_THRESHOLD
-                and bool(recommended_ids)
+                and len(recommended_ids) == 1
                 and recommended_ids != current_ids
             )
             item = {
