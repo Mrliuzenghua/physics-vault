@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SyntheticEvent } from 'react';
 import type { Figure } from '../../types';
 import { updateQuestionImage } from '../../services/assetsApi';
@@ -108,15 +108,39 @@ function ResizableStemFigure({
   const [loaded, setLoaded] = useState(false);
   const [broken, setBroken] = useState(false);
   const [activeSrc, setActiveSrc] = useState<string | null>(null);
+  const [loadRequested, setLoadRequested] = useState(false);
+  const figureRef = useRef<HTMLSpanElement>(null);
   const originalSrc = imageFileUrl(figure.local_path);
   const thumbnailSrc = thumbnailWidth ? imageThumbnailUrl(figure.local_path, thumbnailWidth) : null;
   const alignment = figure.display_align || 'center';
+
+  useEffect(() => {
+    const node = figureRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      setLoadRequested(true);
+      return;
+    }
+
+    setLoadRequested(false);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        setLoadRequested(true);
+        observer.disconnect();
+      },
+      { rootMargin: '240px 0px' },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [figure, originalSrc, thumbnailSrc]);
 
   useEffect(() => {
     setScale(loadScale(figure));
     setLoaded(false);
     setBroken(false);
     setActiveSrc(null);
+
+    if (!loadRequested) return;
 
     const candidates = [thumbnailSrc, originalSrc].filter((item, index, all): item is string => Boolean(item) && all.indexOf(item) === index);
     let cancelled = false;
@@ -145,7 +169,7 @@ function ResizableStemFigure({
     return () => {
       cancelled = true;
     };
-  }, [figure, originalSrc, thumbnailSrc]);
+  }, [figure, loadRequested, originalSrc, thumbnailSrc]);
 
   const updateScale = useCallback((nextScale: number) => {
     const safeScale = Math.min(100, Math.max(25, nextScale));
@@ -167,6 +191,7 @@ function ResizableStemFigure({
 
   return (
     <span
+      ref={figureRef}
       className={`group my-3 cursor-default ${compact ? 'flex max-w-full' : 'block'}`}
       style={compact ? { justifyContent: alignment === 'left' ? 'flex-start' : alignment === 'right' ? 'flex-end' : 'center' } : undefined}
       onClick={stopImageInteraction}
